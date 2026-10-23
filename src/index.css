@@ -1,0 +1,45 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+/* Custom sleek scrollbars */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #f8fafc;
+  border-radius: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f8fafc;
+}
+
+/* Custom Leaflet Tooltip & Popup Typography Overrides to prevent overlapping text */
+.custom-heat-tooltip.leaflet-tooltip {
+  white-space: normal !important;
+  line-height: 1.35 !important;
+  background: rgba(255, 255, 255, 0.98) !important;
+  border-radius: 12px !important;
+  border: 1px solid #cbd5e1 !important;
+  padding: 0 !important;
+  box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.2), 0 8px 10px -6px rgba(15, 23, 42, 0.1) !important;
+  color: #0f172a !important;
+  pointer-events: none;
+}
+
+.custom-heat-tooltip.leaflet-tooltip::before {
+  border-top-color: #ffffff !important;
+}
+
+.leaflet-tooltip-top.custom-heat-tooltip::before {
+  border-top-color: #ffffff !important;
+}
+

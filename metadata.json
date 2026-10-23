@@ -1,0 +1,6 @@
+{
+  "name": "Asset Temperature Monitoring",
+  "description": "Autonomous DTS agent for linear asset cable temperature monitoring, multi-TEPR file analysis, and critical location tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
