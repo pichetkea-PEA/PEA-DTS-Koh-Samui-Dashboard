@@ -292,14 +292,25 @@ async function fetchSharedServerDefaultDatabases(forceRefresh = false): Promise<
   sharedPublicDefaultDbPromise = (async () => {
     try {
       const res = await fetch('/api/public-default-databases');
-      if (res.ok) {
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
         const json = await res.json();
         if (json?.success && json?.data) {
           return json.data;
         }
       }
     } catch {
-      // ignore network error
+      // ignore network error and fall back to static CDN bundle
+    }
+    try {
+      const staticRes = await fetch('/data/public-default-databases.json');
+      if (staticRes.ok && (staticRes.headers.get('content-type') || '').includes('application/json')) {
+        const data = await staticRes.json();
+        if (data && (data.panel1 || data.panel2 || data.panel3)) {
+          return data;
+        }
+      }
+    } catch {
+      // ignore static fallback error
     }
     return null;
   })();
@@ -410,32 +421,53 @@ export async function fetchSectionDailyProfileForDate(date: string): Promise<boo
 
   fetchingDates.add(date);
   try {
-    const res = await fetch(`/api/section-daily-profile?date=${encodeURIComponent(date)}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data.success && Array.isArray(data.records) && data.records.length > 0) {
-        // Clear any stale entries for this date before inserting fresh records
-        Array.from(memorySectionProfileBySectionDate.keys()).forEach((k) => {
-          if (k.endsWith(`_${date}`)) {
-            memorySectionProfileBySectionDate.delete(k);
-          }
-        });
-        data.records.forEach((rec: OrgSectionHourlyRecord) => {
-          if (rec.maxFiberTempC == null || Number.isNaN(Number(rec.maxFiberTempC))) return;
-          memorySectionProfileRecords.push(rec);
-          const keySecDate = `${rec.sectionId}_${rec.date}`;
-          const list1 = memorySectionProfileBySectionDate.get(keySecDate) || [];
-          list1.push(rec);
-          memorySectionProfileBySectionDate.set(keySecDate, list1);
-
-          const keySecPhaseDate = `${rec.sectionId}_${rec.phase}_${rec.date}`;
-          const list2 = memorySectionProfileBySectionDate.get(keySecPhaseDate) || [];
-          list2.push(rec);
-          memorySectionProfileBySectionDate.set(keySecPhaseDate, list2);
-        });
-        notifyListeners();
-        return true;
+    let records: OrgSectionHourlyRecord[] | null = null;
+    try {
+      const res = await fetch(`/api/section-daily-profile?date=${encodeURIComponent(date)}`);
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const data = await res.json();
+        if (data?.success && Array.isArray(data.records) && data.records.length > 0) {
+          records = data.records;
+        }
       }
+    } catch {}
+
+    if (!records) {
+      try {
+        const staticRes = await fetch(`/data/section_profiles_by_date/${encodeURIComponent(date)}.json`);
+        if (staticRes.ok && (staticRes.headers.get('content-type') || '').includes('application/json')) {
+          const arr = await staticRes.json();
+          if (Array.isArray(arr) && arr.length > 0) {
+            records = arr;
+          } else if (arr?.records && Array.isArray(arr.records) && arr.records.length > 0) {
+            records = arr.records;
+          }
+        }
+      } catch {}
+    }
+
+    if (records && records.length > 0) {
+      // Clear any stale entries for this date before inserting fresh records
+      Array.from(memorySectionProfileBySectionDate.keys()).forEach((k) => {
+        if (k.endsWith(`_${date}`)) {
+          memorySectionProfileBySectionDate.delete(k);
+        }
+      });
+      records.forEach((rec: OrgSectionHourlyRecord) => {
+        if (rec.maxFiberTempC == null || Number.isNaN(Number(rec.maxFiberTempC))) return;
+        memorySectionProfileRecords.push(rec);
+        const keySecDate = `${rec.sectionId}_${rec.date}`;
+        const list1 = memorySectionProfileBySectionDate.get(keySecDate) || [];
+        list1.push(rec);
+        memorySectionProfileBySectionDate.set(keySecDate, list1);
+
+        const keySecPhaseDate = `${rec.sectionId}_${rec.phase}_${rec.date}`;
+        const list2 = memorySectionProfileBySectionDate.get(keySecPhaseDate) || [];
+        list2.push(rec);
+        memorySectionProfileBySectionDate.set(keySecPhaseDate, list2);
+      });
+      notifyListeners();
+      return true;
     }
   } catch (e) {
     console.warn(`Failed to fetch daily profile for date ${date}:`, e);
@@ -2350,8 +2382,51 @@ export function savePublicThreePanelLinksConfig(cfg: PublicThreePanelLinksConfig
   } catch (e) {}
 }
 
+export const KNOWN_DEFAULT_GOOGLE_DRIVE_FILES: Record<
+  string,
+  { fileId: string; fileName: string; format: 'csv' | 'xlsx' }
+> = {
+  // Folder 1: Daily Peak Temp
+  '1CMSH2f5hAl0N6F3PHhpr9mwStcX29kgS': {
+    fileId: '1Z7Sy8SEajFuqvfZJkTtBbV0fXEBZHD6N',
+    fileName: 'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-18 (1).xlsx',
+    format: 'xlsx',
+  },
+  // Folder 2: 4-Circuit Power Record
+  '1jqS95Z-nF1SivlJFuka8CcIKiyFBMrZ6': {
+    fileId: '1TnB2X_ctCOsFCQ_4oBJfNMTsilSXmFP-',
+    fileName: 'Daily_Maximum_Power_Consumption_Database_Updated_2026-09-30_to_2026-10-18.csv',
+    format: 'csv',
+  },
+  // Folder 3: 24-Hour Section Profile
+  '15rgLYl3V7sqPDNPY8zOLEz9eDBtZLj2_': {
+    fileId: '1cZTbNwPPL9rom44BZIyI_f_m1mSyHYwK',
+    fileName: 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-18.xlsx',
+    format: 'xlsx',
+  },
+};
+
+export function formatErrorMessage(err: any): string {
+  if (!err) return '';
+  if (typeof err === 'string') return err;
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object') {
+    if (typeof err.message === 'string') return err.message;
+    if (typeof err.error === 'string') return err.error;
+    if (typeof err.error?.message === 'string') return err.error.message;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
+}
+
 /**
- * Fetch remote database file from Google Sheet, Google Drive, or direct URL via server proxy
+ * Fetch remote database file from Google Sheet, Google Drive, or direct URL
+ * Supports direct browser download from drive.usercontent.google.com (CORS *) for static deployments (Vercel)
+ * with server proxy fallback.
  */
 export async function fetchRemoteDatabaseFile(
   url: string,
@@ -2363,75 +2438,201 @@ export async function fetchRemoteDatabaseFile(
   buffer?: ArrayBuffer;
   error?: string;
 }> {
+  const cleanUrl = (url || '').trim();
+  if (!cleanUrl) {
+    return { success: false, fileName: '', error: 'Missing remote URL' };
+  }
+
+  let directFileId = '';
+  let directFileName = '';
+
+  const folderMatch = cleanUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (folderMatch && folderMatch[1]) {
+    const fId = folderMatch[1];
+    if (KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId]) {
+      directFileId = KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId].fileId;
+      directFileName = KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId].fileName;
+    }
+  }
+
+  if (!directFileId) {
+    const fileMatch =
+      cleanUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
+      cleanUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+    if (fileMatch && fileMatch[1]) {
+      directFileId = fileMatch[1];
+      directFileName = preferredFormat === 'csv' ? 'remote_power_database.csv' : 'remote_database.xlsx';
+    }
+  }
+
+  // Strategy A: Try local/deployed server proxy endpoint (/api/fetch-shared-database) first if available
   try {
     const headers: Record<string, string> = {
-      'Accept': 'application/octet-stream, application/json',
+      Accept: 'application/octet-stream, application/json',
     };
     if (accessToken) {
       headers['Authorization'] = `Bearer ${accessToken}`;
     }
-    const res = await fetch(`/api/fetch-shared-database?url=${encodeURIComponent(url)}&format=${preferredFormat}&binary=1`, {
-      headers,
-    });
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      throw new Error(errJson.error || `Failed to fetch remote database file (HTTP ${res.status})`);
-    }
-
+    const res = await fetch(
+      `/api/fetch-shared-database?url=${encodeURIComponent(cleanUrl)}&format=${preferredFormat}&binary=1`,
+      { headers }
+    );
     const contentType = res.headers.get('content-type') || '';
-    let explicitName = '';
-    const rawHeaderName = res.headers.get('X-File-Name');
-    if (rawHeaderName) {
-      try { explicitName = decodeURIComponent(rawHeaderName); } catch {}
-    }
-    if (!explicitName) {
-      const disp = res.headers.get('content-disposition') || '';
-      const m = disp.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
-      if (m && m[1]) {
-        try { explicitName = decodeURIComponent(m[1]); } catch { explicitName = m[1]; }
+    if (res.ok && !contentType.includes('text/html') && !contentType.includes('text/plain')) {
+      let explicitName = directFileName;
+      const rawHeaderName = res.headers.get('X-File-Name');
+      if (rawHeaderName) {
+        try {
+          explicitName = decodeURIComponent(rawHeaderName);
+        } catch {}
       }
-    }
+      if (!explicitName) {
+        const disp = res.headers.get('content-disposition') || '';
+        const m = disp.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+        if (m && m[1]) {
+          try {
+            explicitName = decodeURIComponent(m[1]);
+          } catch {
+            explicitName = m[1];
+          }
+        }
+      }
 
-    // Direct binary stream (fastest, zero base64 decoding, native browser C++ buffer allocation)
-    if (!contentType.includes('application/json')) {
-      const buffer = await res.arrayBuffer();
-      return {
-        success: true,
-        fileName: explicitName || (preferredFormat === 'csv' ? 'remote_power_database.csv' : 'remote_database.xlsx'),
-        buffer,
-      };
-    }
-
-    // Fallback JSON base64 format (chunked conversion with UI yield)
-    const data = await res.json();
-    if (!data.success || !data.base64) {
-      throw new Error(data.error || 'No valid database binary received from remote server');
-    }
-    const binaryString = atob(data.base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    const CHUNK = 65536;
-    for (let i = 0; i < len; i += CHUNK) {
-      const end = Math.min(len, i + CHUNK);
-      for (let j = i; j < end; j++) {
-        bytes[j] = binaryString.charCodeAt(j);
+      if (!contentType.includes('application/json')) {
+        const buffer = await res.arrayBuffer();
+        if (buffer && buffer.byteLength > 100) {
+          return {
+            success: true,
+            fileName: explicitName || (preferredFormat === 'csv' ? 'remote_power_database.csv' : 'remote_database.xlsx'),
+            buffer,
+          };
+        }
+      } else {
+        const data = await res.json();
+        if (data?.success && data?.base64) {
+          const binaryString = atob(data.base64);
+          const len = binaryString.length;
+          const bytes = new Uint8Array(len);
+          const CHUNK = 65536;
+          for (let i = 0; i < len; i += CHUNK) {
+            const end = Math.min(len, i + CHUNK);
+            for (let j = i; j < end; j++) {
+              bytes[j] = binaryString.charCodeAt(j);
+            }
+            if (len > 2000000 && i % (CHUNK * 16) === 0) {
+              await new Promise((r) => setTimeout(r, 0));
+            }
+          }
+          return {
+            success: true,
+            fileName:
+              data.fileName ||
+              explicitName ||
+              (preferredFormat === 'csv' ? 'remote_power_database.csv' : 'remote_database.xlsx'),
+            buffer: bytes.buffer,
+          };
+        }
       }
-      if (len > 2000000 && i % (CHUNK * 16) === 0) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
     }
-    return {
-      success: true,
-      fileName: data.fileName || explicitName || (preferredFormat === 'csv' ? 'remote_power_database.csv' : 'remote_database.xlsx'),
-      buffer: bytes.buffer,
-    };
-  } catch (err: any) {
-    return {
-      success: false,
-      fileName: '',
-      error: err?.message || 'Failed to download or parse remote database link',
-    };
+  } catch {
+    // Proxy unavailable (e.g. static deployment on Vercel) — proceed to direct client download
   }
+
+  // Strategy B: Direct Google Drive usercontent download (CORS enabled: access-control-allow-origin: *)
+  if (directFileId) {
+    try {
+      const gdriveDirectUrl = `https://drive.usercontent.google.com/download?id=${directFileId}&export=download&confirm=t`;
+      const gRes = await fetch(gdriveDirectUrl);
+      if (gRes.ok) {
+        let explicitName = directFileName;
+        const disp = gRes.headers.get('content-disposition') || '';
+        const m = disp.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+        if (m && m[1]) {
+          try {
+            explicitName = decodeURIComponent(m[1]);
+          } catch {
+            explicitName = m[1];
+          }
+        }
+        const buffer = await gRes.arrayBuffer();
+        if (buffer && buffer.byteLength > 100) {
+          return {
+            success: true,
+            fileName: explicitName || directFileName || `remote_database.${preferredFormat}`,
+            buffer,
+          };
+        }
+      }
+    } catch (directErr) {
+      console.warn('Direct Google Drive usercontent download failed:', directErr);
+    }
+  }
+
+  // Strategy C: Direct Google Sheets export
+  const sheetsMatch = cleanUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (sheetsMatch && sheetsMatch[1]) {
+    try {
+      const sheetId = sheetsMatch[1];
+      const gidMatch = cleanUrl.match(/[#&?]gid=([0-9]+)/);
+      const gidQuery = gidMatch ? `&gid=${gidMatch[1]}` : '';
+      const sheetsUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=${preferredFormat}${gidQuery}`;
+      const sRes = await fetch(sheetsUrl);
+      if (sRes.ok) {
+        const buffer = await sRes.arrayBuffer();
+        if (buffer && buffer.byteLength > 100) {
+          return {
+            success: true,
+            fileName: `Google_Sheets_Database.${preferredFormat}`,
+            buffer,
+          };
+        }
+      }
+    } catch (sheetsErr) {
+      console.warn('Google Sheets direct export failed:', sheetsErr);
+    }
+  }
+
+  // Strategy D: Google Drive API v3 folder listing if OAuth accessToken is present
+  if (accessToken && folderMatch && folderMatch[1]) {
+    try {
+      const folderId = folderMatch[1];
+      const driveApiRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=%27${folderId}%27+in+parents+and+trashed%3Dfalse&fields=files(id%2Cname%2CmimeType)&orderBy=modifiedTime+desc`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (driveApiRes.ok) {
+        const driveData = await driveApiRes.json();
+        const candidate = driveData.files?.find(
+          (f: any) =>
+            f.name?.toLowerCase().endsWith('.' + preferredFormat) ||
+            f.name?.toLowerCase().endsWith('.xlsx') ||
+            f.name?.toLowerCase().endsWith('.csv')
+        );
+        if (candidate?.id) {
+          const downloadUrl = `https://drive.usercontent.google.com/download?id=${candidate.id}&export=download&confirm=t`;
+          const fileRes = await fetch(downloadUrl);
+          if (fileRes.ok) {
+            const buffer = await fileRes.arrayBuffer();
+            if (buffer && buffer.byteLength > 100) {
+              return {
+                success: true,
+                fileName: candidate.name,
+                buffer,
+              };
+            }
+          }
+        }
+      }
+    } catch (apiErr) {
+      console.warn('Google Drive API v3 direct listing failed:', apiErr);
+    }
+  }
+
+  return {
+    success: false,
+    fileName: '',
+    error: 'Unable to reach remote Google Drive file. Verify link sharing is set to "Anyone with the link".',
+  };
 }
 
 export interface PublicDataRefreshResult {
@@ -2493,7 +2694,10 @@ export async function syncAllPublicSharedTargetFolders(
         const p1Info: DataPanelSourceInfo = {
           ...(p1Cached.info || {}),
           sourceType: 'googledrive',
-          name: p1Cached.info?.name || p1Cached.config.databaseFileName || 'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-18 (1).xlsx',
+          name:
+            p1Cached.info?.name ||
+            p1Cached.config.databaseFileName ||
+            'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-18 (1).xlsx',
           remoteUrl: links.panel1Url,
           updatedAt: new Date().toISOString(),
           totalDates: p1Cached.config.totalDates,
@@ -2532,14 +2736,14 @@ export async function syncAllPublicSharedTargetFolders(
               recordCount: saveRes.config.totalRecords,
             });
           } else {
-            result.panel1 = { success: false, count: 0, error: saveRes.error };
+            result.panel1 = { success: false, count: 0, error: formatErrorMessage(saveRes.error) };
           }
         } else {
-          result.panel1 = { success: false, count: 0, error: fileRes.error };
+          result.panel1 = { success: false, count: 0, error: formatErrorMessage(fileRes.error) };
         }
       }
     } catch (e: any) {
-      result.panel1 = { success: false, count: 0, error: e?.message };
+      result.panel1 = { success: false, count: 0, error: formatErrorMessage(e) };
     }
   }
   onProgress?.(35, 'Shared Folder 1 Synchronized (100%)');
@@ -2574,7 +2778,9 @@ export async function syncAllPublicSharedTargetFolders(
         const p2Info: DataPanelSourceInfo = {
           ...(p2Cached.info || {}),
           sourceType: 'googledrive',
-          name: p2Cached.info?.name || 'Daily_Maximum_Power_Consumption_Database_Updated_2026-09-30_to_2026-10-18.csv',
+          name:
+            p2Cached.info?.name ||
+            'Daily_Maximum_Power_Consumption_Database_Updated_2026-09-30_to_2026-10-18.csv',
           remoteUrl: links.panel2Url,
           updatedAt: new Date().toISOString(),
           totalDates: p2Cached.peaks.length,
@@ -2616,14 +2822,14 @@ export async function syncAllPublicSharedTargetFolders(
               recordCount: saveRes.count,
             });
           } else {
-            result.panel2 = { success: false, count: 0, error: saveRes.error };
+            result.panel2 = { success: false, count: 0, error: formatErrorMessage(saveRes.error) };
           }
         } else {
-          result.panel2 = { success: false, count: 0, error: fileRes.error };
+          result.panel2 = { success: false, count: 0, error: formatErrorMessage(fileRes.error) };
         }
       }
     } catch (e: any) {
-      result.panel2 = { success: false, count: 0, error: e?.message };
+      result.panel2 = { success: false, count: 0, error: formatErrorMessage(e) };
     }
   }
   onProgress?.(65, 'Shared Folder 2 Synchronized (100%)');
@@ -2637,9 +2843,9 @@ export async function syncAllPublicSharedTargetFolders(
       const p3Cached = cachedServerDb?.panel3;
 
       try {
-        const fastRes = await fetch(`/api/fetch-shared-section-profiles?url=${encodeURIComponent(links.panel3Url)}`).then((r) =>
-          r.ok ? r.json() : null
-        );
+        const fastRes = await fetch(`/api/fetch-shared-section-profiles?url=${encodeURIComponent(links.panel3Url)}`).then(
+          (r) => (r.ok && (r.headers.get('content-type') || '').includes('application/json') ? r.json() : null)
+        ).catch(() => null);
 
         const recordsToUse: OrgSectionHourlyRecord[] =
           fastRes && fastRes.success && Array.isArray(fastRes.records) && fastRes.records.length > 0
@@ -2768,6 +2974,7 @@ export async function syncAllPublicSharedTargetFolders(
       if (!loadedFromFastEndpoint) {
         const fileRes = await fetchRemoteDatabaseFile(links.panel3Url, 'xlsx', accessToken);
         onProgress?.(78, 'Compiling hourly section profiles across 19 sections...');
+        await new Promise((r) => setTimeout(r, 40));
         if (fileRes.success && fileRes.buffer) {
           const saveRes = await saveUploadedSectionDailyProfileDatabase(fileRes.buffer, fileRes.fileName, (p) => {
             onProgress?.(Math.min(94, Math.round(78 + p * 16)), 'Compiling hourly section profiles...');
@@ -2788,14 +2995,14 @@ export async function syncAllPublicSharedTargetFolders(
               recordCount: saveRes.count,
             });
           } else {
-            result.panel3 = { success: false, count: 0, error: saveRes.error };
+            result.panel3 = { success: false, count: 0, error: formatErrorMessage(saveRes.error) };
           }
         } else {
-          result.panel3 = { success: false, count: 0, error: fileRes.error };
+          result.panel3 = { success: false, count: 0, error: formatErrorMessage(fileRes.error) };
         }
       }
     } catch (e: any) {
-      result.panel3 = { success: false, count: 0, error: e?.message };
+      result.panel3 = { success: false, count: 0, error: formatErrorMessage(e) };
     }
   }
   onProgress?.(97, 'Shared Folder 3 Synchronized (100%)');
@@ -2821,7 +3028,10 @@ export async function syncAllPublicSharedTargetFolders(
   if (result.success) {
     result.message = `Successfully loaded data from shared folders: ${successfulPanels.join(', ')}.`;
   } else {
-    const errorDetails = [result.panel1.error, result.panel2.error, result.panel3.error].filter(Boolean).join('; ');
+    const errorDetails = [result.panel1.error, result.panel2.error, result.panel3.error]
+      .filter(Boolean)
+      .map(formatErrorMessage)
+      .join('; ');
     result.message = `Unable to fetch from shared Google Drive links (${errorDetails || 'Network or access error'}). Current telemetry remains active.`;
   }
 
