@@ -19,6 +19,19 @@ export default defineConfig(() => {
             if (fs.existsSync(dbFile)) {
               fs.copyFileSync(dbFile, path.join(outDataDir, 'public-default-databases.json'));
             }
+            const downloadsSrc = path.resolve(__dirname, '.cache', 'drive_downloads');
+            const downloadsDest = path.join(outDataDir, 'drive_downloads');
+            if (fs.existsSync(downloadsSrc)) {
+              fs.mkdirSync(downloadsDest, { recursive: true });
+              const p1Bin = path.join(downloadsSrc, '98c845516aca8c4140f3e1590aa51d69.bin');
+              if (fs.existsSync(p1Bin)) {
+                fs.copyFileSync(p1Bin, path.join(downloadsDest, 'panel1_default.xlsx'));
+              }
+              const p2Bin = path.join(downloadsSrc, '594369a592fac336112ee9acc3230ac8.bin');
+              if (fs.existsSync(p2Bin)) {
+                fs.copyFileSync(p2Bin, path.join(downloadsDest, 'panel2_default.csv'));
+              }
+            }
             const profilesSrc = path.resolve(__dirname, '.cache', 'section_profiles_by_date');
             const profilesDest = path.join(outDataDir, 'section_profiles_by_date');
             if (fs.existsSync(profilesSrc)) {

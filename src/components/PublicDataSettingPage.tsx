@@ -42,6 +42,8 @@ import {
   savePublicThreePanelLinksConfig,
   saveAllCurrentPanelsAsDefaultDataSource,
   subscribeOrgDatabase,
+  syncPanel1FromFastEndpoint,
+  syncPanel2FromFastEndpoint,
   syncSectionProfileFromFastEndpoint,
 } from '../services/orgDatabaseStorage';
 import { PublicDashboardTab } from './PublicSidebar';
@@ -125,34 +127,43 @@ export const PublicDataSettingPage: React.FC<PublicDataSettingPageProps> = ({
     try {
       const preferredFmt = trimmed.toLowerCase().endsWith('.csv') ? 'csv' : 'xlsx';
       const fetched = await fetchRemoteDatabaseFile(trimmed, preferredFmt);
-      if (!fetched.success || !fetched.buffer) {
-        throw new Error(fetched.error || 'Could not download file from shared Google Drive link.');
+      if (fetched.success && fetched.buffer) {
+        const res = await saveUploadedOrgDatabase(fetched.buffer, fetched.fileName);
+        if (res.success && res.config.totalRecords > 0) {
+          const newInfo: DataPanelSourceInfo = {
+            sourceType: 'remote_link',
+            name: fetched.fileName,
+            remoteUrl: trimmed,
+            updatedAt: new Date().toISOString(),
+            totalDates: res.config.totalDates,
+            dateRange: res.config.dateRange,
+            recordCount: res.config.totalRecords,
+          };
+          savePanel1SourceInfo(newInfo);
+          setPanel1Info(newInfo);
+          onDatabaseUpdated(res.config);
+          setStatusP1({
+            type: 'success',
+            msg: `Saved & synced "${fetched.fileName}" (${res.config.totalDates} dates: ${res.config.dateRange.firstDate} to ${res.config.dateRange.latestDate}) → Now active for Daily Max Heat Map (2.1) & Yearly Comparison (2.4).`,
+          });
+          return true;
+        }
       }
 
-      const res = await saveUploadedOrgDatabase(fetched.buffer, fetched.fileName);
-      if (res.success && res.config.totalRecords > 0) {
-        const newInfo: DataPanelSourceInfo = {
-          sourceType: 'remote_link',
-          name: fetched.fileName,
-          remoteUrl: trimmed,
-          updatedAt: new Date().toISOString(),
-          totalDates: res.config.totalDates,
-          dateRange: res.config.dateRange,
-          recordCount: res.config.totalRecords,
-        };
-        savePanel1SourceInfo(newInfo);
-        setPanel1Info(newInfo);
-        onDatabaseUpdated(res.config);
+      const fastP1 = await syncPanel1FromFastEndpoint(trimmed);
+      if (fastP1 && fastP1.success) {
+        setPanel1Info(getPanel1SourceInfo());
+        onDatabaseUpdated(fastP1.config);
         setStatusP1({
           type: 'success',
-          msg: `Saved & synced "${fetched.fileName}" (${res.config.totalDates} dates: ${res.config.dateRange.firstDate} to ${res.config.dateRange.latestDate}) → Now active for Daily Max Heat Map (2.1) & Yearly Comparison (2.4).`,
+          msg: `Saved & synced "${fastP1.fileName}" (${fastP1.totalDates} dates: ${fastP1.dateRange.firstDate} to ${fastP1.dateRange.latestDate}) → Now active for Daily Max Heat Map (2.1) & Yearly Comparison (2.4).`,
         });
         return true;
-      } else {
-        throw new Error(
-          res.error || 'No valid Daily Peak Temperature records found in the shared file.'
-        );
       }
+
+      throw new Error(
+        fetched.error || 'Could not download file from shared Google Drive link.'
+      );
     } catch (err: any) {
       setStatusP1({
         type: 'error',
@@ -233,34 +244,43 @@ export const PublicDataSettingPage: React.FC<PublicDataSettingPageProps> = ({
     try {
       const preferredFmt = trimmed.toLowerCase().endsWith('.xlsx') ? 'xlsx' : 'csv';
       const fetched = await fetchRemoteDatabaseFile(trimmed, preferredFmt);
-      if (!fetched.success || !fetched.buffer) {
-        throw new Error(fetched.error || 'Could not download file from shared Google Drive link.');
+      if (fetched.success && fetched.buffer) {
+        const res = await saveUploadedPowerDatabase(fetched.buffer, fetched.fileName);
+        if (res.success && res.count > 0) {
+          const newInfo: DataPanelSourceInfo = {
+            sourceType: 'remote_link',
+            name: fetched.fileName,
+            remoteUrl: trimmed,
+            updatedAt: new Date().toISOString(),
+            totalDates: res.count,
+            dateRange: res.dateRange,
+            recordCount: res.count,
+          };
+          savePanel2SourceInfo(newInfo);
+          setPanel2Info(newInfo);
+          onDatabaseUpdated(getOrgDatabaseConfig());
+          setStatusP2({
+            type: 'success',
+            msg: `Saved & synced "${fetched.fileName}" (${res.count} dates: ${res.dateRange.firstDate} to ${res.dateRange.latestDate}) → Now active for Yearly Comparison (2.4).`,
+          });
+          return true;
+        }
       }
 
-      const res = await saveUploadedPowerDatabase(fetched.buffer, fetched.fileName);
-      if (res.success && res.count > 0) {
-        const newInfo: DataPanelSourceInfo = {
-          sourceType: 'remote_link',
-          name: fetched.fileName,
-          remoteUrl: trimmed,
-          updatedAt: new Date().toISOString(),
-          totalDates: res.count,
-          dateRange: res.dateRange,
-          recordCount: res.count,
-        };
-        savePanel2SourceInfo(newInfo);
-        setPanel2Info(newInfo);
+      const fastP2 = await syncPanel2FromFastEndpoint(trimmed);
+      if (fastP2 && fastP2.success) {
+        setPanel2Info(getPanel2SourceInfo());
         onDatabaseUpdated(getOrgDatabaseConfig());
         setStatusP2({
           type: 'success',
-          msg: `Saved & synced "${fetched.fileName}" (${res.count} dates: ${res.dateRange.firstDate} to ${res.dateRange.latestDate}) → Now active for Yearly Comparison (2.4).`,
+          msg: `Saved & synced "${fastP2.fileName}" (${fastP2.totalDates} dates: ${fastP2.dateRange.firstDate} to ${fastP2.dateRange.latestDate}) → Now active for Yearly Comparison (2.4).`,
         });
         return true;
-      } else {
-        throw new Error(
-          res.error || 'No valid Daily Maximum Power Consumption records found in the shared file.'
-        );
       }
+
+      throw new Error(
+        fetched.error || 'Could not download file from shared Google Drive link.'
+      );
     } catch (err: any) {
       setStatusP2({
         type: 'error',
@@ -504,7 +524,7 @@ export const PublicDataSettingPage: React.FC<PublicDataSettingPageProps> = ({
         </span>
       );
     }
-    if (type === 'remote_link') {
+    if (type === 'remote_link' || type === 'googledrive') {
       return (
         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-[10px] font-mono font-bold uppercase">
           <Globe className="w-3 h-3" /> Default Data Source (Shared Drive File)

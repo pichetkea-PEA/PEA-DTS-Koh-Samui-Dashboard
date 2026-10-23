@@ -2132,6 +2132,130 @@ export function savePanel3SourceInfo(info: DataPanelSourceInfo) {
   notifyListeners();
 }
 
+export async function syncPanel1FromFastEndpoint(url: string): Promise<{
+  success: boolean;
+  fileName: string;
+  totalDates: number;
+  recordCount: number;
+  dateRange: { firstDate: string; latestDate: string };
+  config: OrgDatabaseConfig;
+} | null> {
+  try {
+    const cachedDb = await fetchSharedServerDefaultDatabases(false);
+    const p1 = cachedDb?.panel1;
+    if (
+      p1 &&
+      Array.isArray(p1.records) &&
+      p1.records.length > 0 &&
+      p1.config &&
+      (url.includes('1CMSH2f5hAl0N6F3PHhpr9mwStcX29kgS') ||
+        url.includes('1Z7Sy8SEajFuqvfZJkTtBbV0fXEBZHD6N') ||
+        p1.info?.remoteUrl === url)
+    ) {
+      memoryConfig = p1.config;
+      memoryRecords = p1.records;
+      savedDefaultPanel1 = p1;
+      try {
+        localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
+      } catch {}
+      rebuildIndexes();
+      const fileName =
+        p1.info?.name ||
+        p1.config.databaseFileName ||
+        'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-18 (1).xlsx';
+      const info: DataPanelSourceInfo = {
+        sourceType: 'remote_link',
+        name: fileName,
+        remoteUrl: url,
+        updatedAt: new Date().toISOString(),
+        totalDates: p1.config.totalDates,
+        dateRange: p1.config.dateRange,
+        recordCount: p1.config.totalRecords || p1.records.length,
+      };
+      memoryPanel1Info = info;
+      try {
+        localStorage.setItem(STORAGE_KEY_PANEL1_INFO, JSON.stringify(info));
+      } catch {}
+      notifyListeners();
+      return {
+        success: true,
+        fileName,
+        totalDates: info.totalDates,
+        recordCount: info.recordCount,
+        dateRange: info.dateRange,
+        config: p1.config,
+      };
+    }
+  } catch (e) {
+    console.warn('Fast Panel 1 sync warning:', e);
+  }
+  return null;
+}
+
+export async function syncPanel2FromFastEndpoint(url: string): Promise<{
+  success: boolean;
+  fileName: string;
+  totalDates: number;
+  recordCount: number;
+  dateRange: { firstDate: string; latestDate: string };
+} | null> {
+  try {
+    const cachedDb = await fetchSharedServerDefaultDatabases(false);
+    const p2 = cachedDb?.panel2;
+    if (
+      p2 &&
+      Array.isArray(p2.peaks) &&
+      p2.peaks.length > 0 &&
+      (url.includes('1jqS95Z-nF1SivlJFuka8CcIKiyFBMrZ6') ||
+        url.includes('1TnB2X_ctCOsFCQ_4oBJfNMTsilSXmFP-') ||
+        p2.info?.remoteUrl === url)
+    ) {
+      memoryPowerPeaksOnly.clear();
+      p2.peaks.forEach((pk: CircuitDailyPeakPower) => {
+        memoryPowerPeaksOnly.set(pk.date, pk);
+        memoryCircuitPeaksByDate.set(pk.date, pk);
+      });
+      savedDefaultPanel2 = p2;
+      try {
+        localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2.peaks));
+      } catch {}
+      rebuildIndexes();
+      const sortedDates = p2.peaks.map((p: CircuitDailyPeakPower) => p.date).sort();
+      const fileName =
+        p2.info?.name ||
+        'Daily_Maximum_Power_Consumption_Database_Updated_2026-09-30_to_2026-10-18.csv';
+      const dateRange = p2.info?.dateRange || {
+        firstDate: sortedDates[0] || '2025-07-01',
+        latestDate: sortedDates[sortedDates.length - 1] || '2026-10-18',
+      };
+      const info: DataPanelSourceInfo = {
+        sourceType: 'remote_link',
+        name: fileName,
+        remoteUrl: url,
+        updatedAt: new Date().toISOString(),
+        totalDates: p2.peaks.length,
+        dateRange,
+        recordCount: p2.peaks.length,
+      };
+      memoryPanel2Info = info;
+      try {
+        localStorage.setItem(STORAGE_KEY_PANEL2_INFO, JSON.stringify(info));
+      } catch {}
+      notifyListeners();
+      return {
+        success: true,
+        fileName,
+        totalDates: p2.peaks.length,
+        recordCount: p2.peaks.length,
+        dateRange,
+      };
+    }
+  } catch (e) {
+    console.warn('Fast Panel 2 sync warning:', e);
+  }
+  return null;
+}
+
 export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
   success: boolean;
   fileName: string;
@@ -2140,23 +2264,51 @@ export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
   dateRange: { firstDate: string; latestDate: string };
 } | null> {
   try {
-    const fastRes = await fetch(`/api/fetch-shared-section-profiles?url=${encodeURIComponent(url)}`).then((r) =>
-      r.ok ? r.json() : null
-    );
-    if (fastRes && fastRes.success && Array.isArray(fastRes.records) && fastRes.records.length > 0) {
-      memorySectionProfileRecords = fastRes.records;
-      if (Array.isArray(fastRes.allDates) && fastRes.allDates.length > 0) {
-        memorySectionProfileAllDates = fastRes.allDates;
-        memorySectionProfileDates = [...fastRes.allDates];
+    const fastRes = await fetch(`/api/fetch-shared-section-profiles?url=${encodeURIComponent(url)}`)
+      .then((r) => (r.ok && (r.headers.get('content-type') || '').includes('application/json') ? r.json() : null))
+      .catch(() => null);
+
+    const cachedDb = await fetchSharedServerDefaultDatabases(false);
+    const p3Cached = cachedDb?.panel3;
+
+    const recordsToUse: OrgSectionHourlyRecord[] =
+      fastRes && fastRes.success && Array.isArray(fastRes.records) && fastRes.records.length > 0
+        ? fastRes.records
+        : p3Cached && Array.isArray(p3Cached.records) && p3Cached.records.length > 0
+          ? p3Cached.records
+          : [];
+
+    const allDatesToUse: string[] =
+      fastRes && Array.isArray(fastRes.allDates) && fastRes.allDates.length > 0
+        ? fastRes.allDates
+        : p3Cached && Array.isArray(p3Cached.allDates) && p3Cached.allDates.length > 0
+          ? p3Cached.allDates
+          : p3Cached && Array.isArray(p3Cached.dates) && p3Cached.dates.length > 0
+            ? p3Cached.dates
+            : [];
+
+    if (recordsToUse.length > 0) {
+      memorySectionProfileRecords = recordsToUse;
+      if (allDatesToUse.length > 0) {
+        memorySectionProfileAllDates = allDatesToUse;
+        memorySectionProfileDates = [...allDatesToUse];
       }
       rebuildSectionProfileIndexes();
-      const totalDates = fastRes.totalDates || memorySectionProfileDates.length;
-      const dateRange = fastRes.dateRange || {
-        firstDate: memorySectionProfileDates[0] || '2025-07-01',
-        latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-18',
-      };
-      const recordCount = fastRes.recordCount || totalDates * 744;
-      const fileName = fastRes.fileName || 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-18.xlsx';
+      const totalDates =
+        fastRes?.totalDates ||
+        allDatesToUse.length ||
+        p3Cached?.info?.totalDates ||
+        memorySectionProfileDates.length;
+      const dateRange = fastRes?.dateRange ||
+        p3Cached?.info?.dateRange || {
+          firstDate: memorySectionProfileDates[0] || '2025-07-01',
+          latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-18',
+        };
+      const recordCount = fastRes?.recordCount || p3Cached?.info?.recordCount || totalDates * 744;
+      const fileName =
+        fastRes?.fileName ||
+        p3Cached?.info?.name ||
+        'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-18.xlsx';
 
       const info: DataPanelSourceInfo = {
         sourceType: 'remote_link',
@@ -2169,7 +2321,7 @@ export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
       };
       memoryPanel3Info = info;
       savedDefaultPanel3 = {
-        records: fastRes.records,
+        records: recordsToUse,
         allDates: memorySectionProfileDates,
         info,
       };
@@ -2538,7 +2690,31 @@ export async function fetchRemoteDatabaseFile(
     // Proxy unavailable (e.g. static deployment on Vercel) — proceed to direct client download
   }
 
-  // Strategy B: Direct Google Drive usercontent download (CORS enabled: access-control-allow-origin: *)
+  // Strategy B: Static CDN bundle fallback for known shared folders on Vercel
+  if (
+    directFileId === '1Z7Sy8SEajFuqvfZJkTtBbV0fXEBZHD6N' ||
+    directFileId === '1TnB2X_ctCOsFCQ_4oBJfNMTsilSXmFP-'
+  ) {
+    try {
+      const staticPath =
+        directFileId === '1Z7Sy8SEajFuqvfZJkTtBbV0fXEBZHD6N'
+          ? '/data/drive_downloads/panel1_default.xlsx'
+          : '/data/drive_downloads/panel2_default.csv';
+      const sRes = await fetch(staticPath);
+      if (sRes.ok && !(sRes.headers.get('content-type') || '').includes('text/html')) {
+        const buffer = await sRes.arrayBuffer();
+        if (buffer && buffer.byteLength > 100) {
+          return {
+            success: true,
+            fileName: directFileName,
+            buffer,
+          };
+        }
+      }
+    } catch {}
+  }
+
+  // Strategy C: Direct Google Drive usercontent download
   if (directFileId) {
     try {
       const gdriveDirectUrl = `https://drive.usercontent.google.com/download?id=${directFileId}&export=download&confirm=t`;
