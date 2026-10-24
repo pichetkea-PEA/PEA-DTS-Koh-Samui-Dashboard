@@ -101,10 +101,14 @@ import {
   parseUploadedDatabaseForUpdate,
   buildUpdatedMultiSheetDatabaseAsync,
   ParsedExistingDatabaseFile,
+  getLastUploadedMasterDatabase,
+  clearLastUploadedMasterDatabase,
   buildSectionDailyProfileDatabaseAsync,
   parseUploadedSectionDailyProfileDatabase,
   buildUpdatedSectionDailyProfileDatabaseAsync,
   ParsedExistingDailyProfileFile,
+  getLastUploadedProfileDatabase,
+  clearLastUploadedProfileDatabase,
   parseDatabaseFileOrBuffer,
   GeneratedDatabaseResult,
   MasterSectionPeakRecord,
@@ -1364,10 +1368,25 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
       }
 
       const parsed = parseDatabaseFileOrBuffer(bytes);
+      const parsedUrlForUpdate = parseUploadedDatabaseForUpdate(
+        bytes,
+        data.fileName || 'Google_Drive_Database.xlsx'
+      );
+      if (parsedUrlForUpdate.totalExistingRows > 0) {
+        setUploadedDbForUpdate(parsedUrlForUpdate);
+      }
+
       if (parsed.totalRecords === 0) {
         const textDecoder = new TextDecoder('utf-8');
         const textStr = textDecoder.decode(bytes);
         const parsedText = parseDatabaseFileOrBuffer(textStr);
+        const parsedTextForUpdate = parseUploadedDatabaseForUpdate(
+          textStr,
+          data.fileName || 'Google_Drive_Database.csv'
+        );
+        if (parsedTextForUpdate.totalExistingRows > 0) {
+          setUploadedDbForUpdate(parsedTextForUpdate);
+        }
         if (parsedText.totalRecords > 0) {
           setCsvDatabaseSource({
             filename: data.fileName || 'Google_Drive_Database.csv',
@@ -1426,13 +1445,21 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
           parsed = parseDatabaseFileOrBuffer(buffer);
         }
 
-        // Also parse for Option 2 (Update Existing Database File to Latest Date)
+        // Also parse for Option 2 (Update Existing Database File to Latest Date) and switch mode so existing records are preserved
         const parsedForUpdate = parseUploadedDatabaseForUpdate(
           buffer as string | ArrayBuffer,
           file.name
         );
         if (parsedForUpdate.totalExistingRows > 0) {
           setUploadedDbForUpdate(parsedForUpdate);
+          setDbManageMode('update-existing');
+          setPeakDbUploadStatus({
+            isUploading: false,
+            pct: 100,
+            fileName: file.name,
+            phaseText: `Upload Complete (100%): ${parsedForUpdate.totalExistingRows.toLocaleString()} records across ${parsedForUpdate.existingValidDates.length} days (${parsedForUpdate.firstDate} → ${parsedForUpdate.latestDate})`,
+            isComplete: true,
+          });
         }
 
         if (parsed.totalRecords === 0 && parsedForUpdate.totalExistingRows === 0) {
@@ -1606,22 +1633,12 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
     const uploadedFirstDate = uploadedDbForUpdate.firstDate;
     const uploadedLatestDate = uploadedDbForUpdate.latestDate;
 
+    // Strictly preserve all existing valid dates from the uploaded database file untouched
     const existingValidSet = new Set(uploadedDbForUpdate.existingValidDates);
-    const datesNeedingPower = new Set(uploadedDbForUpdate.datesWithMissingPower || []);
-    // Any date in the uploaded file that has missing power flow or missing conductor temp must be re-synced and updated
-    for (const d of datesNeedingPower) {
-      existingValidSet.delete(d);
-    }
 
     const allMissingSet = new Set<string>();
     const allExtraAfterLatestSet = new Set<string>();
     const allGapWithinSet = new Set<string>();
-
-    // Include dates that have missing power flow or missing conductor temp in the uploaded file
-    for (const d of datesNeedingPower) {
-      allMissingSet.add(d);
-      allGapWithinSet.add(d);
-    }
 
     // 1. Check all dates available in Target Folder up to folderLatestDate
     for (const folderDate of scannedTimeHierarchy.allDates) {
@@ -1739,21 +1756,12 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
 
     const uploadedFirstDate = uploadedProfileDbForUpdate.firstDate;
     const uploadedLatestDate = uploadedProfileDbForUpdate.latestDate;
+    // Strictly preserve all existing valid dates from the uploaded profile database file untouched
     const existingValidSet = new Set(uploadedProfileDbForUpdate.existingValidDates);
-    const datesNeedingPower = new Set(uploadedProfileDbForUpdate.datesWithMissingPower || []);
-    // Any date in the uploaded profile file that had missing or mock-up power flow must be re-synced and healed
-    for (const d of datesNeedingPower) {
-      existingValidSet.delete(d);
-    }
 
     const allMissingSet = new Set<string>();
     const allExtraAfterLatestSet = new Set<string>();
     const allGapWithinSet = new Set<string>();
-
-    for (const d of datesNeedingPower) {
-      allMissingSet.add(d);
-      allGapWithinSet.add(d);
-    }
 
     for (const folderDate of scannedTimeHierarchy.allDates) {
       if (folderLatestDate && folderDate > folderLatestDate) continue;
@@ -2301,9 +2309,21 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
         URL.revokeObjectURL(url);
       }
 
-      // Automatically clear uploaded file (in case of updating database only) and unnecessary memory cache:
-      setUploadedDbForUpdate(null);
-      setPeakDbUploadStatus(null);
+      // Keep the newly updated database in memory so subsequent batch updates preserve all existing + newly added records
+      const updatedDbForNextRun = parseUploadedDatabaseForUpdate(
+        uploadedDbForUpdate.fileFormat === 'csv' ? result.csvText : result.xlsxBuffer,
+        `${result.filenameBase}.${uploadedDbForUpdate.fileFormat}`
+      );
+      if (updatedDbForNextRun.totalExistingRows > 0) {
+        setUploadedDbForUpdate(updatedDbForNextRun);
+        setPeakDbUploadStatus({
+          isUploading: false,
+          pct: 100,
+          fileName: updatedDbForNextRun.fileName,
+          phaseText: `Updated & Ready (100%): ${updatedDbForNextRun.totalExistingRows.toLocaleString()} records across ${updatedDbForNextRun.existingValidDates.length} days (${updatedDbForNextRun.firstDate} → ${updatedDbForNextRun.latestDate})`,
+          isComplete: true,
+        });
+      }
       clearDriveContentCache();
 
       const updatedChartParsed = parseDatabaseFileOrBuffer(result.xlsxBuffer);
@@ -2337,6 +2357,9 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
     const tStart = performance.now();
     abortDatabaseGenRef.current = false;
 
+    const existingDb = uploadedDbForUpdate || getLastUploadedMasterDatabase();
+    const existingValidDateSet = new Set<string>(existingDb?.existingValidDates || []);
+
     const periodDates = scannedTimeHierarchy.allDates.filter((d) => {
       if (startDate && d < startDate) return false;
       if (endDate && d > endDate) return false;
@@ -2361,9 +2384,15 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
     }
     const calendarDatesInPeriod = Array.from(calendarDateSet).sort();
 
-    // Collect EVERY .TEPR file in the selected period (no subsampling — 100% of daily records must be read)
+    // Never overwrite or reset dates that already have valid records in an uploaded database file
+    const datesToCompileFromTepr = calendarDatesInPeriod.filter(
+      (d) => !existingValidDateSet.has(d)
+    );
+    const datesToCompileSet = new Set<string>(datesToCompileFromTepr);
+
+    // Collect EVERY .TEPR file in the dates needing compilation
     const allPeriodFiles = scannedFiles.filter(
-      (sf) => sf.dateMeta?.dateKey && calendarDateSet.has(sf.dateMeta.dateKey)
+      (sf) => sf.dateMeta?.dateKey && datesToCompileSet.has(sf.dateMeta.dateKey)
     );
 
     const estimatedRecords = Math.max(19, calendarDatesInPeriod.length * (6 * 3 + 13));
@@ -2415,11 +2444,11 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
     try {
       // =======================================================================
       // STAGE 1: Fast Parallel Raw .TEPR File Reading Across Selected Period
-      // Reads EVERY .TEPR record in each day (zero subsampling) to capture true
-      // daily Max, Min, Average, DOF, and exact Timestamp (including delayed
-      // thermal emission through XLPE insulation to outer fiber optic sensor).
+      // Only resets dates not already present in an uploaded database file.
       // =======================================================================
-      resetMasterSummaryForDates(calendarDatesInPeriod);
+      if (datesToCompileFromTepr.length > 0) {
+        resetMasterSummaryForDates(datesToCompileFromTepr);
+      }
 
       const driveFilesMap = new Map<string, DriveFile>();
       if (driveFiles) {
@@ -2657,7 +2686,8 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
             calculationPct: calcPct,
             currentSheetName: `Calculating Sheet ${info.sectionIndex}/${info.totalSections}: ${info.sheetName} (${info.sectionName})`,
           }));
-        }
+        },
+        existingDb
       );
 
       const elapsed = Math.max(1, Math.round((performance.now() - tStart) / 1000));
@@ -2723,6 +2753,9 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
     const tStart = performance.now();
     abortDatabaseGenRef.current = false;
 
+    const existingProfileDb = uploadedProfileDbForUpdate || getLastUploadedProfileDatabase();
+    const existingProfileDateSet = new Set<string>(existingProfileDb?.existingValidDates || []);
+
     const periodDates = scannedTimeHierarchy.allDates.filter((d) => {
       if (startDate && d < startDate) return false;
       if (endDate && d > endDate) return false;
@@ -2746,8 +2779,13 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
     }
     const calendarDatesInPeriod = Array.from(calendarDateSet).sort();
 
+    const profileDatesToCompile = calendarDatesInPeriod.filter(
+      (d) => !existingProfileDateSet.has(d)
+    );
+    const profileDatesToCompileSet = new Set<string>(profileDatesToCompile);
+
     const allPeriodFiles = scannedFiles.filter(
-      (sf) => sf.dateMeta?.dateKey && calendarDateSet.has(sf.dateMeta.dateKey)
+      (sf) => sf.dateMeta?.dateKey && profileDatesToCompileSet.has(sf.dateMeta.dateKey)
     );
 
     const estimatedRecords = Math.max(19 * 24, calendarDatesInPeriod.length * 19 * 24);
@@ -2810,7 +2848,9 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
         }
       }
 
-      resetMasterSummaryForDates(calendarDatesInPeriod);
+      if (profileDatesToCompile.length > 0) {
+        resetMasterSummaryForDates(profileDatesToCompile);
+      }
 
       const driveFilesMap = new Map<string, DriveFile>();
       if (driveFiles) {
@@ -3114,7 +3154,8 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
             calculationPct: calcPct,
             currentSheetName: `Calculating Hourly Profile Sheet ${info.sectionIndex}/${info.totalSections}: ${info.sheetName} (${info.sectionName})`,
           }));
-        }
+        },
+        existingProfileDb
       );
 
       const elapsed = Math.max(1, Math.round((performance.now() - tStart) / 1000));
@@ -3594,9 +3635,21 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
         URL.revokeObjectURL(url);
       }
 
-      // Automatically clear uploaded profile file (in case of updating database only) and unnecessary memory cache:
-      setUploadedProfileDbForUpdate(null);
-      setProfileDbUploadStatus(null);
+      // Keep the newly updated profile database in memory so subsequent batch updates preserve all existing + newly added records
+      const updatedProfileForNextRun = parseUploadedSectionDailyProfileDatabase(
+        uploadedProfileDbForUpdate.fileFormat === 'csv' ? result.csvText : result.xlsxBuffer,
+        `${result.filenameBase}.${uploadedProfileDbForUpdate.fileFormat}`
+      );
+      if (updatedProfileForNextRun.totalExistingRows > 0) {
+        setUploadedProfileDbForUpdate(updatedProfileForNextRun);
+        setProfileDbUploadStatus({
+          isUploading: false,
+          pct: 100,
+          fileName: updatedProfileForNextRun.fileName,
+          phaseText: `Updated & Ready (100%): ${updatedProfileForNextRun.totalExistingRows.toLocaleString()} hourly records across ${updatedProfileForNextRun.existingValidDates.length} valid days (${updatedProfileForNextRun.firstDate} → ${updatedProfileForNextRun.latestDate})`,
+          isComplete: true,
+        });
+      }
       clearDriveContentCache();
 
       showNotification(
@@ -4828,6 +4881,7 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
                     onClick={() => {
                       setUploadedDbForUpdate(null);
                       setPeakDbUploadStatus(null);
+                      clearLastUploadedMasterDatabase();
                     }}
                     className="px-3 py-2.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-all cursor-pointer"
                   >
@@ -5443,6 +5497,7 @@ export const SectionAnalyzingPage: React.FC<SectionAnalyzingPageProps> = ({
                       onClick={() => {
                         setUploadedProfileDbForUpdate(null);
                         setProfileDbUploadStatus(null);
+                        clearLastUploadedProfileDatabase();
                       }}
                       className="px-3 py-2.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-all cursor-pointer"
                     >

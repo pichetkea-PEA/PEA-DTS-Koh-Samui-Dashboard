@@ -2414,6 +2414,61 @@ function finalizeSectionDailyProfileWorkbookAndCsv(
   };
 }
 
+let lastUploadedMasterDatabase: ParsedExistingDatabaseFile | null = null;
+let lastUploadedProfileDatabase: ParsedExistingDailyProfileFile | null = null;
+
+export function getLastUploadedMasterDatabase(): ParsedExistingDatabaseFile | null {
+  return lastUploadedMasterDatabase;
+}
+
+export function clearLastUploadedMasterDatabase(): void {
+  lastUploadedMasterDatabase = null;
+}
+
+export function getLastUploadedProfileDatabase(): ParsedExistingDailyProfileFile | null {
+  return lastUploadedProfileDatabase;
+}
+
+export function clearLastUploadedProfileDatabase(): void {
+  lastUploadedProfileDatabase = null;
+}
+
+function hasExistingMasterRowData(row?: DatabaseSheetRow | null): boolean {
+  if (!row) return false;
+  if (typeof row.Max_Fiber_Temp_C === 'number' && row.Max_Fiber_Temp_C > 0) return true;
+  if (typeof row.IEC_Est_Max_Conductor_C === 'number' && row.IEC_Est_Max_Conductor_C > 0) return true;
+  for (const [k, v] of Object.entries(row)) {
+    if ((k.startsWith('Tf_DOF_') || k.startsWith('Tc_DOF_')) && typeof v === 'number' && v > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasExistingProfileRowData(row?: SectionDailyProfileRow | null): boolean {
+  if (!row) return false;
+  if (typeof row.Section_Max_Tf_C === 'number' && row.Section_Max_Tf_C > 0) return true;
+  if (typeof row.Section_Max_Tc_C === 'number' && row.Section_Max_Tc_C > 0) return true;
+  for (const [k, v] of Object.entries(row)) {
+    if ((k.startsWith('Tf_DOF_') || k.startsWith('Tc_DOF_')) && typeof v === 'number' && v > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizePhaseCode(rawPhase: any, category: 'land' | 'submarine'): string {
+  if (category === 'submarine') return 'SM';
+  const cleaned = String(rawPhase || '')
+    .replace(/^Phase\s+/i, '')
+    .trim();
+  if (/^A$/i.test(cleaned)) return 'A';
+  if (/^B$/i.test(cleaned)) return 'B';
+  if (/^C$/i.test(cleaned)) return 'C';
+  if (/^(SM|Submarine|CH\s*3)/i.test(cleaned)) return 'SM';
+  return cleaned || 'A';
+}
+
 export async function buildSectionDailyProfileDatabaseAsync(
   startDate?: string,
   endDate?: string,
@@ -2425,16 +2480,59 @@ export async function buildSectionDailyProfileDatabaseAsync(
     sectionName: string;
     sheetName: string;
     recordsBuilt: number;
-  }) => void
+  }) => void,
+  existingDb?: ParsedExistingDailyProfileFile | null
 ): Promise<GeneratedDatabaseResult> {
   const store = getMasterSectionSummary();
-  const sortedDates = resolveDatabaseSortedDates(store, startDate, endDate);
+  const activeExistingDb = existingDb ?? lastUploadedProfileDatabase;
+  const baseSortedDates = resolveDatabaseSortedDates(store, startDate, endDate);
+  const allDatesSet = new Set<string>(baseSortedDates);
+  if (activeExistingDb) {
+    for (const d of activeExistingDb.allRowDates) {
+      if (!endDate || d <= endDate) allDatesSet.add(d);
+    }
+    for (const d of activeExistingDb.existingValidDates) {
+      if (!endDate || d <= endDate) allDatesSet.add(d);
+    }
+  }
+  const sortedDates = Array.from(allDatesSet).sort();
   const rowsBySection = new Map<string, SectionDailyProfileRow[]>();
   let cumulativeRecords = 0;
 
   for (let i = 0; i < CIRCUIT_3_SECTIONS.length; i++) {
     const sec = CIRCUIT_3_SECTIONS[i];
-    const secRows = computeSectionDailyProfileRows(sec, sortedDates, store, powerSummariesByDate);
+    const existingRows = activeExistingDb?.rowsBySection.get(sec.sectionId) || [];
+    const existingRowMap = new Map<string, SectionDailyProfileRow>();
+    const existingValidDatesInSec = new Set<string>();
+    for (const er of existingRows) {
+      if (endDate && er.Date > endDate) continue;
+      const hNum = extractHourNumberFromTime(er.Time);
+      const normPh = normalizePhaseCode(er.Phase, sec.category);
+      existingRowMap.set(`${er.Date}_${hNum}_${normPh}`, er);
+      if (hasExistingProfileRowData(er)) {
+        existingValidDatesInSec.add(er.Date);
+      }
+    }
+
+    const datesToCompute = sortedDates.filter((d) => !existingValidDatesInSec.has(d));
+    const computedRows = computeSectionDailyProfileRows(sec, datesToCompute, store, powerSummariesByDate);
+
+    for (const nr of computedRows) {
+      const hNum = extractHourNumberFromTime(nr.Time);
+      const normPh = normalizePhaseCode(nr.Phase, sec.category);
+      const key = `${nr.Date}_${hNum}_${normPh}`;
+      const prev = existingRowMap.get(key);
+      if (!prev || !hasExistingProfileRowData(prev)) {
+        existingRowMap.set(key, nr);
+      }
+    }
+
+    const secRows = Array.from(existingRowMap.values()).sort((a, b) => {
+      if (a.Date !== b.Date) return a.Date.localeCompare(b.Date);
+      if (a.Time !== b.Time) return a.Time.localeCompare(b.Time);
+      return (a.Phase || '').localeCompare(b.Phase || '');
+    });
+
     rowsBySection.set(sec.sectionId, secRows);
     cumulativeRecords += secRows.length;
 
@@ -2499,14 +2597,52 @@ function resolveDatabaseSortedDates(
 export function buildMultiSheetDatabase(
   startDate?: string,
   endDate?: string,
-  powerSummariesByDate?: Map<string, DailyPowerSummary>
+  powerSummariesByDate?: Map<string, DailyPowerSummary>,
+  existingDb?: ParsedExistingDatabaseFile | null
 ): GeneratedDatabaseResult {
   const store = getMasterSectionSummary();
-  const sortedDates = resolveDatabaseSortedDates(store, startDate, endDate);
+  const activeExistingDb = existingDb ?? lastUploadedMasterDatabase;
+  const baseSortedDates = resolveDatabaseSortedDates(store, startDate, endDate);
+  const allDatesSet = new Set<string>(baseSortedDates);
+  if (activeExistingDb) {
+    for (const d of activeExistingDb.allRowDates) {
+      if (!endDate || d <= endDate) allDatesSet.add(d);
+    }
+    for (const d of activeExistingDb.existingValidDates) {
+      if (!endDate || d <= endDate) allDatesSet.add(d);
+    }
+  }
+  const sortedDates = Array.from(allDatesSet).sort();
   const rowsBySection = new Map<string, DatabaseSheetRow[]>();
 
   for (const sec of CIRCUIT_3_SECTIONS) {
-    const secRows = computeSectionRowsForDatabase(sec, sortedDates, store, powerSummariesByDate);
+    const existingRows = activeExistingDb?.rowsBySection.get(sec.sectionId) || [];
+    const rowMap = new Map<string, DatabaseSheetRow>();
+    const existingValidDatesInSec = new Set<string>();
+    for (const er of existingRows) {
+      if (endDate && er.Date > endDate) continue;
+      const normPh = normalizePhaseCode(er.Phase, sec.category);
+      rowMap.set(`${er.Date}_${normPh}`, er);
+      if (hasExistingMasterRowData(er)) {
+        existingValidDatesInSec.add(er.Date);
+      }
+    }
+
+    const datesToCompute = sortedDates.filter((d) => !existingValidDatesInSec.has(d));
+    const computedRows = computeSectionRowsForDatabase(sec, datesToCompute, store, powerSummariesByDate);
+    for (const nr of computedRows) {
+      const normPh = normalizePhaseCode(nr.Phase, sec.category);
+      const key = `${nr.Date}_${normPh}`;
+      const prev = rowMap.get(key);
+      if (!prev || !hasExistingMasterRowData(prev)) {
+        rowMap.set(key, nr);
+      }
+    }
+
+    const secRows = Array.from(rowMap.values()).sort((a, b) => {
+      if (a.Date !== b.Date) return a.Date.localeCompare(b.Date);
+      return a.Phase.localeCompare(b.Phase);
+    });
     rowsBySection.set(sec.sectionId, secRows);
   }
 
@@ -2528,16 +2664,54 @@ export async function buildMultiSheetDatabaseAsync(
     sectionName: string;
     sheetName: string;
     recordsBuilt: number;
-  }) => void
+  }) => void,
+  existingDb?: ParsedExistingDatabaseFile | null
 ): Promise<GeneratedDatabaseResult> {
   const store = getMasterSectionSummary();
-  const sortedDates = resolveDatabaseSortedDates(store, startDate, endDate);
+  const activeExistingDb = existingDb ?? lastUploadedMasterDatabase;
+  const baseSortedDates = resolveDatabaseSortedDates(store, startDate, endDate);
+  const allDatesSet = new Set<string>(baseSortedDates);
+  if (activeExistingDb) {
+    for (const d of activeExistingDb.allRowDates) {
+      if (!endDate || d <= endDate) allDatesSet.add(d);
+    }
+    for (const d of activeExistingDb.existingValidDates) {
+      if (!endDate || d <= endDate) allDatesSet.add(d);
+    }
+  }
+  const sortedDates = Array.from(allDatesSet).sort();
   const rowsBySection = new Map<string, DatabaseSheetRow[]>();
   let cumulativeRecords = 0;
 
   for (let i = 0; i < CIRCUIT_3_SECTIONS.length; i++) {
     const sec = CIRCUIT_3_SECTIONS[i];
-    const secRows = computeSectionRowsForDatabase(sec, sortedDates, store, powerSummariesByDate);
+    const existingRows = activeExistingDb?.rowsBySection.get(sec.sectionId) || [];
+    const rowMap = new Map<string, DatabaseSheetRow>();
+    const existingValidDatesInSec = new Set<string>();
+    for (const er of existingRows) {
+      if (endDate && er.Date > endDate) continue;
+      const normPh = normalizePhaseCode(er.Phase, sec.category);
+      rowMap.set(`${er.Date}_${normPh}`, er);
+      if (hasExistingMasterRowData(er)) {
+        existingValidDatesInSec.add(er.Date);
+      }
+    }
+
+    const datesToCompute = sortedDates.filter((d) => !existingValidDatesInSec.has(d));
+    const computedRows = computeSectionRowsForDatabase(sec, datesToCompute, store, powerSummariesByDate);
+    for (const nr of computedRows) {
+      const normPh = normalizePhaseCode(nr.Phase, sec.category);
+      const key = `${nr.Date}_${normPh}`;
+      const prev = rowMap.get(key);
+      if (!prev || !hasExistingMasterRowData(prev)) {
+        rowMap.set(key, nr);
+      }
+    }
+
+    const secRows = Array.from(rowMap.values()).sort((a, b) => {
+      if (a.Date !== b.Date) return a.Date.localeCompare(b.Date);
+      return a.Phase.localeCompare(b.Phase);
+    });
     rowsBySection.set(sec.sectionId, secRows);
     cumulativeRecords += secRows.length;
 
@@ -2610,6 +2784,7 @@ function normalizeDatabaseDateKey(raw: any): string {
 /**
  * Parses an existing uploaded CSV or Excel (.xlsx) database file, preserving all 19 section sheets
  * and identifying existing dates so missing/extra dates from the Target Folder can be appended/updated.
+ * Strictly keeps all existing records and columns untouched without editing or purging any values.
  */
 export function parseUploadedDatabaseForUpdate(
   input: string | ArrayBuffer | Uint8Array,
@@ -2622,11 +2797,12 @@ export function parseUploadedDatabaseForUpdate(
 
   const validDatesSet = new Set<string>();
   const allDatesSet = new Set<string>();
-  const datesWithMissingPowerSet = new Set<string>();
   let totalExistingRows = 0;
   const validSectionIds = new Set(CIRCUIT_3_SECTIONS.map((s) => s.sectionId));
   const sectionMap = new Map(CIRCUIT_3_SECTIONS.map((s) => [s.sectionId, s]));
   const isCsv = fileName.toLowerCase().endsWith('.csv') || typeof input === 'string';
+  const store = getMasterSectionSummary();
+  if (!store.dofDailyPeaks) store.dofDailyPeaks = {};
 
   try {
     const rawRows: any[] = [];
@@ -2634,17 +2810,19 @@ export function parseUploadedDatabaseForUpdate(
     if (typeof input !== 'string') {
       const wb = XLSX.read(input, {
         type: 'array',
-        dense: true,
-        cellFormula: false,
-        cellHTML: false,
-        cellText: false,
       });
-      for (const sName of wb.SheetNames) {
+      wb.SheetNames.forEach((sName, sheetIdx) => {
         const sheet = wb.Sheets[sName];
         const sheetSecCandidate = sName
           .replace(/^(Sec_|Zone_|Section_|Sec\s+|Zone\s+)/i, '')
           .trim();
-        const sheetSecId = validSectionIds.has(sheetSecCandidate) ? sheetSecCandidate : '';
+        const fallbackSecId =
+          wb.SheetNames.length === CIRCUIT_3_SECTIONS.length
+            ? CIRCUIT_3_SECTIONS[sheetIdx]?.sectionId || ''
+            : '';
+        const sheetSecId = validSectionIds.has(sheetSecCandidate)
+          ? sheetSecCandidate
+          : fallbackSecId;
         const sheetRows = XLSX.utils.sheet_to_json<any>(sheet, { defval: '' });
         for (const sr of sheetRows) {
           if (sheetSecId) {
@@ -2652,14 +2830,23 @@ export function parseUploadedDatabaseForUpdate(
           }
           rawRows.push(sr);
         }
-      }
+      });
     } else {
       const lines = input.split(/\r?\n/);
       let headers: string[] = [];
+      let currentSheetSecId = '';
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
-        if (!line || line.startsWith('#')) continue;
+        if (!line) continue;
+        if (line.startsWith('#')) {
+          const m = line.match(/SHEET:\s*(?:Sec|Zone)?\s*([0-9.]+)/i);
+          if (m && validSectionIds.has(m[1])) {
+            currentSheetSecId = m[1];
+            headers = [];
+          }
+          continue;
+        }
 
         const parts = splitCsvLineRespectingQuotes(line).map((p) =>
           p.replace(/^"|"$/g, '').trim()
@@ -2677,7 +2864,10 @@ export function parseUploadedDatabaseForUpdate(
         }
 
         if (headers.length > 0 && parts.length >= 5) {
-          const rowObj: Record<string, any> = { _colValues: parts };
+          const rowObj: Record<string, any> = {
+            _colValues: parts,
+            _sheetSecId: currentSheetSecId,
+          };
           headers.forEach((h, idx) => {
             rowObj[h] = parts[idx] ?? '';
           });
@@ -2711,10 +2901,10 @@ export function parseUploadedDatabaseForUpdate(
       const dateKey = normalizeDatabaseDateKey(r.Date || r.date || r.dateKey || colVals[3] || '');
       if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
 
-      const rawPhase = String(
-        r.Phase || r.phase || colVals[4] || (secInfo.category === 'land' ? 'A' : 'SM')
-      ).trim();
-      const phase = rawPhase.replace(/^Phase\s+/i, '').trim() || (secInfo.category === 'land' ? 'A' : 'SM');
+      const phase = normalizePhaseCode(
+        r.Phase || r.phase || colVals[4] || (secInfo.category === 'land' ? 'A' : 'SM'),
+        secInfo.category
+      );
 
       // Extract any per-DOF columns (`Tf_DOF_*`, `Tc_DOF_*`, `Time_DOF_*`) present in the uploaded sheet
       const distinctDofs = getSectionDistinctDofs(secInfo);
@@ -2767,7 +2957,7 @@ export function parseUploadedDatabaseForUpdate(
         );
         if (tfCell === '') {
           for (const [dNum, v] of parsedRawTfByDof.entries()) {
-            if (Math.abs(dNum - dof) < 0.25) {
+            if (Math.abs(dNum - dof) < 0.6) {
               tfCell = v;
               break;
             }
@@ -2779,7 +2969,7 @@ export function parseUploadedDatabaseForUpdate(
         );
         if (tcCell === '') {
           for (const [dNum, v] of parsedRawTcByDof.entries()) {
-            if (Math.abs(dNum - dof) < 0.25) {
+            if (Math.abs(dNum - dof) < 0.6) {
               tcCell = v;
               break;
             }
@@ -2789,12 +2979,23 @@ export function parseUploadedDatabaseForUpdate(
         dofValuesMap[tfCol] = tfCell;
         dofValuesMap[tcCol] = tcCell;
         for (const [dNum, tStr] of parsedRawTimeByDof.entries()) {
-          if (Math.abs(dNum - dof) < 0.25) {
+          if (Math.abs(dNum - dof) < 0.6) {
             dofValuesMap[`Time_DOF_${dofKey}m`] = tStr;
             break;
           }
         }
-        if (typeof tfCell === 'number' && tfCell > 0) dofTfNums.push(tfCell);
+        if (typeof tfCell === 'number' && tfCell > 0) {
+          dofTfNums.push(tfCell);
+          const dofStoreKey = `${secInfo.sectionId}_${phase}_${dateKey}_${dofKey}`;
+          if (!store.dofDailyPeaks[dofStoreKey]) {
+            store.dofDailyPeaks[dofStoreKey] = {
+              dof,
+              maxTf: tfCell,
+              timestamp: String(r.Timestamp_Max || r.Timestamp_Peak || r.Peak_Time || ''),
+              fileName: String(r.File_Name_Max || r.File_Name_Peak || r.Source_TEPR_File || ''),
+            };
+          }
+        }
         if (typeof tcCell === 'number' && tcCell > 0) dofTcNums.push(tcCell);
       }
 
@@ -2837,74 +3038,47 @@ export function parseUploadedDatabaseForUpdate(
       if (iecMaxCell === '' && dofTcNums.length > 0) {
         iecMaxCell = Number(Math.max(...dofTcNums).toFixed(2));
       }
-      let iecMinCell = toNumOrEmptyCell(r.IEC_Est_Min_Conductor_C);
-      let pTotalMaxCell = toNumOrEmptyCell(
+      const iecMinCell = toNumOrEmptyCell(r.IEC_Est_Min_Conductor_C);
+      const pTotalMaxCell = toNumOrEmptyCell(
         r.Power_Flow_During_Max_Total_MW ?? r.Power_Flow_During_Peak_Total_MW
       );
-      let pCkt3Cell = toNumOrEmptyCell(
+      const pCkt3Cell = toNumOrEmptyCell(
         r.Power_Flow_During_Max_Ckt3_MW ?? r.Power_Flow_During_Peak_Ckt3_MW ?? r.Power_Ckt3_MW
       );
-      let pCkt2Cell = toNumOrEmptyCell(
+      const pCkt2Cell = toNumOrEmptyCell(
         r.Power_Flow_During_Max_Ckt2_MW ?? r.Power_Flow_During_Peak_Ckt2_MW
       );
-      let pNktCell = toNumOrEmptyCell(
+      const pNktCell = toNumOrEmptyCell(
         r.Power_Flow_During_Max_33NKT_MW ?? r.Power_Flow_During_Peak_33NKT_MW
       );
-      let pOilCell = toNumOrEmptyCell(
+      const pOilCell = toNumOrEmptyCell(
         r.Power_Flow_During_Max_33Oil_MW ?? r.Power_Flow_During_Peak_33Oil_MW
       );
-      let pTotalMinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_Total_MW);
-      let pCkt3MinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_Ckt3_MW);
-      let pCkt2MinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_Ckt2_MW);
-      let pNktMinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_33NKT_MW);
-      let pOilMinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_33Oil_MW);
-
-      // Detect and purge synthetic/mock-up 4-circuit power flow values from previously exported databases
-      const hasSyntheticMaxPower = isSyntheticPowerValues(
-        dateKey,
-        pCkt3Cell,
-        pCkt2Cell,
-        pNktCell,
-        pOilCell
-      );
-      const hasSyntheticMinPower = isSyntheticPowerValues(
-        dateKey,
-        pCkt3MinCell,
-        pCkt2MinCell,
-        pNktMinCell,
-        pOilMinCell
-      );
-
-      if (hasSyntheticMaxPower || hasSyntheticMinPower) {
-        pTotalMaxCell = '';
-        pCkt3Cell = '';
-        pCkt2Cell = '';
-        pNktCell = '';
-        pOilCell = '';
-        pTotalMinCell = '';
-        pCkt3MinCell = '';
-        pCkt2MinCell = '';
-        pNktMinCell = '';
-        pOilMinCell = '';
-        iecMaxCell = '';
-        iecMinCell = '';
-        for (const k of Object.keys(dofValuesMap)) {
-          if (k.startsWith('Tc_DOF_')) {
-            dofValuesMap[k] = '';
-          }
-        }
-        datesWithMissingPowerSet.add(dateKey);
-      }
+      const pTotalMinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_Total_MW);
+      const pCkt3MinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_Ckt3_MW);
+      const pCkt2MinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_Ckt2_MW);
+      const pNktMinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_33NKT_MW);
+      const pOilMinCell = toNumOrEmptyCell(r.Power_Flow_During_Min_33Oil_MW);
 
       allDatesSet.add(dateKey);
-      if (typeof maxTfCell === 'number' && maxTfCell > 0) {
+      if (
+        (typeof maxTfCell === 'number' && maxTfCell > 0) ||
+        dofTfNums.length > 0 ||
+        (typeof iecMaxCell === 'number' && iecMaxCell > 0)
+      ) {
         validDatesSet.add(dateKey);
-        if (iecMaxCell === '' || pCkt3Cell === '') {
-          datesWithMissingPowerSet.add(dateKey);
+      }
+
+      // Preserve any extra original columns on `r` without internal keys
+      const cleanOriginalCols: Record<string, any> = {};
+      for (const [k, v] of Object.entries(r)) {
+        if (!k.startsWith('_')) {
+          cleanOriginalCols[k] = v;
         }
       }
 
       const sheetRow: DatabaseSheetRow = {
+        ...cleanOriginalCols,
         Sheet_Section_ID: secInfo.sectionId,
         Section_Name: secInfo.name,
         Category: secInfo.category,
@@ -2934,6 +3108,41 @@ export function parseUploadedDatabaseForUpdate(
         File_Name_Min: String(r.File_Name_Min || r.Source_TEPR_File || ''),
       };
 
+      // Also seed `store.sections` for this uploaded record if not already present
+      if (typeof maxTfCell === 'number' && maxTfCell > 0) {
+        const secRecKey =
+          secInfo.category === 'land'
+            ? `${secInfo.sectionId}_${phase}_${dateKey}`
+            : `${secInfo.sectionId}_${dateKey}`;
+        if (!store.sections[secRecKey]) {
+          store.sections[secRecKey] = {
+            maxTf: maxTfCell,
+            minTf: typeof minTfCell === 'number' ? minTfCell : maxTfCell,
+            meanTf: typeof meanTfCell === 'number' ? meanTfCell : maxTfCell,
+            maxTfDof: typeof sheetRow.DOF_Max_m === 'number' ? sheetRow.DOF_Max_m : undefined,
+            minTfDof: typeof sheetRow.DOF_Min_m === 'number' ? sheetRow.DOF_Min_m : undefined,
+            maxTimestamp: sheetRow.Timestamp_Max,
+            minTimestamp: sheetRow.Timestamp_Min,
+            peakTime: sheetRow.Timestamp_Max,
+            iecMaxTc: typeof iecMaxCell === 'number' ? iecMaxCell : undefined,
+            iecMinTc: typeof iecMinCell === 'number' ? iecMinCell : undefined,
+            powerAtMaxMW: typeof pTotalMaxCell === 'number' ? pTotalMaxCell : undefined,
+            pCkt3MaxMW: typeof pCkt3Cell === 'number' ? pCkt3Cell : undefined,
+            pCkt2MaxMW: typeof pCkt2Cell === 'number' ? pCkt2Cell : undefined,
+            p33NktMaxMW: typeof pNktCell === 'number' ? pNktCell : undefined,
+            p33OilMaxMW: typeof pOilCell === 'number' ? pOilCell : undefined,
+            powerAtMinMW: typeof pTotalMinCell === 'number' ? pTotalMinCell : undefined,
+            pCkt3MinMW: typeof pCkt3MinCell === 'number' ? pCkt3MinCell : undefined,
+            pCkt2MinMW: typeof pCkt2MinCell === 'number' ? pCkt2MinCell : undefined,
+            p33NktMinMW: typeof pNktMinCell === 'number' ? pNktMinCell : undefined,
+            p33OilMinMW: typeof pOilMinCell === 'number' ? pOilMinCell : undefined,
+            maxFileName: sheetRow.File_Name_Max,
+            minFileName: sheetRow.File_Name_Min,
+            sourceFile: sheetRow.File_Name_Max,
+          };
+        }
+      }
+
       rowsBySection.get(secInfo.sectionId)!.push(sheetRow);
       totalExistingRows++;
     }
@@ -2942,26 +3151,32 @@ export function parseUploadedDatabaseForUpdate(
   }
 
   const existingValidDates = Array.from(validDatesSet).sort();
-  const datesWithMissingPower = Array.from(datesWithMissingPowerSet).sort();
   const allRowDates = Array.from(allDatesSet).sort();
   const effectiveDates = existingValidDates.length > 0 ? existingValidDates : allRowDates;
 
-  return {
+  const parsedResult: ParsedExistingDatabaseFile = {
     fileName,
     fileFormat: isCsv ? 'csv' : 'xlsx',
     rowsBySection,
     existingValidDates,
-    datesWithMissingPower,
+    datesWithMissingPower: [],
     allRowDates,
     firstDate: effectiveDates[0] || '',
     latestDate: effectiveDates[effectiveDates.length - 1] || '',
     totalExistingRows,
   };
+
+  if (totalExistingRows > 0) {
+    lastUploadedMasterDatabase = parsedResult;
+  }
+
+  return parsedResult;
 }
 
 /**
  * Merges an existing uploaded database file with newly compiled records for missing/extra dates
  * and produces an updated 19-sheet Excel (.xlsx) and CSV database file.
+ * Strictly keeps all existing records from the uploaded database file untouched without editing them.
  */
 export async function buildUpdatedMultiSheetDatabaseAsync(
   existingDb: ParsedExistingDatabaseFile,
@@ -2977,7 +3192,11 @@ export async function buildUpdatedMultiSheetDatabaseAsync(
   }) => void
 ): Promise<GeneratedDatabaseResult> {
   const store = getMasterSectionSummary();
-  const sortedMissingDates = Array.from(new Set(missingDatesToCompile)).sort();
+  const existingValidSet = new Set(existingDb.existingValidDates || []);
+  // Only compile dates that are NOT already valid in the uploaded database file
+  const sortedMissingDates = Array.from(new Set(missingDatesToCompile))
+    .filter((d) => !existingValidSet.has(d))
+    .sort();
   const mergedRowsBySection = new Map<string, DatabaseSheetRow[]>();
   const allFinalDatesSet = new Set<string>([
     ...existingDb.allRowDates,
@@ -2989,192 +3208,27 @@ export async function buildUpdatedMultiSheetDatabaseAsync(
 
   for (let i = 0; i < CIRCUIT_3_SECTIONS.length; i++) {
     const sec = CIRCUIT_3_SECTIONS[i];
-    const distinctDofs = getSectionDistinctDofs(sec);
     const existingRows = existingDb.rowsBySection.get(sec.sectionId) || [];
-    const newlyCompiledRows = computeSectionRowsForDatabase(
-      sec,
-      sortedMissingDates,
-      store,
-      powerSummariesByDate
-    );
+    const newlyCompiledRows =
+      sortedMissingDates.length > 0
+        ? computeSectionRowsForDatabase(sec, sortedMissingDates, store, powerSummariesByDate)
+        : [];
 
-    // Map by `${Date}_${Phase}`: preserve existing valid rows; merge all DOF columns and power flow columns
+    // Map by `${Date}_${Phase}`: strictly preserve existing valid rows untouched
     const rowMap = new Map<string, DatabaseSheetRow>();
     for (const er of existingRows) {
-      rowMap.set(`${er.Date}_${er.Phase}`, er);
+      const normPh = normalizePhaseCode(er.Phase, sec.category);
+      rowMap.set(`${er.Date}_${normPh}`, er);
     }
 
     for (const nr of newlyCompiledRows) {
-      const key = `${nr.Date}_${nr.Phase}`;
+      const normPh = normalizePhaseCode(nr.Phase, sec.category);
+      const key = `${nr.Date}_${normPh}`;
       const prev = rowMap.get(key);
 
-      if (!prev) {
+      // Strictly keep existing data record from uploaded file untouched; only insert if no existing valid record
+      if (!prev || !hasExistingMasterRowData(prev)) {
         rowMap.set(key, nr);
-      } else {
-        const mergedDofCols: Record<string, any> = {};
-        for (const dof of distinctDofs) {
-          const dofKey = dof.toFixed(2);
-          const tfCol = `Tf_DOF_${dofKey}m_C`;
-          const tcCol = `Tc_DOF_${dofKey}m_C`;
-          mergedDofCols[tfCol] =
-            nr[tfCol] !== '' && nr[tfCol] !== undefined ? nr[tfCol] : (prev[tfCol] ?? '');
-          mergedDofCols[tcCol] =
-            nr[tcCol] !== '' && nr[tcCol] !== undefined ? nr[tcCol] : (prev[tcCol] ?? '');
-        }
-
-        const mergedRow: DatabaseSheetRow = {
-          Sheet_Section_ID: sec.sectionId,
-          Section_Name: sec.name,
-          Category: sec.category,
-          Date: nr.Date || prev.Date,
-          Phase: nr.Phase || prev.Phase,
-          ...mergedDofCols,
-          Max_Fiber_Temp_C: nr.Max_Fiber_Temp_C !== '' ? nr.Max_Fiber_Temp_C : prev.Max_Fiber_Temp_C,
-          Min_Fiber_Temp_C: nr.Min_Fiber_Temp_C !== '' ? nr.Min_Fiber_Temp_C : prev.Min_Fiber_Temp_C,
-          Mean_Fiber_Temp_C: nr.Mean_Fiber_Temp_C !== '' ? nr.Mean_Fiber_Temp_C : prev.Mean_Fiber_Temp_C,
-          IEC_Est_Max_Conductor_C: nr.IEC_Est_Max_Conductor_C !== '' ? nr.IEC_Est_Max_Conductor_C : prev.IEC_Est_Max_Conductor_C,
-          IEC_Est_Min_Conductor_C: nr.IEC_Est_Min_Conductor_C !== '' ? nr.IEC_Est_Min_Conductor_C : prev.IEC_Est_Min_Conductor_C,
-          DOF_Max_m: nr.DOF_Max_m !== '' ? nr.DOF_Max_m : prev.DOF_Max_m,
-          DOF_Min_m: nr.DOF_Min_m !== '' ? nr.DOF_Min_m : prev.DOF_Min_m,
-          Timestamp_Max: nr.Timestamp_Max || prev.Timestamp_Max || '',
-          Timestamp_Min: nr.Timestamp_Min || prev.Timestamp_Min || '',
-          Power_Flow_During_Max_Total_MW: nr.Power_Flow_During_Max_Total_MW !== '' ? nr.Power_Flow_During_Max_Total_MW : prev.Power_Flow_During_Max_Total_MW,
-          Power_Flow_During_Max_Ckt3_MW: nr.Power_Flow_During_Max_Ckt3_MW !== '' ? nr.Power_Flow_During_Max_Ckt3_MW : prev.Power_Flow_During_Max_Ckt3_MW,
-          Power_Flow_During_Max_Ckt2_MW: nr.Power_Flow_During_Max_Ckt2_MW !== '' ? nr.Power_Flow_During_Max_Ckt2_MW : prev.Power_Flow_During_Max_Ckt2_MW,
-          Power_Flow_During_Max_33NKT_MW: nr.Power_Flow_During_Max_33NKT_MW !== '' ? nr.Power_Flow_During_Max_33NKT_MW : prev.Power_Flow_During_Max_33NKT_MW,
-          Power_Flow_During_Max_33Oil_MW: nr.Power_Flow_During_Max_33Oil_MW !== '' ? nr.Power_Flow_During_Max_33Oil_MW : prev.Power_Flow_During_Max_33Oil_MW,
-          Power_Flow_During_Min_Total_MW: nr.Power_Flow_During_Min_Total_MW !== '' ? nr.Power_Flow_During_Min_Total_MW : prev.Power_Flow_During_Min_Total_MW,
-          Power_Flow_During_Min_Ckt3_MW: nr.Power_Flow_During_Min_Ckt3_MW !== '' ? nr.Power_Flow_During_Min_Ckt3_MW : prev.Power_Flow_During_Min_Ckt3_MW,
-          Power_Flow_During_Min_Ckt2_MW: nr.Power_Flow_During_Min_Ckt2_MW !== '' ? nr.Power_Flow_During_Min_Ckt2_MW : prev.Power_Flow_During_Min_Ckt2_MW,
-          Power_Flow_During_Min_33NKT_MW: nr.Power_Flow_During_Min_33NKT_MW !== '' ? nr.Power_Flow_During_Min_33NKT_MW : prev.Power_Flow_During_Min_33NKT_MW,
-          Power_Flow_During_Min_33Oil_MW: nr.Power_Flow_During_Min_33Oil_MW !== '' ? nr.Power_Flow_During_Min_33Oil_MW : prev.Power_Flow_During_Min_33Oil_MW,
-          File_Name_Max: nr.File_Name_Max || prev.File_Name_Max || '',
-          File_Name_Min: nr.File_Name_Min || prev.File_Name_Min || '',
-        };
-        rowMap.set(key, mergedRow);
-      }
-    }
-
-    // Secondary pass across all rows in rowMap:
-    // Backfill any missing per-DOF Tf/Tc values from store.dofDailyPeaks / store.points and resolve power flow / conductor temp
-    for (const [key, row] of rowMap.entries()) {
-      const pSummary = findPowerSummaryForDate(row.Date, powerSummariesByDate);
-      let changed = false;
-      const updatedRow: DatabaseSheetRow = { ...row };
-
-      const sectionSamplingPoints = CIRCUIT_3_SAMPLING_POINTS.filter(
-        (p) =>
-          p.sectionId === sec.sectionId &&
-          (sec.category === 'submarine' ? p.cableCategory === 'submarine' : p.phase === updatedRow.Phase)
-      );
-
-      for (const dof of distinctDofs) {
-        const dofKey = dof.toFixed(2);
-        const tfCol = `Tf_DOF_${dofKey}m_C`;
-        if (updatedRow[tfCol] === '' || updatedRow[tfCol] === undefined) {
-          const dofRec = store.dofDailyPeaks?.[`${sec.sectionId}_${updatedRow.Phase}_${updatedRow.Date}_${dofKey}`];
-          const sp = sectionSamplingPoints.find((p) => Math.abs(p.dof - dof) < 0.05);
-          const ptVal = sp ? store.points?.[`${sp.id}_${updatedRow.Date}`] : undefined;
-          if (dofRec && typeof dofRec.maxTf === 'number' && dofRec.maxTf > -100) {
-            updatedRow[tfCol] = Number(dofRec.maxTf.toFixed(2));
-            changed = true;
-          } else if (typeof ptVal === 'number' && ptVal > -100) {
-            updatedRow[tfCol] = Number(ptVal.toFixed(2));
-            changed = true;
-          }
-        }
-      }
-
-      if (pSummary) {
-        // 1. Resolve Coincident Power Flow at Max if empty
-        if (
-          (updatedRow.Power_Flow_During_Max_Ckt3_MW === '' || updatedRow.Power_Flow_During_Max_Total_MW === '') &&
-          (typeof updatedRow.Max_Fiber_Temp_C === 'number' || updatedRow.Timestamp_Max)
-        ) {
-          const flowMax = lookupCoincidentPowerAtTimestamp(pSummary, updatedRow.Timestamp_Max);
-          if (flowMax.pCkt3 !== null) {
-            updatedRow.Power_Flow_During_Max_Ckt3_MW = flowMax.pCkt3;
-            if (flowMax.pCkt2 !== null) updatedRow.Power_Flow_During_Max_Ckt2_MW = flowMax.pCkt2;
-            if (flowMax.p33Nkt !== null) updatedRow.Power_Flow_During_Max_33NKT_MW = flowMax.p33Nkt;
-            if (flowMax.p33Oil !== null) updatedRow.Power_Flow_During_Max_33Oil_MW = flowMax.p33Oil;
-            if (flowMax.pTotal !== null) updatedRow.Power_Flow_During_Max_Total_MW = flowMax.pTotal;
-            changed = true;
-          }
-        }
-
-        // 2. Resolve Coincident Power Flow at Min if empty
-        if (
-          (updatedRow.Power_Flow_During_Min_Ckt3_MW === '' || updatedRow.Power_Flow_During_Min_Total_MW === '') &&
-          (typeof updatedRow.Min_Fiber_Temp_C === 'number' || updatedRow.Timestamp_Min)
-        ) {
-          const flowMin = lookupCoincidentPowerAtTimestamp(pSummary, updatedRow.Timestamp_Min);
-          if (flowMin.pCkt3 !== null) {
-            updatedRow.Power_Flow_During_Min_Ckt3_MW = flowMin.pCkt3;
-            if (flowMin.pCkt2 !== null) updatedRow.Power_Flow_During_Min_Ckt2_MW = flowMin.pCkt2;
-            if (flowMin.p33Nkt !== null) updatedRow.Power_Flow_During_Min_33NKT_MW = flowMin.p33Nkt;
-            if (flowMin.p33Oil !== null) updatedRow.Power_Flow_During_Min_33Oil_MW = flowMin.p33Oil;
-            if (flowMin.pTotal !== null) updatedRow.Power_Flow_During_Min_Total_MW = flowMin.pTotal;
-            changed = true;
-          }
-        }
-      }
-
-      // 3. Compute IEC 60287 Conductor Temperature for each DOF and Section Max/Min if power is available
-      if (typeof updatedRow.Power_Flow_During_Max_Ckt3_MW === 'number') {
-        const p3 = updatedRow.Power_Flow_During_Max_Ckt3_MW;
-        const p2 = typeof updatedRow.Power_Flow_During_Max_Ckt2_MW === 'number' ? updatedRow.Power_Flow_During_Max_Ckt2_MW : 0;
-        const pNkt = typeof updatedRow.Power_Flow_During_Max_33NKT_MW === 'number' ? updatedRow.Power_Flow_During_Max_33NKT_MW : 0;
-        const pOil = typeof updatedRow.Power_Flow_During_Max_33Oil_MW === 'number' ? updatedRow.Power_Flow_During_Max_33Oil_MW : 0;
-
-        for (const dof of distinctDofs) {
-          const dofKey = dof.toFixed(2);
-          const tfCol = `Tf_DOF_${dofKey}m_C`;
-          const tcCol = `Tc_DOF_${dofKey}m_C`;
-          if (
-            (updatedRow[tcCol] === '' || updatedRow[tcCol] === undefined) &&
-            typeof updatedRow[tfCol] === 'number'
-          ) {
-            const estDof = evaluateSectionConductorTemp(sec, updatedRow[tfCol], p3, p2, pNkt, pOil);
-            if (estDof.tc60287 !== null && !isNaN(estDof.tc60287)) {
-              updatedRow[tcCol] = Number(estDof.tc60287.toFixed(2));
-              changed = true;
-            }
-          }
-        }
-
-        if (
-          updatedRow.IEC_Est_Max_Conductor_C === '' &&
-          typeof updatedRow.Max_Fiber_Temp_C === 'number'
-        ) {
-          const estMax = evaluateSectionConductorTemp(sec, updatedRow.Max_Fiber_Temp_C, p3, p2, pNkt, pOil);
-          if (estMax.tc60287 !== null && estMax.tc60287 !== undefined && !isNaN(estMax.tc60287)) {
-            updatedRow.IEC_Est_Max_Conductor_C = Number(estMax.tc60287.toFixed(2));
-            changed = true;
-          }
-        }
-      }
-
-      if (
-        updatedRow.IEC_Est_Min_Conductor_C === '' &&
-        typeof updatedRow.Min_Fiber_Temp_C === 'number' &&
-        typeof updatedRow.Power_Flow_During_Min_Ckt3_MW === 'number'
-      ) {
-        const estMin = evaluateSectionConductorTemp(
-          sec,
-          updatedRow.Min_Fiber_Temp_C,
-          updatedRow.Power_Flow_During_Min_Ckt3_MW,
-          typeof updatedRow.Power_Flow_During_Min_Ckt2_MW === 'number' ? updatedRow.Power_Flow_During_Min_Ckt2_MW : 0,
-          typeof updatedRow.Power_Flow_During_Min_33NKT_MW === 'number' ? updatedRow.Power_Flow_During_Min_33NKT_MW : 0,
-          typeof updatedRow.Power_Flow_During_Min_33Oil_MW === 'number' ? updatedRow.Power_Flow_During_Min_33Oil_MW : 0
-        );
-        if (estMin.tc60287 !== null && estMin.tc60287 !== undefined && !isNaN(estMin.tc60287)) {
-          updatedRow.IEC_Est_Min_Conductor_C = Number(estMin.tc60287.toFixed(2));
-          changed = true;
-        }
-      }
-
-      if (changed) {
-        rowMap.set(key, updatedRow);
       }
     }
 
@@ -3213,6 +3267,7 @@ export async function buildUpdatedMultiSheetDatabaseAsync(
 /**
  * Parses an existing uploaded Section Daily Profile CSV or Excel (.xlsx) file,
  * preserving all 19 section sheets and identifying dates/hours for update.
+ * Strictly keeps all existing records untouched without editing or purging them.
  */
 export function parseUploadedSectionDailyProfileDatabase(
   input: string | ArrayBuffer | Uint8Array,
@@ -3224,7 +3279,6 @@ export function parseUploadedSectionDailyProfileDatabase(
   }
 
   const validDatesSet = new Set<string>();
-  const datesWithMissingPowerSet = new Set<string>();
   const allDatesSet = new Set<string>();
   let totalExistingRows = 0;
   const validSectionIds = new Set(CIRCUIT_3_SECTIONS.map((s) => s.sectionId));
@@ -3236,23 +3290,25 @@ export function parseUploadedSectionDailyProfileDatabase(
     if (typeof input !== 'string') {
       const wb = XLSX.read(input, {
         type: 'array',
-        dense: true,
-        cellFormula: false,
-        cellHTML: false,
-        cellText: false,
       });
-      for (const sName of wb.SheetNames) {
+      wb.SheetNames.forEach((sName, sheetIdx) => {
         const sheet = wb.Sheets[sName];
         const sheetSecCandidate = sName
           .replace(/^(Sec_|Zone_|Section_|Sec\s+|Zone\s+)/i, '')
           .trim();
-        const sheetSecId = validSectionIds.has(sheetSecCandidate) ? sheetSecCandidate : '';
+        const fallbackSecId =
+          wb.SheetNames.length === CIRCUIT_3_SECTIONS.length
+            ? CIRCUIT_3_SECTIONS[sheetIdx]?.sectionId || ''
+            : '';
+        const sheetSecId = validSectionIds.has(sheetSecCandidate)
+          ? sheetSecCandidate
+          : fallbackSecId;
         const sheetRows = XLSX.utils.sheet_to_json<any>(sheet, { defval: '' });
         for (const sr of sheetRows) {
           if (sheetSecId) sr._sheetSecId = sheetSecId;
           rawRows.push(sr);
         }
-      }
+      });
     } else {
       const lines = input.split(/\r?\n/);
       let headers: string[] = [];
@@ -3304,38 +3360,21 @@ export function parseUploadedSectionDailyProfileDatabase(
       r.Date = d;
       allDatesSet.add(d);
 
-      // Normalize numeric cells on the profile row and detect/purge any synthetic/mock-up power values
+      // Normalize numeric cells on the profile row without purging or editing any existing values
       const secMaxTf = toNumOrEmptyCell(r.Section_Max_Tf_C);
-      let secMaxTc = toNumOrEmptyCell(r.Section_Max_Tc_C);
-      let pCkt3 = toNumOrEmptyCell(r.Power_Ckt3_MW);
-      let pCkt2 = toNumOrEmptyCell(r.Power_Ckt2_MW);
-      let pNkt = toNumOrEmptyCell(r.Power_33NKT_MW);
-      let pOil = toNumOrEmptyCell(r.Power_33Oil_MW);
-      let pTotal = toNumOrEmptyCell(r.Total_Power_MW);
+      const secMaxTc = toNumOrEmptyCell(r.Section_Max_Tc_C);
+      const pCkt3 = toNumOrEmptyCell(r.Power_Ckt3_MW);
+      const pCkt2 = toNumOrEmptyCell(r.Power_Ckt2_MW);
+      const pNkt = toNumOrEmptyCell(r.Power_33NKT_MW);
+      const pOil = toNumOrEmptyCell(r.Power_33Oil_MW);
+      const pTotal = toNumOrEmptyCell(r.Total_Power_MW);
 
+      let hasAnyDofNum = false;
       for (const k of Object.keys(r)) {
         if (k.startsWith('Tf_DOF_') || k.startsWith('Tc_DOF_') || k === 'Section_Max_DOF_m') {
           r[k] = toNumOrEmptyCell(r[k]);
+          if (typeof r[k] === 'number' && r[k] > 0) hasAnyDofNum = true;
         }
-      }
-
-      const isOfficialProfileFile = /DTS_Section_Daily_Profile|Section_Daily_Profile/i.test(fileName);
-      const hasSyntheticRowPower = !isOfficialProfileFile && isSyntheticPowerValues(d, pCkt3, pCkt2, pNkt, pOil);
-      if (hasSyntheticRowPower) {
-        pCkt3 = '';
-        pCkt2 = '';
-        pNkt = '';
-        pOil = '';
-        pTotal = '';
-        secMaxTc = '';
-        for (const k of Object.keys(r)) {
-          if (k.startsWith('Tc_DOF_')) {
-            r[k] = '';
-          }
-        }
-        datesWithMissingPowerSet.add(d);
-      } else if (pCkt3 === '' || pTotal === '') {
-        datesWithMissingPowerSet.add(d);
       }
 
       r.Section_Max_Tf_C = secMaxTf;
@@ -3345,13 +3384,14 @@ export function parseUploadedSectionDailyProfileDatabase(
       r.Power_33NKT_MW = pNkt;
       r.Power_33Oil_MW = pOil;
       r.Total_Power_MW = pTotal;
+      delete r._sheetSecId;
 
       if (validSectionIds.has(secId)) {
         const list = rowsBySection.get(secId);
         if (list) {
           list.push(r as SectionDailyProfileRow);
           totalExistingRows++;
-          if (typeof secMaxTf === 'number' && secMaxTf > 0) {
+          if ((typeof secMaxTf === 'number' && secMaxTf > 0) || hasAnyDofNum) {
             validDatesSet.add(d);
           }
         }
@@ -3362,26 +3402,31 @@ export function parseUploadedSectionDailyProfileDatabase(
   }
 
   const effectiveDates = Array.from(validDatesSet).sort();
-  const datesWithMissingPower = Array.from(datesWithMissingPowerSet).sort();
   const allRowDates = Array.from(allDatesSet).sort();
   const boundaryDates = effectiveDates.length > 0 ? effectiveDates : allRowDates;
 
-  return {
+  const parsedResult: ParsedExistingDailyProfileFile = {
     fileName,
     fileFormat: isCsv ? 'csv' : 'xlsx',
     rowsBySection,
     existingValidDates: effectiveDates,
-    datesWithMissingPower,
+    datesWithMissingPower: [],
     allRowDates,
     firstDate: boundaryDates[0] || '',
     latestDate: boundaryDates[boundaryDates.length - 1] || '',
     totalExistingRows,
   };
+
+  if (totalExistingRows > 0) {
+    lastUploadedProfileDatabase = parsedResult;
+  }
+
+  return parsedResult;
 }
 
 /**
- * Updates an uploaded Section Daily Profile database with missing dates up to the latest date,
- * and replaces any missing or purged mock-up 4-circuit power flow records with actual Target Folder 2 data.
+ * Updates an uploaded Section Daily Profile database with missing dates up to the latest date.
+ * Strictly keeps all existing records from the uploaded database file untouched without editing them.
  */
 export async function buildUpdatedSectionDailyProfileDatabaseAsync(
   existingDb: ParsedExistingDailyProfileFile,
@@ -3397,7 +3442,10 @@ export async function buildUpdatedSectionDailyProfileDatabaseAsync(
   }) => void
 ): Promise<GeneratedDatabaseResult> {
   const store = getMasterSectionSummary();
-  const sortedMissingDates = Array.from(new Set(missingDatesToCompile)).sort();
+  const existingValidSet = new Set(existingDb.existingValidDates || []);
+  const sortedMissingDates = Array.from(new Set(missingDatesToCompile))
+    .filter((d) => !existingValidSet.has(d))
+    .sort();
   const mergedRowsBySection = new Map<string, SectionDailyProfileRow[]>();
   const allFinalDatesSet = new Set<string>([
     ...existingDb.allRowDates,
@@ -3412,120 +3460,27 @@ export async function buildUpdatedSectionDailyProfileDatabaseAsync(
     await new Promise((r) => setTimeout(r, 10));
 
     const sec = CIRCUIT_3_SECTIONS[i];
-    const distinctDofs = getSectionDistinctDofs(sec);
     const existingRows = existingDb.rowsBySection.get(sec.sectionId) || [];
-    const newlyCompiledRows = computeSectionDailyProfileRows(
-      sec,
-      sortedMissingDates,
-      store,
-      powerSummariesByDate
-    );
+    const newlyCompiledRows =
+      sortedMissingDates.length > 0
+        ? computeSectionDailyProfileRows(sec, sortedMissingDates, store, powerSummariesByDate)
+        : [];
 
     const rowMap = new Map<string, SectionDailyProfileRow>();
     for (const er of existingRows) {
       const hNum = extractHourNumberFromTime(er.Time);
-      rowMap.set(`${er.Date}_${hNum}_${er.Phase}`, er);
+      const normPh = normalizePhaseCode(er.Phase, sec.category);
+      rowMap.set(`${er.Date}_${hNum}_${normPh}`, er);
     }
 
     for (const nr of newlyCompiledRows) {
       const hNum = extractHourNumberFromTime(nr.Time);
-      const key = `${nr.Date}_${hNum}_${nr.Phase}`;
+      const normPh = normalizePhaseCode(nr.Phase, sec.category);
+      const key = `${nr.Date}_${hNum}_${normPh}`;
       const prev = rowMap.get(key);
-      if (!prev) {
+      // Strictly keep existing valid row untouched; only add new dates
+      if (!prev || !hasExistingProfileRowData(prev)) {
         rowMap.set(key, nr);
-      } else {
-        // Smart non-destructive merge:
-        // If `prev` already has valid fiber temperature data (`Section_Max_Tf_C !== ''`) and `nr` does NOT have
-        // newly compiled `.TEPR` fiber data (`nr.Section_Max_Tf_C === ''`), do NOT let `nr`'s generic hour-midpoint
-        // power overwrite `prev`, because the secondary healing pass will look up power at `prev.Hourly_Peak_Time`!
-        const prevHasFiber = prev.Section_Max_Tf_C !== '' && prev.Section_Max_Tf_C !== undefined;
-        const nrHasFiber = nr.Section_Max_Tf_C !== '' && nr.Section_Max_Tf_C !== undefined;
-        const merged: SectionDailyProfileRow = { ...prev };
-        for (const [k, v] of Object.entries(nr)) {
-          if (v !== '' && v !== null && v !== undefined && !Number.isNaN(v)) {
-            if (
-              prevHasFiber &&
-              !nrHasFiber &&
-              (k === 'Power_Ckt3_MW' ||
-                k === 'Power_Ckt2_MW' ||
-                k === 'Power_33NKT_MW' ||
-                k === 'Power_33Oil_MW' ||
-                k === 'Total_Power_MW')
-            ) {
-              continue;
-            }
-            (merged as any)[k] = v;
-          }
-        }
-        rowMap.set(key, merged);
-      }
-    }
-
-    // Secondary healing pass: if any row has missing (or purged mock-up) power flow or conductor temp,
-    // and matching real powerSummary exists, resolve power at Hourly_Peak_Time and recalculate all DOF Tc & Section_Max_Tc_C
-    for (const row of rowMap.values()) {
-      const pSummary = findPowerSummaryForDate(row.Date, powerSummariesByDate);
-      if (!pSummary) continue;
-      const hNum = extractHourNumberFromTime(row.Time);
-      const isRowSynthetic = isSyntheticPowerValues(
-        row.Date,
-        row.Power_Ckt3_MW,
-        row.Power_Ckt2_MW,
-        row.Power_33NKT_MW,
-        row.Power_33Oil_MW
-      );
-
-      if (row.Power_Ckt3_MW === '' || row.Total_Power_MW === '' || isRowSynthetic) {
-        const flow = lookupCoincidentPowerForHourlyProfile(
-          pSummary,
-          row.Hourly_Peak_Time || row.Time,
-          hNum
-        );
-        if (flow.pCkt3 !== null) {
-          row.Power_Ckt3_MW = Number(flow.pCkt3.toFixed(2));
-          if (flow.pCkt2 !== null) row.Power_Ckt2_MW = Number(flow.pCkt2.toFixed(2));
-          if (flow.p33Nkt !== null) row.Power_33NKT_MW = Number(flow.p33Nkt.toFixed(2));
-          if (flow.p33Oil !== null) row.Power_33Oil_MW = Number(flow.p33Oil.toFixed(2));
-          if (flow.pTotal !== null) row.Total_Power_MW = Number(flow.pTotal.toFixed(2));
-        }
-      }
-
-      if (typeof row.Power_Ckt3_MW === 'number') {
-        const p3 = row.Power_Ckt3_MW;
-        const p2 = typeof row.Power_Ckt2_MW === 'number' ? row.Power_Ckt2_MW : 0;
-        const pNkt = typeof row.Power_33NKT_MW === 'number' ? row.Power_33NKT_MW : 0;
-        const pOil = typeof row.Power_33Oil_MW === 'number' ? row.Power_33Oil_MW : 0;
-
-        let maxTcInHour = -Infinity;
-        for (const dof of distinctDofs) {
-          const dofKey = dof.toFixed(2);
-          const tfCol = `Tf_DOF_${dofKey}m_C`;
-          const tcCol = `Tc_DOF_${dofKey}m_C`;
-          const tfVal = row[tfCol];
-          if (typeof tfVal === 'number' && !isNaN(tfVal)) {
-            if (row[tcCol] === '' || row[tcCol] === undefined || isRowSynthetic) {
-              const estDof = evaluateSectionConductorTemp(sec, tfVal, p3, p2, pNkt, pOil);
-              if (estDof.tc60287 !== null && !isNaN(estDof.tc60287)) {
-                row[tcCol] = Number(estDof.tc60287.toFixed(2));
-              }
-            }
-            if (typeof row[tcCol] === 'number' && row[tcCol] > maxTcInHour) {
-              maxTcInHour = row[tcCol];
-            }
-          }
-        }
-
-        if (
-          (row.Section_Max_Tc_C === '' || isRowSynthetic) &&
-          typeof row.Section_Max_Tf_C === 'number'
-        ) {
-          const est = evaluateSectionConductorTemp(sec, row.Section_Max_Tf_C, p3, p2, pNkt, pOil);
-          if (est.tc60287 !== null && !isNaN(est.tc60287)) {
-            row.Section_Max_Tc_C = Number(est.tc60287.toFixed(2));
-          } else if (maxTcInHour !== -Infinity) {
-            row.Section_Max_Tc_C = Number(maxTcInHour.toFixed(2));
-          }
-        }
       }
     }
 
@@ -3705,60 +3660,92 @@ export function parseDatabaseFileOrBuffer(
 
       if (!secId || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
 
+      const hasNamedHeaders =
+        'Max_Fiber_Temp_C' in r || 'Max_Fiber_Temp' in r || 'maxTf' in r || 'Max_Tf' in r;
+
       const maxTf = parseOptionalCellNumber(
-        r.Max_Fiber_Temp_C ?? r.Max_Fiber_Temp ?? r.maxTf ?? r.Max_Tf ?? colVals[5]
+        hasNamedHeaders
+          ? r.Max_Fiber_Temp_C ?? r.Max_Fiber_Temp ?? r.maxTf ?? r.Max_Tf
+          : colVals[5]
       );
       const minTf = parseOptionalCellNumber(
-        r.Min_Fiber_Temp_C ?? r.Min_Fiber_Temp ?? r.minTf ?? r.Min_Tf ?? colVals[6]
+        hasNamedHeaders
+          ? r.Min_Fiber_Temp_C ?? r.Min_Fiber_Temp ?? r.minTf ?? r.Min_Tf
+          : colVals[6]
       );
-      const meanTf = parseOptionalCellNumber(r.Mean_Fiber_Temp_C ?? r.meanTf ?? colVals[7]);
+      const meanTf = parseOptionalCellNumber(
+        hasNamedHeaders ? r.Mean_Fiber_Temp_C ?? r.meanTf : colVals[7]
+      );
 
       // Skip rows where fiber temperature was left intentionally empty ("")
       if (maxTf === undefined || maxTf <= 0) continue;
 
       dateSet.add(dateKey);
 
-      // Columns O to S (0-based indices 14 to 18): Power Flow During Record of Maximum Fiber Temperature
       const colOPowerTotalMax = parseOptionalCellNumber(
-        r.Power_Flow_During_Max_Total_MW ?? colVals[14]
+        hasNamedHeaders ? r.Power_Flow_During_Max_Total_MW : colVals[14]
       );
       const colPCkt3Max = parseOptionalCellNumber(
-        r.Power_Flow_During_Max_Ckt3_MW ?? colVals[15]
+        hasNamedHeaders ? r.Power_Flow_During_Max_Ckt3_MW : colVals[15]
       );
       const colQCkt2Max = parseOptionalCellNumber(
-        r.Power_Flow_During_Max_Ckt2_MW ?? colVals[16]
+        hasNamedHeaders ? r.Power_Flow_During_Max_Ckt2_MW : colVals[16]
       );
       const colR33NktMax = parseOptionalCellNumber(
-        r.Power_Flow_During_Max_33NKT_MW ?? colVals[17]
+        hasNamedHeaders ? r.Power_Flow_During_Max_33NKT_MW : colVals[17]
       );
       const colS33OilMax = parseOptionalCellNumber(
-        r.Power_Flow_During_Max_33Oil_MW ?? colVals[18]
+        hasNamedHeaders ? r.Power_Flow_During_Max_33Oil_MW : colVals[18]
       );
 
       const rec: MasterSectionPeakRecord = {
         maxTf,
         minTf: minTf !== undefined && minTf > 0 ? minTf : maxTf,
         meanTf: meanTf !== undefined && meanTf > 0 ? meanTf : maxTf,
-        maxTfDof: parseOptionalCellNumber(r.DOF_Max_m ?? r.Peak_DOF_m ?? colVals[10]),
-        minTfDof: parseOptionalCellNumber(r.DOF_Min_m ?? colVals[11]),
-        maxTimestamp: String(r.Timestamp_Max || r.Peak_Time || colVals[12] || ''),
-        minTimestamp: String(r.Timestamp_Min || colVals[13] || ''),
-        peakTime: String(r.Timestamp_Max || r.Peak_Time || colVals[12] || ''),
-        iecMaxTc: parseOptionalCellNumber(r.IEC_Est_Max_Conductor_C ?? colVals[8]),
-        iecMinTc: parseOptionalCellNumber(r.IEC_Est_Min_Conductor_C ?? colVals[9]),
+        maxTfDof: parseOptionalCellNumber(
+          hasNamedHeaders ? r.DOF_Max_m ?? r.Peak_DOF_m : colVals[10]
+        ),
+        minTfDof: parseOptionalCellNumber(hasNamedHeaders ? r.DOF_Min_m : colVals[11]),
+        maxTimestamp: String(
+          (hasNamedHeaders ? r.Timestamp_Max || r.Peak_Time : colVals[12]) || ''
+        ),
+        minTimestamp: String((hasNamedHeaders ? r.Timestamp_Min : colVals[13]) || ''),
+        peakTime: String((hasNamedHeaders ? r.Timestamp_Max || r.Peak_Time : colVals[12]) || ''),
+        iecMaxTc: parseOptionalCellNumber(
+          hasNamedHeaders ? r.IEC_Est_Max_Conductor_C : colVals[8]
+        ),
+        iecMinTc: parseOptionalCellNumber(
+          hasNamedHeaders ? r.IEC_Est_Min_Conductor_C : colVals[9]
+        ),
         powerAtMaxMW: colOPowerTotalMax,
         pCkt3MaxMW: colPCkt3Max,
         pCkt2MaxMW: colQCkt2Max,
         p33NktMaxMW: colR33NktMax,
         p33OilMaxMW: colS33OilMax,
-        powerAtMinMW: parseOptionalCellNumber(r.Power_Flow_During_Min_Total_MW ?? colVals[19]),
-        pCkt3MinMW: parseOptionalCellNumber(r.Power_Flow_During_Min_Ckt3_MW ?? colVals[20]),
-        pCkt2MinMW: parseOptionalCellNumber(r.Power_Flow_During_Min_Ckt2_MW ?? colVals[21]),
-        p33NktMinMW: parseOptionalCellNumber(r.Power_Flow_During_Min_33NKT_MW ?? colVals[22]),
-        p33OilMinMW: parseOptionalCellNumber(r.Power_Flow_During_Min_33Oil_MW ?? colVals[23]),
-        maxFileName: String(r.File_Name_Max || r.Source_TEPR_File || colVals[24] || ''),
-        minFileName: String(r.File_Name_Min || r.Source_TEPR_File || colVals[25] || ''),
-        sourceFile: String(r.File_Name_Max || r.Source_TEPR_File || colVals[24] || ''),
+        powerAtMinMW: parseOptionalCellNumber(
+          hasNamedHeaders ? r.Power_Flow_During_Min_Total_MW : colVals[19]
+        ),
+        pCkt3MinMW: parseOptionalCellNumber(
+          hasNamedHeaders ? r.Power_Flow_During_Min_Ckt3_MW : colVals[20]
+        ),
+        pCkt2MinMW: parseOptionalCellNumber(
+          hasNamedHeaders ? r.Power_Flow_During_Min_Ckt2_MW : colVals[21]
+        ),
+        p33NktMinMW: parseOptionalCellNumber(
+          hasNamedHeaders ? r.Power_Flow_During_Min_33NKT_MW : colVals[22]
+        ),
+        p33OilMinMW: parseOptionalCellNumber(
+          hasNamedHeaders ? r.Power_Flow_During_Min_33Oil_MW : colVals[23]
+        ),
+        maxFileName: String(
+          (hasNamedHeaders ? r.File_Name_Max || r.Source_TEPR_File : colVals[24]) || ''
+        ),
+        minFileName: String(
+          (hasNamedHeaders ? r.File_Name_Min || r.Source_TEPR_File : colVals[25]) || ''
+        ),
+        sourceFile: String(
+          (hasNamedHeaders ? r.File_Name_Max || r.Source_TEPR_File : colVals[24]) || ''
+        ),
       };
 
       const key =
