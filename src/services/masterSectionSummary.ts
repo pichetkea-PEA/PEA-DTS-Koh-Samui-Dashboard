@@ -1529,6 +1529,30 @@ function findPowerSummaryForDate(
 }
 
 /**
+ * Helper to check if a SCADA data point contains real positive power values (> 0)
+ */
+function hasScadaPower(
+  dp:
+    | {
+        kmbCircuit3?: number;
+        kmaCircuit2?: number;
+        knaNkt?: number;
+        knaOilFilled?: number;
+        totalPower?: number;
+      }
+    | null
+    | undefined
+): boolean {
+  if (!dp) return false;
+  const c3 = typeof dp.kmbCircuit3 === 'number' && !isNaN(dp.kmbCircuit3) ? dp.kmbCircuit3 : 0;
+  const c2 = typeof dp.kmaCircuit2 === 'number' && !isNaN(dp.kmaCircuit2) ? dp.kmaCircuit2 : 0;
+  const nkt = typeof dp.knaNkt === 'number' && !isNaN(dp.knaNkt) ? dp.knaNkt : 0;
+  const oil = typeof dp.knaOilFilled === 'number' && !isNaN(dp.knaOilFilled) ? dp.knaOilFilled : 0;
+  const tot = typeof dp.totalPower === 'number' && !isNaN(dp.totalPower) ? dp.totalPower : 0;
+  return c3 > 0 || c2 > 0 || nkt > 0 || oil > 0 || tot > 0;
+}
+
+/**
  * Looks up coincident 4-circuit power flow from Target Folders 2 (KMB, KMA, KNA) at the exact
  * Timestamp_Max or Timestamp_Min from Target Folder 1 (.TEPR).
  * Uses the surrounding 15-minute interval selection within the same hour period (selecting whichever
@@ -1536,7 +1560,7 @@ function findPowerSummaryForDate(
  * if the power summary or circuit file is missing/unreadable or synthetic.
  * NEVER uses simulation or estimation.
  */
-function lookupCoincidentPowerAtTimestamp(
+export function lookupCoincidentPowerAtTimestamp(
   powerSummary: DailyPowerSummary | undefined,
   timestampStr: string
 ): {
@@ -1565,16 +1589,17 @@ function lookupCoincidentPowerAtTimestamp(
     const gridLower = Math.max(hStartMin, Math.min(hEndMin, Math.floor(targetMinutes / 15) * 15));
     const gridUpper = Math.max(hStartMin, Math.min(hEndMin, Math.ceil(targetMinutes / 15) * 15));
 
-    const findDpAt = (targetMin: number) => {
+    const findDpAt = (targetMin: number, requirePower: boolean) => {
       let best: (typeof powerSummary.dataPoints)[0] | null = null;
       let bestDiff = Infinity;
       for (const dp of powerSummary.dataPoints) {
+        if (requirePower && !hasScadaPower(dp)) continue;
         let dpMin = dp.timeMinutes;
         if (targetMin === 1440 && dpMin === 0 && dp.time && (dp.time.startsWith('24:') || dp.time === '00:00')) {
           dpMin = 1440;
         }
         const diff = Math.abs(dpMin - targetMin);
-        if (diff < bestDiff && diff <= 7) {
+        if (diff < bestDiff && diff <= 15) {
           bestDiff = diff;
           best = dp;
         }
@@ -1582,8 +1607,8 @@ function lookupCoincidentPowerAtTimestamp(
       return best;
     };
 
-    const point1 = findDpAt(gridLower);
-    const point2 = findDpAt(gridUpper);
+    let point1 = findDpAt(gridLower, true);
+    let point2 = findDpAt(gridUpper, true);
 
     if (point1 && point2 && point1 !== point2) {
       const ckt3_1 = typeof point1.kmbCircuit3 === 'number' && !isNaN(point1.kmbCircuit3) ? point1.kmbCircuit3 : 0;
@@ -1595,30 +1620,69 @@ function lookupCoincidentPowerAtTimestamp(
       bestPoint = point1 || point2;
     }
 
-    if (!bestPoint) {
+    // Step 2: If surrounding grid candidates lack power, search +/- 15 min around the event moment
+    if (!hasScadaPower(bestPoint)) {
+      let closestIn15: (typeof powerSummary.dataPoints)[0] | null = null;
+      let closestDiff15 = Infinity;
+      for (const dp of powerSummary.dataPoints) {
+        if (!hasScadaPower(dp)) continue;
+        let dpMin = dp.timeMinutes;
+        if (targetMinutes === 1440 && dpMin === 0) dpMin = 1440;
+        const diff = Math.abs(dpMin - targetMinutes);
+        if (diff <= 15 && diff < closestDiff15) {
+          closestDiff15 = diff;
+          closestIn15 = dp;
+        }
+      }
+      if (closestIn15) {
+        bestPoint = closestIn15;
+      }
+    }
+
+    // Step 3: Search within the same hour interval [hStartMin, hEndMin]
+    if (!hasScadaPower(bestPoint)) {
+      const inHour = powerSummary.dataPoints.filter((dp) => {
+        if (!hasScadaPower(dp)) return false;
+        let dpMin = dp.timeMinutes;
+        if (hEndMin === 1440 && dpMin === 0) dpMin = 1440;
+        return dpMin >= hStartMin && dpMin <= hEndMin;
+      });
+      if (inHour.length > 0) {
+        bestPoint = inHour.reduce((max, cur) => {
+          const curVal = cur.kmbCircuit3 || cur.totalPower || 0;
+          const maxVal = max.kmbCircuit3 || max.totalPower || 0;
+          return curVal > maxVal ? cur : max;
+        }, inHour[0]);
+      }
+    }
+
+    // Step 4: Search within +/- 90 minutes of targetMinutes
+    if (!hasScadaPower(bestPoint)) {
       let bestDiff = Infinity;
       for (const dp of powerSummary.dataPoints) {
+        if (!hasScadaPower(dp)) continue;
         const diff = Math.abs(dp.timeMinutes - targetMinutes);
         if (diff < bestDiff) {
           bestDiff = diff;
           bestPoint = dp;
         }
       }
-      // Accept closest SCADA point within 90 minutes of the fiber optical thermal event
       if (bestPoint && bestDiff > 90) {
         bestPoint = null;
       }
     }
   }
 
-  // If timestamp string is empty or slightly shifted beyond 90 min window,
-  // locate the closest available SCADA recorded reading or daily peak load point
-  if (!bestPoint) {
-    bestPoint = powerSummary.dataPoints.reduce((max, cur) => {
-      const curVal = cur.kmbCircuit3 || cur.totalPower || 0;
-      const maxVal = max.kmbCircuit3 || max.totalPower || 0;
-      return curVal > maxVal ? cur : max;
-    }, powerSummary.dataPoints[0]);
+  // Step 5: Final fallback to peak load point on that day with non-zero power
+  if (!hasScadaPower(bestPoint)) {
+    const validPoints = powerSummary.dataPoints.filter(hasScadaPower);
+    if (validPoints.length > 0) {
+      bestPoint = validPoints.reduce((max, cur) => {
+        const curVal = cur.kmbCircuit3 || cur.totalPower || 0;
+        const maxVal = max.kmbCircuit3 || max.totalPower || 0;
+        return curVal > maxVal ? cur : max;
+      }, validPoints[0]);
+    }
   }
 
   if (!bestPoint) {
@@ -1646,10 +1710,11 @@ function lookupCoincidentPowerAtTimestamp(
       ? Number(bestPoint.knaOilFilled.toFixed(2))
       : null;
 
-  // Total 4-circuit power flow is only populated when all 4 circuits have valid read records
   const pTotal =
     pCkt3 !== null && pCkt2 !== null && p33Nkt !== null && p33Oil !== null
       ? Number((pCkt3 + pCkt2 + p33Nkt + p33Oil).toFixed(2))
+      : typeof bestPoint.totalPower === 'number' && !isNaN(bestPoint.totalPower) && bestPoint.totalPower > 0
+      ? Number(bestPoint.totalPower.toFixed(2))
       : null;
 
   return { pTotal, pCkt3, pCkt2, p33Nkt, p33Oil };
@@ -1662,7 +1727,8 @@ function lookupCoincidentPowerAtTimestamp(
  * 2. Power records are sampled every 15 minutes. Around the peak fiber temperature timestamp (e.g. 00:59),
  *    the two nearest 15-minute grid points are located (e.g. 00:45 and 01:00).
  * 3. Whichever 15-minute interval has the larger Circuit 3 load (falling back to total power if Ckt3 is 0) is selected.
- * 4. If fiber temperature is missing for that hour, the peak power flow within that same hour interval is used.
+ * 4. At least 1 power flow reading within (+15 minute or -15 minute) of the recording moment is used to prevent 0 values.
+ * 5. If fiber temperature is missing for that hour, the peak power flow within that same hour interval is used.
  */
 export function lookupCoincidentPowerForHourlyProfile(
   powerSummary: DailyPowerSummary | undefined,
@@ -1701,22 +1767,20 @@ export function lookupCoincidentPowerForHourlyProfile(
   const gridLower = Math.floor(targetMinutes / 15) * 15;
   const gridUpper = Math.ceil(targetMinutes / 15) * 15;
 
-  // Constrain both candidates strictly within the hour period [hStartMin, hEndMin]
-  // e.g. For 00.01 - 01.00, cannot exceed 01:00 (minute 60)
   const c1Min = Math.max(hStartMin, Math.min(hEndMin, gridLower));
   const c2Min = Math.max(hStartMin, Math.min(hEndMin, gridUpper));
 
-  const findNearestDp = (targetMin: number) => {
+  const findNearestDp = (targetMin: number, requirePower: boolean) => {
     let best: (typeof powerSummary.dataPoints)[0] | null = null;
     let bestDiff = Infinity;
     for (const dp of powerSummary.dataPoints) {
+      if (requirePower && !hasScadaPower(dp)) continue;
       let dpMin = dp.timeMinutes;
-      // Handle 24:00 edge case where SCADA reports time as 00:00 or 24:00
       if (targetMin === 1440 && dpMin === 0 && dp.time && (dp.time.startsWith('24:') || dp.time === '00:00')) {
         dpMin = 1440;
       }
       const diff = Math.abs(dpMin - targetMin);
-      if (diff < bestDiff && diff <= 7) {
+      if (diff < bestDiff && diff <= 15) {
         bestDiff = diff;
         best = dp;
       }
@@ -1724,40 +1788,70 @@ export function lookupCoincidentPowerForHourlyProfile(
     return best;
   };
 
-  const point1 = findNearestDp(c1Min);
-  const point2 = findNearestDp(c2Min);
+  // 1. Try finding nearest points at the two 15-minute grid candidates with non-zero power
+  let point1 = findNearestDp(c1Min, true);
+  let point2 = findNearestDp(c2Min, true);
+
+  if (!point1) point1 = findNearestDp(c1Min, false);
+  if (!point2) point2 = findNearestDp(c2Min, false);
 
   let selectedPoint: (typeof powerSummary.dataPoints)[0] | null = null;
 
   if (point1 && point2 && point1 !== point2) {
-    // Compare KMB Circuit 3 load first (e.g. 06:30 vs 06:45 at 06.36 -> 47.82 MW vs 47.92 MW selects 47.92 MW),
-    // falling back to totalPower only if Circuit 3 is 0
-    const ckt3_1 =
-      typeof point1.kmbCircuit3 === 'number' && !isNaN(point1.kmbCircuit3) ? point1.kmbCircuit3 : 0;
-    const ckt3_2 =
-      typeof point2.kmbCircuit3 === 'number' && !isNaN(point2.kmbCircuit3) ? point2.kmbCircuit3 : 0;
-    const load1 =
-      ckt3_1 > 0
-        ? ckt3_1
-        : typeof point1.totalPower === 'number' && !isNaN(point1.totalPower)
-        ? point1.totalPower
-        : 0;
-    const load2 =
-      ckt3_2 > 0
-        ? ckt3_2
-        : typeof point2.totalPower === 'number' && !isNaN(point2.totalPower)
-        ? point2.totalPower
-        : 0;
+    const hasP1 = hasScadaPower(point1);
+    const hasP2 = hasScadaPower(point2);
+    if (hasP1 && !hasP2) {
+      selectedPoint = point1;
+    } else if (hasP2 && !hasP1) {
+      selectedPoint = point2;
+    } else {
+      const ckt3_1 =
+        typeof point1.kmbCircuit3 === 'number' && !isNaN(point1.kmbCircuit3) ? point1.kmbCircuit3 : 0;
+      const ckt3_2 =
+        typeof point2.kmbCircuit3 === 'number' && !isNaN(point2.kmbCircuit3) ? point2.kmbCircuit3 : 0;
+      const load1 =
+        ckt3_1 > 0
+          ? ckt3_1
+          : typeof point1.totalPower === 'number' && !isNaN(point1.totalPower)
+          ? point1.totalPower
+          : 0;
+      const load2 =
+        ckt3_2 > 0
+          ? ckt3_2
+          : typeof point2.totalPower === 'number' && !isNaN(point2.totalPower)
+          ? point2.totalPower
+          : 0;
 
-    // Whichever is larger/higher is selected
-    selectedPoint = load2 > load1 ? point2 : point1;
+      selectedPoint = load2 > load1 ? point2 : point1;
+    }
   } else {
-    selectedPoint = point1 || point2;
+    selectedPoint = (hasScadaPower(point1) ? point1 : null) || (hasScadaPower(point2) ? point2 : null) || point1 || point2;
   }
 
-  // Fallback: If neither exact 15-min grid point exists in SCADA, locate the highest load within the same hour
-  if (!selectedPoint) {
+  // 2. User's rule: Ensure at least 1 power flow value during that moment (+15 min or -15 min from time of record)
+  // to prevent 0 values of power record and to be used in estimation of conductor temperature
+  if (!hasScadaPower(selectedPoint)) {
+    let closestIn15: (typeof powerSummary.dataPoints)[0] | null = null;
+    let closestDiff15 = Infinity;
+    for (const dp of powerSummary.dataPoints) {
+      if (!hasScadaPower(dp)) continue;
+      let dpMin = dp.timeMinutes;
+      if (targetMinutes === 1440 && dpMin === 0) dpMin = 1440;
+      const diff = Math.abs(dpMin - targetMinutes);
+      if (diff <= 15 && diff < closestDiff15) {
+        closestDiff15 = diff;
+        closestIn15 = dp;
+      }
+    }
+    if (closestIn15) {
+      selectedPoint = closestIn15;
+    }
+  }
+
+  // 3. Fallback: Search for the highest non-zero power point within the same hour
+  if (!hasScadaPower(selectedPoint)) {
     const pointsInHour = powerSummary.dataPoints.filter((dp) => {
+      if (!hasScadaPower(dp)) return false;
       let dpMin = dp.timeMinutes;
       if (hEndMin === 1440 && dpMin === 0) dpMin = 1440;
       return dpMin >= hStartMin && dpMin <= hEndMin;
@@ -1768,6 +1862,37 @@ export function lookupCoincidentPowerForHourlyProfile(
         const maxVal = max.totalPower || max.kmbCircuit3 || 0;
         return curVal > maxVal ? cur : max;
       }, pointsInHour[0]);
+    }
+  }
+
+  // 4. Fallback: Search within +/- 90 minutes of targetMinutes
+  if (!hasScadaPower(selectedPoint)) {
+    let closestAny: (typeof powerSummary.dataPoints)[0] | null = null;
+    let closestAnyDiff = Infinity;
+    for (const dp of powerSummary.dataPoints) {
+      if (!hasScadaPower(dp)) continue;
+      let dpMin = dp.timeMinutes;
+      if (targetMinutes === 1440 && dpMin === 0) dpMin = 1440;
+      const diff = Math.abs(dpMin - targetMinutes);
+      if (diff < closestAnyDiff) {
+        closestAnyDiff = diff;
+        closestAny = dp;
+      }
+    }
+    if (closestAny && closestAnyDiff <= 90) {
+      selectedPoint = closestAny;
+    }
+  }
+
+  // 5. Final fallback to peak load point on that day
+  if (!hasScadaPower(selectedPoint)) {
+    const validPoints = powerSummary.dataPoints.filter(hasScadaPower);
+    if (validPoints.length > 0) {
+      selectedPoint = validPoints.reduce((max, cur) => {
+        const curVal = cur.totalPower || cur.kmbCircuit3 || 0;
+        const maxVal = max.totalPower || max.kmbCircuit3 || 0;
+        return curVal > maxVal ? cur : max;
+      }, validPoints[0]);
     }
   }
 
@@ -1796,9 +1921,9 @@ export function lookupCoincidentPowerForHourlyProfile(
       ? Number(selectedPoint.knaOilFilled.toFixed(2))
       : null;
   const pTotal =
-    typeof selectedPoint.totalPower === 'number' && !isNaN(selectedPoint.totalPower)
+    typeof selectedPoint.totalPower === 'number' && !isNaN(selectedPoint.totalPower) && selectedPoint.totalPower > 0
       ? Number(selectedPoint.totalPower.toFixed(2))
-      : (pCkt3 !== null || pCkt2 !== null || p33Nkt !== null || p33Oil !== null)
+      : pCkt3 !== null || pCkt2 !== null || p33Nkt !== null || p33Oil !== null
       ? Number(((pCkt3 ?? 0) + (pCkt2 ?? 0) + (p33Nkt ?? 0) + (p33Oil ?? 0)).toFixed(2))
       : null;
 
@@ -2140,6 +2265,9 @@ export function computeSectionDailyProfileRows(
         }
 
         if (hasAnyDofInHour) {
+          if (!peakFlow || (peakFlow.pCkt3 === 0 && (peakFlow.pTotal ?? 0) === 0)) {
+            peakFlow = lookupCoincidentPowerForHourlyProfile(powerSummary, peakTime || hourStr, h);
+          }
           row.Section_Max_Tf_C = maxTfInHour !== -Infinity ? Number(maxTfInHour.toFixed(2)) : '';
           row.Section_Max_Tc_C = maxTcInHour !== -Infinity ? Number(maxTcInHour.toFixed(2)) : '';
           row.Section_Max_DOF_m = peakDof !== '' ? Number(Number(peakDof).toFixed(2)) : '';
@@ -2435,10 +2563,20 @@ export function clearLastUploadedProfileDatabase(): void {
 
 function hasExistingMasterRowData(row?: DatabaseSheetRow | null): boolean {
   if (!row) return false;
-  if (typeof row.Max_Fiber_Temp_C === 'number' && row.Max_Fiber_Temp_C > 0) return true;
-  if (typeof row.IEC_Est_Max_Conductor_C === 'number' && row.IEC_Est_Max_Conductor_C > 0) return true;
+  const isPos = (v: any) => {
+    if (typeof v === 'number' && !isNaN(v) && v > 0) return true;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const num = parseFloat(v.trim());
+      return !isNaN(num) && num > 0;
+    }
+    return false;
+  };
+  if (isPos(row.Max_Fiber_Temp_C)) return true;
+  if (isPos(row.IEC_Est_Max_Conductor_C)) return true;
+  if (isPos(row.Mean_Fiber_Temp_C)) return true;
+  if (isPos(row.Min_Fiber_Temp_C)) return true;
   for (const [k, v] of Object.entries(row)) {
-    if ((k.startsWith('Tf_DOF_') || k.startsWith('Tc_DOF_')) && typeof v === 'number' && v > 0) {
+    if ((k.startsWith('Tf_DOF_') || k.startsWith('Tc_DOF_') || k.startsWith('Power_')) && isPos(v)) {
       return true;
     }
   }
@@ -2447,10 +2585,18 @@ function hasExistingMasterRowData(row?: DatabaseSheetRow | null): boolean {
 
 function hasExistingProfileRowData(row?: SectionDailyProfileRow | null): boolean {
   if (!row) return false;
-  if (typeof row.Section_Max_Tf_C === 'number' && row.Section_Max_Tf_C > 0) return true;
-  if (typeof row.Section_Max_Tc_C === 'number' && row.Section_Max_Tc_C > 0) return true;
+  const isPos = (v: any) => {
+    if (typeof v === 'number' && !isNaN(v) && v > 0) return true;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const num = parseFloat(v.trim());
+      return !isNaN(num) && num > 0;
+    }
+    return false;
+  };
+  if (isPos(row.Section_Max_Tf_C)) return true;
+  if (isPos(row.Section_Max_Tc_C)) return true;
   for (const [k, v] of Object.entries(row)) {
-    if ((k.startsWith('Tf_DOF_') || k.startsWith('Tc_DOF_')) && typeof v === 'number' && v > 0) {
+    if ((k.startsWith('Tf_DOF_') || k.startsWith('Tc_DOF_') || k.startsWith('Power_')) && isPos(v)) {
       return true;
     }
   }
@@ -2634,7 +2780,9 @@ export function buildMultiSheetDatabase(
       const normPh = normalizePhaseCode(nr.Phase, sec.category);
       const key = `${nr.Date}_${normPh}`;
       const prev = rowMap.get(key);
-      if (!prev || !hasExistingMasterRowData(prev)) {
+      if (!prev) {
+        rowMap.set(key, nr);
+      } else if (!hasExistingMasterRowData(prev) && hasExistingMasterRowData(nr)) {
         rowMap.set(key, nr);
       }
     }
@@ -2703,7 +2851,9 @@ export async function buildMultiSheetDatabaseAsync(
       const normPh = normalizePhaseCode(nr.Phase, sec.category);
       const key = `${nr.Date}_${normPh}`;
       const prev = rowMap.get(key);
-      if (!prev || !hasExistingMasterRowData(prev)) {
+      if (!prev) {
+        rowMap.set(key, nr);
+      } else if (!hasExistingMasterRowData(prev) && hasExistingMasterRowData(nr)) {
         rowMap.set(key, nr);
       }
     }
@@ -3064,7 +3214,8 @@ export function parseUploadedDatabaseForUpdate(
       if (
         (typeof maxTfCell === 'number' && maxTfCell > 0) ||
         dofTfNums.length > 0 ||
-        (typeof iecMaxCell === 'number' && iecMaxCell > 0)
+        (typeof iecMaxCell === 'number' && iecMaxCell > 0) ||
+        hasExistingMasterRowData(r as any)
       ) {
         validDatesSet.add(dateKey);
       }
@@ -3141,6 +3292,10 @@ export function parseUploadedDatabaseForUpdate(
             sourceFile: sheetRow.File_Name_Max,
           };
         }
+      }
+
+      if (hasExistingMasterRowData(sheetRow)) {
+        validDatesSet.add(dateKey);
       }
 
       rowsBySection.get(secInfo.sectionId)!.push(sheetRow);
@@ -3226,8 +3381,10 @@ export async function buildUpdatedMultiSheetDatabaseAsync(
       const key = `${nr.Date}_${normPh}`;
       const prev = rowMap.get(key);
 
-      // Strictly keep existing data record from uploaded file untouched; only insert if no existing valid record
-      if (!prev || !hasExistingMasterRowData(prev)) {
+      // Strictly keep existing data record from uploaded file untouched; only insert if no existing valid record and nr has valid data
+      if (!prev) {
+        rowMap.set(key, nr);
+      } else if (!hasExistingMasterRowData(prev) && hasExistingMasterRowData(nr)) {
         rowMap.set(key, nr);
       }
     }
@@ -3391,7 +3548,11 @@ export function parseUploadedSectionDailyProfileDatabase(
         if (list) {
           list.push(r as SectionDailyProfileRow);
           totalExistingRows++;
-          if ((typeof secMaxTf === 'number' && secMaxTf > 0) || hasAnyDofNum) {
+          if (
+            (typeof secMaxTf === 'number' && secMaxTf > 0) ||
+            hasAnyDofNum ||
+            hasExistingProfileRowData(r as any)
+          ) {
             validDatesSet.add(d);
           }
         }
@@ -3478,8 +3639,10 @@ export async function buildUpdatedSectionDailyProfileDatabaseAsync(
       const normPh = normalizePhaseCode(nr.Phase, sec.category);
       const key = `${nr.Date}_${hNum}_${normPh}`;
       const prev = rowMap.get(key);
-      // Strictly keep existing valid row untouched; only add new dates
-      if (!prev || !hasExistingProfileRowData(prev)) {
+      // Strictly keep existing valid row untouched; only insert if no existing record or prev was empty and nr has data
+      if (!prev) {
+        rowMap.set(key, nr);
+      } else if (!hasExistingProfileRowData(prev) && hasExistingProfileRowData(nr)) {
         rowMap.set(key, nr);
       }
     }

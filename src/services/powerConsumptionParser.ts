@@ -970,13 +970,25 @@ export function mergeDailySubstations(
     });
   }
 
+  // Helper to find the matching standard 15-minute slot (exact or within +/- 7 minutes)
+  const getOrFindSlot = (timeStr: string, timeMinutes: number) => {
+    let slot = timeMap.get(timeStr);
+    if (!slot) {
+      const roundedMin = Math.min(1425, Math.max(0, Math.round(timeMinutes / 15) * 15));
+      const hh = String(Math.floor(roundedMin / 60)).padStart(2, '0');
+      const mm = String(roundedMin % 60).padStart(2, '0');
+      slot = timeMap.get(`${hh}:${mm}`);
+    }
+    return slot;
+  };
+
   // Populate KMA: 115 kV Ckt #2 (04YB01)
   if (substationData.KMA && substationData.KMA.length > 0) {
     substationData.KMA.forEach((r) => {
-      const existing = timeMap.get(r.timeStr);
+      const existing = getOrFindSlot(r.timeStr, r.timeMinutes);
       const val = r.rawValues['04YB01'] ?? 0;
       if (existing) {
-        existing.kmaCircuit2 = val;
+        existing.kmaCircuit2 = existing.kmaCircuit2 > 0 ? Math.max(existing.kmaCircuit2, val) : val;
       } else {
         timeMap.set(r.timeStr, {
           time: r.timeStr,
@@ -993,10 +1005,10 @@ export function mergeDailySubstations(
   // Populate KMB: 115 kV Ckt #3 (03YB01)
   if (substationData.KMB && substationData.KMB.length > 0) {
     substationData.KMB.forEach((r) => {
-      const existing = timeMap.get(r.timeStr);
+      const existing = getOrFindSlot(r.timeStr, r.timeMinutes);
       const val = r.rawValues['03YB01'] ?? 0;
       if (existing) {
-        existing.kmbCircuit3 = val;
+        existing.kmbCircuit3 = existing.kmbCircuit3 > 0 ? Math.max(existing.kmbCircuit3, val) : val;
       } else {
         timeMap.set(r.timeStr, {
           time: r.timeStr,
@@ -1013,12 +1025,12 @@ export function mergeDailySubstations(
   // Populate KNA: 33 kV NKT (07WB01) & 33 kV Oil Filled (10WB01)
   if (substationData.KNA && substationData.KNA.length > 0) {
     substationData.KNA.forEach((r) => {
-      const existing = timeMap.get(r.timeStr);
+      const existing = getOrFindSlot(r.timeStr, r.timeMinutes);
       const valNkt = r.rawValues['07WB01'] ?? 0;
       const valOil = r.rawValues['10WB01'] ?? 0;
       if (existing) {
-        existing.knaNkt = valNkt;
-        existing.knaOilFilled = valOil;
+        existing.knaNkt = existing.knaNkt > 0 ? Math.max(existing.knaNkt, valNkt) : valNkt;
+        existing.knaOilFilled = existing.knaOilFilled > 0 ? Math.max(existing.knaOilFilled, valOil) : valOil;
       } else {
         timeMap.set(r.timeStr, {
           time: r.timeStr,
