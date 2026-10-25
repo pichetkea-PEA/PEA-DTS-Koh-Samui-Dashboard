@@ -168,21 +168,70 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
   // Mode 3: Continuous Timeline
   // -------------------------------------------------------------------------
 
+  // Helper to extract strict Land Cable phase code ('A' | 'B' | 'C') without matching the 'a' inside the word "Phase"
+  const extractLandPhaseCode = (ph?: string): 'A' | 'B' | 'C' | '' => {
+    if (!ph) return '';
+    const cleaned = ph.replace(/phase/gi, '').trim().toUpperCase();
+    if (cleaned === 'A' || cleaned.startsWith('A')) return 'A';
+    if (cleaned === 'B' || cleaned.startsWith('B')) return 'B';
+    if (cleaned === 'C' || cleaned.startsWith('C')) return 'C';
+    return '';
+  };
+
+  // Resolve daily maximum Fiber Temperature (column "Max_Fiber_Temp_C" / max across all DOFs in daily record)
+  const resolveRecordMaxFiberTemp = (rec: any): number => {
+    const colTf = typeof rec?.tfMax === 'number' && !Number.isNaN(rec.tfMax) ? rec.tfMax : 0;
+    if (isLand && rec?.dofTfMax && typeof rec.dofTfMax === 'object') {
+      const dofVals = Object.values(rec.dofTfMax)
+        .map((v) => Number(v))
+        .filter((v) => !Number.isNaN(v) && v > 0);
+      if (dofVals.length > 0) {
+        const maxDofTf = Math.max(...dofVals);
+        return colTf > 0 ? Math.max(colTf, maxDofTf) : maxDofTf;
+      }
+    }
+    return colTf;
+  };
+
+  // Resolve daily maximum Estimated Conductor Temperature (column "IEC_Est_Max_Conductor_C" / max across all DOFs in daily record)
+  const resolveRecordMaxConductorTemp = (rec: any): number => {
+    const colTc = typeof rec?.tcMax === 'number' && !Number.isNaN(rec.tcMax) ? rec.tcMax : 0;
+    if (isLand && rec?.dofTcMax && typeof rec.dofTcMax === 'object') {
+      const dofVals = Object.values(rec.dofTcMax)
+        .map((v) => Number(v))
+        .filter((v) => !Number.isNaN(v) && v > 0);
+      if (dofVals.length > 0) {
+        const maxDofTc = Math.max(...dofVals);
+        return colTc > 0 ? Math.max(colTc, maxDofTc) : maxDofTc;
+      }
+    }
+    return colTc;
+  };
+
   // 1. Chart 1: Fiber Temperature Comparison Data
   const chart1TempData = useMemo(() => {
     if (!isPhaseSelectedIfRequired) return [];
+
+    const targetPhaseCode = isLand ? extractLandPhaseCode(selectedPhase) : '';
 
     // Filter by Section and Phase
     const baseRecords = allRecords.filter((r) => {
       if (r.sectionId !== selectedSectionId) return false;
       if (isLand) {
-        if (!selectedPhase) return false;
-        const rPh = (r.phase || '').toLowerCase();
-        const selPh = selectedPhase.toLowerCase();
-        const phaseLetter = selPh.includes('a') ? 'a' : selPh.includes('b') ? 'b' : 'c';
-        if (!rPh.includes(phaseLetter)) return false;
+        if (!targetPhaseCode) return false;
+        const recordPhaseCode = extractLandPhaseCode(r.phase);
+        if (recordPhaseCode !== targetPhaseCode) return false;
       }
       return true;
+    });
+
+    // Index baseRecords by date for O(1) lookup for the active section & phase
+    const recordByDate = new Map<string, any>();
+    baseRecords.forEach((r) => {
+      const existing = recordByDate.get(r.date);
+      if (!existing || resolveRecordMaxFiberTemp(r) > resolveRecordMaxFiberTemp(existing)) {
+        recordByDate.set(r.date, r);
+      }
     });
 
     if (comparisonMode === 'year_to_year') {
@@ -199,10 +248,12 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
         };
         availableYears.forEach((yr) => {
           const targetDate = `${yr}-${mmdd}`;
-          const rec = baseRecords.find((r) => r.date === targetDate);
+          const rec = recordByDate.get(targetDate);
           if (rec) {
-            row[`Tf_${yr}`] = rec.tfMax > 0 ? Number(rec.tfMax.toFixed(1)) : null;
-            row[`Tc_${yr}`] = rec.tcMax > 0 ? Number(rec.tcMax.toFixed(1)) : null;
+            const tfVal = resolveRecordMaxFiberTemp(rec);
+            const tcVal = resolveRecordMaxConductorTemp(rec);
+            row[`Tf_${yr}`] = tfVal > 0 ? Number(tfVal.toFixed(2)) : null;
+            row[`Tc_${yr}`] = tcVal > 0 ? Number(tcVal.toFixed(2)) : null;
           } else {
             row[`Tf_${yr}`] = null;
             row[`Tc_${yr}`] = null;
@@ -223,10 +274,12 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
 
         availableYears.forEach((yr) => {
           const targetDate = `${yr}-${selectedMonth}-${day}`;
-          const rec = baseRecords.find((r) => r.date === targetDate);
+          const rec = recordByDate.get(targetDate);
           if (rec) {
-            row[`Tf_${yr}`] = rec.tfMax > 0 ? Number(rec.tfMax.toFixed(1)) : null;
-            row[`Tc_${yr}`] = rec.tcMax > 0 ? Number(rec.tcMax.toFixed(1)) : null;
+            const tfVal = resolveRecordMaxFiberTemp(rec);
+            const tcVal = resolveRecordMaxConductorTemp(rec);
+            row[`Tf_${yr}`] = tfVal > 0 ? Number(tfVal.toFixed(2)) : null;
+            row[`Tc_${yr}`] = tcVal > 0 ? Number(tcVal.toFixed(2)) : null;
           } else {
             row[`Tf_${yr}`] = null;
             row[`Tc_${yr}`] = null;
@@ -238,18 +291,20 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     }
 
     // Continuous timeline mode
-    return baseRecords
+    return Array.from(recordByDate.values())
       .filter((r) => (selectedYear === 'ALL' ? true : r.date.startsWith(selectedYear)))
       .map((r) => {
-        const zone = getThermalZoneInfo(r.tcMax > 0 ? r.tcMax : r.tfMax);
+        const tfVal = resolveRecordMaxFiberTemp(r);
+        const tcVal = resolveRecordMaxConductorTemp(r);
+        const zone = getThermalZoneInfo(tcVal > 0 ? tcVal : tfVal);
         return {
           date: r.date,
           monthDay: r.date.slice(5),
           year: r.date.slice(0, 4),
-          tfMax: r.tfMax,
+          tfMax: Number(tfVal.toFixed(2)),
           tfMin: r.tfMin,
           tfMean: r.tfMean,
-          tcMax: r.tcMax,
+          tcMax: Number(tcVal.toFixed(2)),
           zone: zone.shortLabel,
           zoneColor: zone.color,
           phase: r.phase,
@@ -812,6 +867,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                 <div style={{ minWidth: `${Math.max(900, chart1TempData.length * 16)}px` }} className="h-[360px]">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart
+                      key={`temp-chart-${selectedSectionId}-${selectedPhase}-${comparisonMode}-${selectedMonth}-${selectedYear}`}
                       data={chart1TempData}
                       margin={{ top: 20, right: 30, left: 10, bottom: 20 }}
                     >

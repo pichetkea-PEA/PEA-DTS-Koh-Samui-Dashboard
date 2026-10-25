@@ -87,15 +87,22 @@ export function extractActualTelemetryForSection(params: {
       ? dailyPowerSummary
       : powerSummariesByDate?.get(dateKey) || null;
 
+  const extractLandPhaseCode = (ph?: string): 'A' | 'B' | 'C' | '' => {
+    if (!ph) return '';
+    const cleaned = ph.replace(/phase/gi, '').trim().toUpperCase();
+    if (cleaned === 'A' || cleaned.startsWith('A')) return 'A';
+    if (cleaned === 'B' || cleaned.startsWith('B')) return 'B';
+    if (cleaned === 'C' || cleaned.startsWith('C')) return 'C';
+    return '';
+  };
+
   // 1. Filter real parsed .TEPR files for this date from Target Folder 1
   const dateFiles = parsedFiles.filter((f) => {
     const fDate = f.dateMeta?.dateKey || '';
     if (fDate !== dateKey) return false;
     if (isLand && phaseFilter && phaseFilter !== 'all') {
-      const fPh = (f.cablePhase || '').toLowerCase();
-      const sPh = phaseFilter.toLowerCase();
-      const letter = sPh.includes('a') ? 'a' : sPh.includes('b') ? 'b' : 'c';
-      if (!fPh.includes(letter)) return false;
+      const targetCode = extractLandPhaseCode(phaseFilter);
+      if (targetCode && extractLandPhaseCode(f.cablePhase) !== targetCode) return false;
     }
     return true;
   });
@@ -104,10 +111,8 @@ export function extractActualTelemetryForSection(params: {
   const sectionSamplingPoints = CIRCUIT_3_SAMPLING_POINTS.filter((p) => {
     if (p.sectionId !== section.sectionId) return false;
     if (isLand && phaseFilter && phaseFilter !== 'all') {
-      const pPh = (p.phase || '').toLowerCase();
-      const sPh = phaseFilter.toLowerCase();
-      const letter = sPh.includes('a') ? 'a' : sPh.includes('b') ? 'b' : 'c';
-      if (!pPh.includes(letter)) return false;
+      const targetCode = extractLandPhaseCode(phaseFilter);
+      if (targetCode && extractLandPhaseCode(p.phase) !== targetCode) return false;
     }
     return true;
   });

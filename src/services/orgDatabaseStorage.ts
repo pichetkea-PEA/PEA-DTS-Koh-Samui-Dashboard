@@ -1107,7 +1107,7 @@ export async function saveUploadedOrgDatabase(
           if (tfMatch) {
             const dNum = parseFloat(tfMatch[1]);
             const v = typeof rawAny[key] === 'number' ? rawAny[key] : parseFloat(String(rawAny[key] ?? ''));
-            if (!isNaN(dNum) && !isNaN(v) && v > 0 && v < 150) {
+            if (!isNaN(dNum) && !isNaN(v) && v > 0) {
               const val = Number(v.toFixed(2));
               rowDofTf[dNum.toFixed(2)] = val;
               rowDofTf[dNum.toFixed(1)] = val;
@@ -1120,7 +1120,7 @@ export async function saveUploadedOrgDatabase(
           if (tcMatch) {
             const dNum = parseFloat(tcMatch[1]);
             const v = typeof rawAny[key] === 'number' ? rawAny[key] : parseFloat(String(rawAny[key] ?? ''));
-            if (!isNaN(dNum) && !isNaN(v) && v > 0 && v < 180) {
+            if (!isNaN(dNum) && !isNaN(v) && v > 0) {
               const val = Number(v.toFixed(2));
               rowDofTc[dNum.toFixed(2)] = val;
               rowDofTc[dNum.toFixed(1)] = val;
@@ -1150,25 +1150,28 @@ export async function saveUploadedOrgDatabase(
           }
         }
 
-        const tfCandidates = [
-          row.Daily_Max_Fiber_Temp_C,
+        const directMaxTf = [
           row.Max_Fiber_Temp_C,
+          row.Daily_Max_Fiber_Temp_C,
           row.DOF_Fiber_Temp_C,
           rawAny.Max_Fiber_Temp_Period_C,
           rawAny.Fiber_Temp_C,
-          ...rowDofTfValues,
         ]
           .map((v) => (typeof v === 'number' ? v : parseFloat(String(v ?? ''))))
-          .filter((n) => !isNaN(n) && n > 0 && n < 150);
+          .find((n) => !isNaN(n) && n > 0);
+
+        const maxDofTf = rowDofTfValues.length > 0 ? Math.max(...rowDofTfValues) : 0;
+        const tfMax = Number(
+          (directMaxTf && directMaxTf > 0 ? Math.max(directMaxTf, maxDofTf) : maxDofTf).toFixed(2)
+        );
 
         const tfMinCandidates = [
           row.Min_Fiber_Temp_C,
           row.DOF_Fiber_Temp_C,
-          row.Max_Fiber_Temp_C,
           ...rowDofTfValues,
         ]
           .map((v) => (typeof v === 'number' ? v : parseFloat(String(v ?? ''))))
-          .filter((n) => !isNaN(n) && n > 0 && n < 150);
+          .filter((n) => !isNaN(n) && n > 0);
 
         const tfMeanCandidates = [
           row.Mean_Fiber_Temp_C,
@@ -1176,34 +1179,53 @@ export async function saveUploadedOrgDatabase(
           row.DOF_Fiber_Temp_C,
         ]
           .map((v) => (typeof v === 'number' ? v : parseFloat(String(v ?? ''))))
-          .filter((n) => !isNaN(n) && n > 0 && n < 150);
+          .filter((n) => !isNaN(n) && n > 0);
 
-        const tcCandidates = [
-          row.Daily_Max_Conductor_Temp_C,
+        const directMaxTc = [
           row.IEC_Est_Max_Conductor_C,
+          row.Daily_Max_Conductor_Temp_C,
           row.DOF_Conductor_Temp_C,
           rawAny.Max_Conductor_Temp_Period_C,
-          ...rowDofTcValues,
         ]
           .map((v) => (typeof v === 'number' ? v : parseFloat(String(v ?? ''))))
-          .filter((n) => !isNaN(n) && n > 0 && n < 180);
+          .find((n) => !isNaN(n) && n > 0);
 
-        const tfMax = tfCandidates.length > 0 ? Math.max(...tfCandidates) : 0;
-        const tfMin = tfMinCandidates.length > 0 ? Math.min(...tfMinCandidates) : tfMax;
+        const maxDofTc = rowDofTcValues.length > 0 ? Math.max(...rowDofTcValues) : 0;
+        const tcMax =
+          directMaxTc && directMaxTc > 0
+            ? Number(Math.max(directMaxTc, maxDofTc).toFixed(2))
+            : maxDofTc > 0
+              ? Number(maxDofTc.toFixed(2))
+              : tfMax > 0
+                ? Number(estimateConductorTempFromFiber(tfMax, pCkt3 || 35, category, secId).toFixed(2))
+                : 0;
+
+        const tfMin = tfMinCandidates.length > 0 ? Number(Math.min(...tfMinCandidates).toFixed(2)) : tfMax;
         const tfMean =
           tfMeanCandidates.length > 0
-            ? tfMeanCandidates[0]
+            ? Number(tfMeanCandidates[0].toFixed(2))
             : rowDofTfValues.length > 0
-            ? Number((rowDofTfValues.reduce((a, b) => a + b, 0) / rowDofTfValues.length).toFixed(2))
-            : tfMax;
-        const tcMax = tcCandidates.length > 0
-          ? Math.max(...tcCandidates)
-          : (tfMax > 0 ? Number(estimateConductorTempFromFiber(tfMax, pCkt3 || 35, category, secId).toFixed(2)) : 0);
-        const tcMin = typeof row.IEC_Est_Min_Conductor_C === 'number' && row.IEC_Est_Min_Conductor_C > 0 && row.IEC_Est_Min_Conductor_C < 180
-          ? row.IEC_Est_Min_Conductor_C
-          : (tfMin > 0 ? Number(estimateConductorTempFromFiber(tfMin, (pCkt3 || 35) * 0.8, category, secId).toFixed(2)) : 0);
+              ? Number((rowDofTfValues.reduce((a, b) => a + b, 0) / rowDofTfValues.length).toFixed(2))
+              : tfMax;
+        const rawMinTc =
+          typeof row.IEC_Est_Min_Conductor_C === 'number'
+            ? row.IEC_Est_Min_Conductor_C
+            : parseFloat(String(row.IEC_Est_Min_Conductor_C ?? ''));
+        const tcMin =
+          !isNaN(rawMinTc) && rawMinTc > 0
+            ? Number(rawMinTc.toFixed(2))
+            : tfMin > 0
+              ? Number(estimateConductorTempFromFiber(tfMin, (pCkt3 || 35) * 0.8, category, secId).toFixed(2))
+              : 0;
 
-        const phaseLabel = row.Phase || (category === 'land' ? 'Phase A' : 'Submarine (CH 3)');
+        const rawPh = String(row.Phase || '').trim();
+        let phaseLabel = category === 'land' ? 'Phase A' : 'Submarine (CH 3)';
+        if (/^(Phase\s*)?A$/i.test(rawPh)) phaseLabel = 'Phase A';
+        else if (/^(Phase\s*)?B$/i.test(rawPh)) phaseLabel = 'Phase B';
+        else if (/^(Phase\s*)?C$/i.test(rawPh)) phaseLabel = 'Phase C';
+        else if (/^(SM|Submarine)/i.test(rawPh)) phaseLabel = 'Submarine (CH 3)';
+        else if (rawPh) phaseLabel = rawPh;
+
         const aggKey = `${secId}_${normDate}_${phaseLabel}`;
         const existing = aggregatedMap.get(aggKey);
 
