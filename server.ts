@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import zlib from 'zlib';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
@@ -11,9 +12,13 @@ dotenv.config();
 
 const app = express();
 const PORT = 3000;
-const USER_MEMORY_FILE = path.join(process.cwd(), '.dts-user-memory.json');
-const MASTER_SUMMARY_FILE = path.join(process.cwd(), '.dts-master-section-summary.json');
-const PUBLIC_DEFAULT_DB_FILE = path.join(process.cwd(), '.dts-public-default-databases.json');
+const RUNTIME_CACHE_ROOT = path.join(os.tmpdir(), 'dts-samui-runtime-cache');
+try {
+  fs.mkdirSync(RUNTIME_CACHE_ROOT, { recursive: true });
+} catch {}
+const USER_MEMORY_FILE = path.join(RUNTIME_CACHE_ROOT, '.dts-user-memory.json');
+const MASTER_SUMMARY_FILE = path.join(RUNTIME_CACHE_ROOT, '.dts-master-section-summary.json');
+const PUBLIC_DEFAULT_DB_FILE = path.join(RUNTIME_CACHE_ROOT, '.dts-public-default-databases.json');
 
 interface StoredUserPreference {
   permanentFolder?: { id: string; name: string } | null;
@@ -943,6 +948,1092 @@ let cachedPublicDefaultDbResponseJson: string | null = null;
 let cachedPublicDefaultDbResponseGzip: Buffer | null = null;
 let cachedSectionProfilesFastResponse: any = null;
 
+const SECTION_PROFILES_DIR = path.join(RUNTIME_CACHE_ROOT, 'section_profiles_by_date');
+const DRIVE_DOWNLOADS_CACHE_DIR = path.join(RUNTIME_CACHE_ROOT, 'drive_downloads');
+
+const DEFAULT_PUBLIC_THREE_PANEL_LINKS = {
+  panel1Url: 'https://drive.google.com/drive/folders/1CMSH2f5hAl0N6F3PHhpr9mwStcX29kgS?usp=sharing',
+  panel2Url: 'https://drive.google.com/drive/folders/1jqS95Z-nF1SivlJFuka8CcIKiyFBMrZ6?usp=sharing',
+  panel3Url: 'https://drive.google.com/drive/folders/15rgLYl3V7sqPDNPY8zOLEz9eDBtZLj2_?usp=sharing',
+};
+
+function invalidatePublicDefaultDbCache() {
+  cachedPublicDefaultDbResponseJson = null;
+  cachedPublicDefaultDbResponseGzip = null;
+  cachedSectionProfilesFastResponse = null;
+}
+
+export interface ScannedDriveFileMetadata {
+  folderId?: string;
+  fileId: string;
+  fileName: string;
+  mimeType?: string;
+  fileSize: number;
+  modifiedLabel: string;
+  lastModifiedHeader: string;
+  versionSignature: string;
+  downloadUrl: string;
+  isGoogleSheets: boolean;
+}
+
+function extractLatestDateFromFileName(name: string): string {
+  const matches = [...(name || '').matchAll(/(\d{4}[-_.]\d{2}[-_.]\d{2})/g)].map((m) =>
+    m[1].replace(/[_.]/g, '-')
+  );
+  if (matches.length > 0) {
+    matches.sort();
+    return matches[matches.length - 1];
+  }
+  return '';
+}
+
+/**
+ * Live scanner for a shared Google Drive folder, file, or Google Sheet link.
+ * Detects newly uploaded files, renamed files, or updated file versions without requiring OAuth login.
+ */
+async function scanSharedDriveFolderMetadata(
+  rawUrl: string,
+  preferredFormat: 'xlsx' | 'csv' = 'xlsx',
+  authHeader = ''
+): Promise<ScannedDriveFileMetadata | null> {
+  const cleanUrl = (rawUrl || '').trim();
+  if (!cleanUrl) return null;
+
+  let folderId = '';
+  let targetFileId = '';
+  let targetFileName = '';
+  let targetMimeType = '';
+  let modifiedLabel = '';
+  let isGoogleSheets = false;
+
+  const folderMatch = cleanUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (folderMatch && folderMatch[1]) {
+    folderId = folderMatch[1];
+    let foundFiles: Array<{ id: string; name: string; mimeType?: string; modified?: string; size?: number }> = [];
+
+    // 1. Try Google Drive API v3 if auth token is provided
+    if (authHeader) {
+      try {
+        const driveApiRes = await fetch(
+          `https://www.googleapis.com/drive/v3/files?q=%27${folderId}%27+in+parents+and+trashed%3Dfalse&fields=files(id%2Cname%2CmimeType%2Csize%2CmodifiedTime)&orderBy=modifiedTime+desc`,
+          { headers: { Authorization: authHeader } }
+        );
+        if (driveApiRes.ok) {
+          const driveData = await driveApiRes.json();
+          if (Array.isArray(driveData.files) && driveData.files.length > 0) {
+            foundFiles = driveData.files.map((f: any) => ({
+              id: f.id,
+              name: f.name,
+              mimeType: f.mimeType,
+              modified: f.modifiedTime || '',
+              size: Number(f.size || 0),
+            }));
+          }
+        }
+      } catch {
+        // fallback to public embeddedfolderview
+      }
+    }
+
+    // 2. Public Google Drive Embedded Folder View (fast ~2KB HTML listing of shared folder files)
+    if (foundFiles.length === 0) {
+      try {
+        const embedRes = await fetch(`https://drive.google.com/embeddedfolderview?id=${folderId}#list`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Cache-Control': 'no-cache',
+          },
+        });
+        if (embedRes.ok) {
+          const embedHtml = await embedRes.text();
+          const entryRegex =
+            /id="entry-([a-zA-Z0-9_-]+)"[\s\S]*?<div class="flip-entry-title">([^<]+)<\/div>(?:[\s\S]*?<div class="flip-entry-last-modified"><div>([^<]*)<\/div>)?/gi;
+          let m: RegExpExecArray | null;
+          while ((m = entryRegex.exec(embedHtml)) !== null) {
+            const fId = m[1].trim();
+            const fName = m[2].trim();
+            const fMod = (m[3] || '').trim();
+            if (/\.(xlsx|csv|xls)$/i.test(fName)) {
+              foundFiles.push({ id: fId, name: fName, modified: fMod });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Embedded folder view scan fallback:', e);
+      }
+    }
+
+    // 3. Fallback to standard folder HTML page scrape if embedded view returned nothing
+    if (foundFiles.length === 0) {
+      try {
+        const folderHtmlRes = await fetch(`https://drive.google.com/drive/folders/${folderId}`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Cache-Control': 'no-cache',
+          },
+        });
+        if (folderHtmlRes.ok) {
+          const folderHtml = await folderHtmlRes.text();
+          const regex =
+            /aria-label="([^"]+\.(?:xlsx|csv|xls))[^"]*"[^>]*?ssk=[\x27"][^\x27"]*?:([a-zA-Z0-9_-]{20,})-0-16/gi;
+          let m: RegExpExecArray | null;
+          while ((m = regex.exec(folderHtml)) !== null) {
+            foundFiles.push({ name: m[1], id: m[2] });
+          }
+          if (foundFiles.length === 0) {
+            const sskMatches = [
+              ...folderHtml.matchAll(/ssk=[\x27"][0-9]+:[a-zA-Z0-9_-]+:([a-zA-Z0-9_-]{25,})-0-16[\x27"]/g),
+            ];
+            const nameMatches = [
+              ...folderHtml.matchAll(/aria-label=[\x27"]([^\x27"]+\.(?:xlsx|csv|xls))/gi),
+            ];
+            if (sskMatches.length > 0 && nameMatches.length > 0) {
+              foundFiles.push({ name: nameMatches[0][1], id: sskMatches[0][1] });
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (foundFiles.length === 0) {
+      return null;
+    }
+
+    // Sort candidates so the file with the newest date in its filename (or preferred extension) is selected first
+    foundFiles.sort((a, b) => {
+      const dateA = extractLatestDateFromFileName(a.name);
+      const dateB = extractLatestDateFromFileName(b.name);
+      if (dateA !== dateB) return dateB.localeCompare(dateA);
+      const aPref = a.name.toLowerCase().endsWith(`.${preferredFormat}`) ? 1 : 0;
+      const bPref = b.name.toLowerCase().endsWith(`.${preferredFormat}`) ? 1 : 0;
+      return bPref - aPref;
+    });
+
+    const chosen = foundFiles[0];
+    targetFileId = chosen.id;
+    targetFileName = chosen.name;
+    targetMimeType = chosen.mimeType || '';
+    modifiedLabel = chosen.modified || '';
+  } else {
+    const sheetsMatch = cleanUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+    if (sheetsMatch && sheetsMatch[1]) {
+      targetFileId = sheetsMatch[1];
+      targetFileName = `Google_Sheets_Database.${preferredFormat}`;
+      isGoogleSheets = true;
+    } else {
+      const fileMatch =
+        cleanUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || cleanUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+      if (fileMatch && fileMatch[1]) {
+        targetFileId = fileMatch[1];
+        targetFileName = `Shared_Drive_Database.${preferredFormat}`;
+      }
+    }
+  }
+
+  if (!targetFileId) return null;
+
+  let downloadUrl = '';
+  if (isGoogleSheets || targetMimeType === 'application/vnd.google-apps.spreadsheet') {
+    isGoogleSheets = true;
+    downloadUrl = `https://docs.google.com/spreadsheets/d/${targetFileId}/export?format=${preferredFormat}`;
+  } else {
+    downloadUrl = `https://drive.usercontent.google.com/download?id=${targetFileId}&export=download&confirm=t`;
+  }
+
+  let fileSize = 0;
+  let lastModifiedHeader = '';
+
+  // Perform fast HEAD check on download URL to get exact Content-Length & Content-Disposition filename
+  try {
+    const headRes = await fetch(downloadUrl, {
+      method: 'HEAD',
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+    if (headRes.ok) {
+      const cl = parseInt(headRes.headers.get('content-length') || '0', 10);
+      if (cl > 0) fileSize = cl;
+      lastModifiedHeader = headRes.headers.get('last-modified') || '';
+      const disp = headRes.headers.get('content-disposition') || '';
+      const fnMatch = disp.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+      if (fnMatch && fnMatch[1]) {
+        try {
+          targetFileName = decodeURIComponent(fnMatch[1]);
+        } catch {
+          targetFileName = fnMatch[1];
+        }
+      }
+    }
+  } catch {
+    // ignore HEAD error
+  }
+
+  const versionSignature = `${targetFileId}|${targetFileName}|${fileSize}`;
+
+  return {
+    folderId: folderId || undefined,
+    fileId: targetFileId,
+    fileName: targetFileName,
+    mimeType: targetMimeType,
+    fileSize,
+    modifiedLabel,
+    lastModifiedHeader,
+    versionSignature,
+    downloadUrl,
+    isGoogleSheets,
+  };
+}
+
+// Fast Native ZIP/XML Workbook Reader for high-speed server-side .xlsx parsing (handles 100MB+ files in ~5s)
+function openXlsxZipBuffer(buf: Buffer) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd === -1) throw new Error('Not a valid ZIP/XLSX buffer');
+  const cdSize = buf.readUInt32LE(eocd + 12);
+  const cdOffset = buf.readUInt32LE(eocd + 16);
+  let pos = cdOffset;
+  const entries = new Map<string, { comp: number; cSize: number; lho: number }>();
+  while (pos < cdOffset + cdSize && pos + 46 <= buf.length) {
+    if (buf.readUInt32LE(pos) !== 0x02014b50) break;
+    const comp = buf.readUInt16LE(pos + 10);
+    const cSize = buf.readUInt32LE(pos + 20);
+    const nLen = buf.readUInt16LE(pos + 28);
+    const eLen = buf.readUInt16LE(pos + 30);
+    const cmLen = buf.readUInt16LE(pos + 32);
+    const lho = buf.readUInt32LE(pos + 42);
+    const name = buf.toString('utf8', pos + 46, pos + 46 + nLen);
+    entries.set(name, { comp, cSize, lho });
+    pos += 46 + nLen + eLen + cmLen;
+  }
+  return {
+    entries,
+    readEntryText(name: string): string | null {
+      const e = entries.get(name);
+      if (!e) return null;
+      const fnLen = buf.readUInt16LE(e.lho + 26);
+      const exLen = buf.readUInt16LE(e.lho + 28);
+      const start = e.lho + 30 + fnLen + exLen;
+      const slice = buf.subarray(start, start + e.cSize);
+      return (e.comp === 0 ? slice : zlib.inflateRawSync(slice)).toString('utf8');
+    },
+  };
+}
+
+function xlsxColRefToIdx(colStr: string): number {
+  let idx = 0;
+  for (let i = 0; i < colStr.length; i++) {
+    const code = colStr.charCodeAt(i);
+    if (code >= 65 && code <= 90) idx = idx * 26 + (code - 64);
+    else break;
+  }
+  return idx - 1;
+}
+
+function parseXlsxSharedStrings(zip: ReturnType<typeof openXlsxZipBuffer>): string[] {
+  const sharedStrings: string[] = [];
+  const ssXml = zip.readEntryText('xl/sharedStrings.xml');
+  if (ssXml) {
+    let pos = 0;
+    while (true) {
+      const siStart = ssXml.indexOf('<si>', pos);
+      if (siStart === -1) break;
+      const siEnd = ssXml.indexOf('</si>', siStart);
+      const tStart = ssXml.indexOf('<t', siStart);
+      if (tStart !== -1 && tStart < siEnd) {
+        const valStart = ssXml.indexOf('>', tStart) + 1;
+        const valEnd = ssXml.indexOf('</t>', valStart);
+        sharedStrings.push(ssXml.slice(valStart, valEnd));
+      } else {
+        sharedStrings.push('');
+      }
+      pos = siEnd + 5;
+    }
+  }
+  return sharedStrings;
+}
+
+function parseXlsxWorksheetRows(xml: string, sharedStrings: string[]): { headers: string[]; rows: string[][] } {
+  const r1Start = xml.indexOf('<row ');
+  if (r1Start === -1) return { headers: [], rows: [] };
+  const r1End = xml.indexOf('</row>', r1Start);
+  const headerXml = xml.slice(r1Start, r1End);
+  const headers: string[] = [];
+  const cellRegex =
+    /<c r="([A-Z]+)\d+"(?:\s+t="([^"]*)")?[^>]*>(?:<v>([^<]*)<\/v>|<is><t[^>]*>([^<]*)<\/t><\/is>)?<\/c>/g;
+  let m: RegExpExecArray | null;
+  while ((m = cellRegex.exec(headerXml)) !== null) {
+    const cIdx = xlsxColRefToIdx(m[1]);
+    let val = m[3] ?? m[4] ?? '';
+    if (m[2] === 's') val = sharedStrings[parseInt(val, 10)] || '';
+    headers[cIdx] = val;
+  }
+
+  const rows: string[][] = [];
+  let rowStart = xml.indexOf('<row ', r1End);
+  while (rowStart !== -1) {
+    const rowEnd = xml.indexOf('</row>', rowStart);
+    if (rowEnd === -1) break;
+    const rowStr = xml.slice(rowStart, rowEnd);
+    const vals: string[] = [];
+    let cPos = 0;
+    while (true) {
+      const cStart = rowStr.indexOf('<c ', cPos);
+      if (cStart === -1) break;
+      const rStart = rowStr.indexOf('r="', cStart);
+      const rEnd = rowStr.indexOf('"', rStart + 3);
+      const ref = rowStr.slice(rStart + 3, rEnd);
+      const cIdx = xlsxColRefToIdx(ref);
+      const cClose = rowStr.indexOf('</c>', rEnd);
+      const selfClose = rowStr.indexOf('/>', rEnd);
+      if (selfClose !== -1 && (cClose === -1 || selfClose < cClose)) {
+        cPos = selfClose + 2;
+        continue;
+      }
+      const tagEnd = rowStr.indexOf('>', rEnd);
+      const cellAttrs = rowStr.slice(rEnd + 1, tagEnd);
+      const isShared = cellAttrs.includes('t="s"');
+      const vStart = rowStr.indexOf('<v>', tagEnd);
+      if (vStart !== -1 && (cClose === -1 || vStart < cClose)) {
+        const vEnd = rowStr.indexOf('</v>', vStart + 3);
+        let rawVal = rowStr.slice(vStart + 3, vEnd);
+        if (isShared) rawVal = sharedStrings[parseInt(rawVal, 10)] || '';
+        vals[cIdx] = rawVal;
+        cPos = vEnd + 4;
+      } else {
+        const isStart = rowStr.indexOf('<t', tagEnd);
+        if (isStart !== -1 && (cClose === -1 || isStart < cClose)) {
+          const tValStart = rowStr.indexOf('>', isStart) + 1;
+          const tValEnd = rowStr.indexOf('</t>', tValStart);
+          vals[cIdx] = rowStr.slice(tValStart, tValEnd);
+        }
+        cPos = cClose !== -1 ? cClose + 4 : tagEnd + 1;
+      }
+    }
+    rows.push(vals);
+    rowStart = xml.indexOf('<row ', rowEnd + 6);
+  }
+  return { headers, rows };
+}
+
+function normalizeServerDateStr(raw: string): string {
+  const clean = (raw || '').replace(/^["']|["']$/g, '').trim();
+  if (!clean) return '';
+  const ymd = clean.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (ymd) {
+    return `${ymd[1]}-${ymd[2].padStart(2, '0')}-${ymd[3].padStart(2, '0')}`;
+  }
+  const dmy = clean.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+  if (dmy) {
+    const p1 = parseInt(dmy[1], 10);
+    const p2 = parseInt(dmy[2], 10);
+    const yr = dmy[3];
+    if (p2 > 12 && p1 <= 12) {
+      return `${yr}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
+    }
+    return `${yr}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
+  }
+  return clean;
+}
+
+function parsePanel1WorkbookFast(
+  buf: Buffer,
+  meta: ScannedDriveFileMetadata,
+  remoteUrl: string
+): { config: any; records: any[]; info: any } {
+  const nowIso = new Date().toISOString();
+  const zip = openXlsxZipBuffer(buf);
+  const sharedStrings = parseXlsxSharedStrings(zip);
+  const p1Records: any[] = [];
+  const p1DatesSet = new Set<string>();
+
+  for (let s = 1; s <= 25; s++) {
+    const xml = zip.readEntryText(`xl/worksheets/sheet${s}.xml`);
+    if (!xml) continue;
+    const { headers, rows } = parseXlsxWorksheetRows(xml, sharedStrings);
+    if (headers.length === 0 || rows.length === 0) continue;
+
+    const idxSecId = headers.findIndex((h) => /Sheet_Section_ID|Section_ID/i.test(h || ''));
+    const idxCat = headers.findIndex((h) => /^Category$/i.test(h || ''));
+    const idxDate = headers.findIndex((h) => /^Date$/i.test(h || ''));
+    const idxPhase = headers.findIndex((h) => /^Phase$/i.test(h || ''));
+    const idxMaxTf = headers.findIndex((h) => /Max_Fiber_Temp_C|Daily_Max_Fiber_Temp_C/i.test(h || ''));
+    const idxMinTf = headers.findIndex((h) => /Min_Fiber_Temp_C/i.test(h || ''));
+    const idxMeanTf = headers.findIndex((h) => /Mean_Fiber_Temp_C/i.test(h || ''));
+    const idxMaxTc = headers.findIndex((h) => /IEC_Est_Max_Conductor_C|Daily_Max_Conductor_Temp_C/i.test(h || ''));
+    const idxMinTc = headers.findIndex((h) => /IEC_Est_Min_Conductor_C/i.test(h || ''));
+    const idxTimeMax = headers.findIndex((h) => /Timestamp_Max/i.test(h || ''));
+    const idxPTotal = headers.findIndex((h) => /Power_Flow_During_Max_Total_MW|Power_Total_MW/i.test(h || ''));
+    const idxPCkt3 = headers.findIndex((h) => /Power_Flow_During_Max_Ckt3_MW|Power_Ckt3_MW/i.test(h || ''));
+    const idxPCkt2 = headers.findIndex((h) => /Power_Flow_During_Max_Ckt2_MW|Power_Ckt2_MW/i.test(h || ''));
+    const idxPNkt = headers.findIndex((h) => /Power_Flow_During_Max_33NKT_MW|Power_33NKT_MW/i.test(h || ''));
+    const idxPOil = headers.findIndex((h) => /Power_Flow_During_Max_33Oil_MW|Power_33Oil_MW/i.test(h || ''));
+    const idxFileMax = headers.findIndex((h) => /File_Name_Max/i.test(h || ''));
+
+    const dofCols: Array<{ type: 'tf' | 'tc' | 'time'; dof: number; cIdx: number }> = [];
+    headers.forEach((h, cIdx) => {
+      if (!h) return;
+      const tfM = h.match(/^Tf[_ ]?DOF[_ ]?([\d.]+)m?(?:[_ ]?C)?$/i);
+      if (tfM) {
+        dofCols.push({ type: 'tf', dof: parseFloat(tfM[1]), cIdx });
+        return;
+      }
+      const tcM = h.match(/^Tc[_ ]?DOF[_ ]?([\d.]+)m?(?:[_ ]?C)?$/i);
+      if (tcM) {
+        dofCols.push({ type: 'tc', dof: parseFloat(tcM[1]), cIdx });
+        return;
+      }
+      const tmM = h.match(/^Time[_ ]?DOF[_ ]?([\d.]+)m?$/i);
+      if (tmM) {
+        dofCols.push({ type: 'time', dof: parseFloat(tmM[1]), cIdx });
+      }
+    });
+
+    for (const vals of rows) {
+      const rawDate = idxDate >= 0 ? vals[idxDate] : '';
+      const date = normalizeServerDateStr(rawDate);
+      if (!date) continue;
+      p1DatesSet.add(date);
+
+      const secId = (idxSecId >= 0 ? vals[idxSecId] : '') || '';
+      const cat = (idxCat >= 0 ? vals[idxCat] : '') || (secId.startsWith('1.') ? 'land' : 'submarine');
+      const rawPhase = (idxPhase >= 0 ? vals[idxPhase] : '') || '';
+      let normPhase = cat === 'land' ? 'Phase A' : 'Submarine (CH 3)';
+      if (rawPhase === 'A' || /^Phase\s*A$/i.test(rawPhase)) normPhase = 'Phase A';
+      else if (rawPhase === 'B' || /^Phase\s*B$/i.test(rawPhase)) normPhase = 'Phase B';
+      else if (rawPhase === 'C' || /^Phase\s*C$/i.test(rawPhase)) normPhase = 'Phase C';
+      else if (rawPhase === 'SM' || /Submarine/i.test(rawPhase)) normPhase = 'Submarine (CH 3)';
+
+      const dofTfMax: Record<string, number> = {};
+      const dofTcMax: Record<string, number> = {};
+      const dofTimeMax: Record<string, string> = {};
+      const dofTfList: number[] = [];
+      const dofTcList: number[] = [];
+
+      for (const dc of dofCols) {
+        const cellVal = vals[dc.cIdx];
+        if (!cellVal) continue;
+        const k2 = dc.dof.toFixed(2);
+        const k1 = dc.dof.toFixed(1);
+        const k0 = String(Math.round(dc.dof));
+        if (dc.type === 'time') {
+          dofTimeMax[k2] = cellVal;
+          dofTimeMax[k1] = cellVal;
+          dofTimeMax[k0] = cellVal;
+        } else {
+          const v = parseFloat(cellVal);
+          if (!isNaN(v) && v > 0) {
+            const num = Number(v.toFixed(2));
+            if (dc.type === 'tf') {
+              dofTfMax[k2] = num;
+              dofTfMax[k1] = num;
+              dofTfMax[k0] = num;
+              dofTfList.push(num);
+            } else {
+              dofTcMax[k2] = num;
+              dofTcMax[k1] = num;
+              dofTcMax[k0] = num;
+              dofTcList.push(num);
+            }
+          }
+        }
+      }
+
+      const rawMaxTf = idxMaxTf >= 0 ? parseFloat(vals[idxMaxTf] || '0') : 0;
+      const tfMax = Number(
+        (rawMaxTf > 0 ? rawMaxTf : dofTfList.length > 0 ? Math.max(...dofTfList) : 0).toFixed(2)
+      );
+      const rawMinTf = idxMinTf >= 0 ? parseFloat(vals[idxMinTf] || '0') : 0;
+      const tfMin = Number(
+        (rawMinTf > 0 ? rawMinTf : dofTfList.length > 0 ? Math.min(...dofTfList) : tfMax).toFixed(2)
+      );
+      const rawMeanTf = idxMeanTf >= 0 ? parseFloat(vals[idxMeanTf] || '0') : 0;
+      const tfMean = Number((rawMeanTf > 0 ? rawMeanTf : tfMax).toFixed(2));
+      const rawMaxTc = idxMaxTc >= 0 ? parseFloat(vals[idxMaxTc] || '0') : 0;
+      const tcMax = Number(
+        (rawMaxTc > 0 ? rawMaxTc : dofTcList.length > 0 ? Math.max(...dofTcList) : tfMax).toFixed(2)
+      );
+      const rawMinTc = idxMinTc >= 0 ? parseFloat(vals[idxMinTc] || '0') : 0;
+      const tcMin = Number((rawMinTc > 0 ? rawMinTc : tfMin).toFixed(2));
+
+      const pCkt3 = Number((idxPCkt3 >= 0 ? parseFloat(vals[idxPCkt3] || '0') || 0 : 0).toFixed(2));
+      const pCkt2 = Number((idxPCkt2 >= 0 ? parseFloat(vals[idxPCkt2] || '0') || 0 : 0).toFixed(2));
+      const pNkt = Number((idxPNkt >= 0 ? parseFloat(vals[idxPNkt] || '0') || 0 : 0).toFixed(2));
+      const pOil = Number((idxPOil >= 0 ? parseFloat(vals[idxPOil] || '0') || 0 : 0).toFixed(2));
+      const rawTotal = idxPTotal >= 0 ? parseFloat(vals[idxPTotal] || '0') || 0 : 0;
+      const pTotal = Number((rawTotal > 0 ? rawTotal : pCkt3 + pCkt2 + pNkt + pOil).toFixed(2));
+
+      p1Records.push({
+        sectionId: secId,
+        date,
+        phase: normPhase,
+        tfMax,
+        tfMin,
+        tfMean,
+        tcMax,
+        tcMin,
+        powerAtMaxMW: pTotal,
+        pCkt3MaxMW: pCkt3,
+        pCkt2MaxMW: pCkt2,
+        p33NktMaxMW: pNkt,
+        p33OilMaxMW: pOil,
+        pTotalAtMaxMW: pTotal,
+        fileNameMax: (idxFileMax >= 0 ? vals[idxFileMax] : '') || '',
+        timestampMax: (idxTimeMax >= 0 ? vals[idxTimeMax] : '') || '',
+        dofTfMax,
+        dofTcMax,
+        ...(Object.keys(dofTimeMax).length > 0 ? { dofTimeMax } : {}),
+      });
+    }
+  }
+
+  const sortedDates = Array.from(p1DatesSet).sort();
+  const sortedYears = Array.from(new Set(sortedDates.map((d) => d.slice(0, 4)))).sort();
+  const config = {
+    hasDatabase: p1Records.length > 0,
+    databaseFileName: meta.fileName,
+    uploadedAt: nowIso,
+    fileFormat: 'xlsx' as const,
+    totalRecords: p1Records.length,
+    totalDates: sortedDates.length,
+    dateRange: {
+      firstDate: sortedDates[0] || '',
+      latestDate: sortedDates[sortedDates.length - 1] || '',
+    },
+    availableDates: sortedDates,
+    availableYears: sortedYears,
+  };
+  const info = {
+    sourceType: 'googledrive' as const,
+    name: meta.fileName,
+    fileId: meta.fileId,
+    fileSize: buf.length,
+    modifiedTime: meta.lastModifiedHeader || meta.modifiedLabel || nowIso,
+    versionSignature: `${meta.fileId}|${meta.fileName}|${buf.length}`,
+    remoteUrl,
+    updatedAt: nowIso,
+    totalDates: sortedDates.length,
+    dateRange: config.dateRange,
+    recordCount: p1Records.length,
+  };
+
+  return { config, records: p1Records, info };
+}
+
+function parsePanel2CsvFast(
+  buf: Buffer,
+  meta: ScannedDriveFileMetadata,
+  remoteUrl: string,
+  existingPeaks: any[] = []
+): { peaks: any[]; info: any } {
+  const nowIso = new Date().toISOString();
+  const text = buf.toString('utf8');
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const delimiter = (lines[0] || '').includes(';') ? ';' : ',';
+  const header = (lines[0] || '').split(delimiter).map((c) => c.replace(/^["']|["']$/g, '').trim().toLowerCase());
+
+  let dateIdx = header.findIndex((c) => c.includes('date') || c.includes('day') || c.includes('time'));
+  let ckt3Idx = header.findIndex((c) => c.includes('ckt3') || c.includes('circuit #3') || c.includes('circuit 3') || c.includes('03yb01'));
+  let ckt2Idx = header.findIndex((c) => c.includes('ckt2') || c.includes('circuit #2') || c.includes('circuit 2') || c.includes('04yb01'));
+  let nktIdx = header.findIndex((c) => c.includes('nkt') || c.includes('07wb01'));
+  let oilIdx = header.findIndex((c) => c.includes('oil') || c.includes('10wb01'));
+  let totalIdx = header.findIndex((c) => c.includes('total') || c.includes('island'));
+
+  if (dateIdx === -1) dateIdx = 0;
+  if (ckt3Idx === -1) ckt3Idx = 1;
+  if (ckt2Idx === -1) ckt2Idx = 2;
+  if (nktIdx === -1) nktIdx = 3;
+  if (oilIdx === -1) oilIdx = 4;
+  if (totalIdx === -1 && header.length > 5) totalIdx = 5;
+
+  const peaksByDate = new Map<string, any>();
+  for (const ep of existingPeaks) {
+    if (ep && ep.date) peaksByDate.set(ep.date, ep);
+  }
+
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split(delimiter).map((p) => p.replace(/^["']|["']$/g, '').trim());
+    if (parts.length <= dateIdx) continue;
+    const dateStr = normalizeServerDateStr(parts[dateIdx]);
+    if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
+
+    const ckt3 = Number((parseFloat(parts[ckt3Idx] || '0') || 0).toFixed(2));
+    const ckt2 = Number((parseFloat(parts[ckt2Idx] || '0') || 0).toFixed(2));
+    const nkt = Number((parseFloat(parts[nktIdx] || '0') || 0).toFixed(2));
+    const oil = Number((parseFloat(parts[oilIdx] || '0') || 0).toFixed(2));
+    let total = totalIdx >= 0 ? parseFloat(parts[totalIdx] || '0') || 0 : 0;
+    if (total <= 0) total = ckt3 + ckt2 + nkt + oil;
+
+    peaksByDate.set(dateStr, {
+      date: dateStr,
+      year: dateStr.slice(0, 4),
+      monthDay: dateStr.slice(5),
+      ckt3MaxMW: ckt3,
+      ckt2MaxMW: ckt2,
+      nkt33MaxMW: nkt,
+      oil33MaxMW: oil,
+      totalIslandMaxMW: Number(total.toFixed(2)),
+      fiberMaxTempC: 0,
+    });
+  }
+
+  const peaks = Array.from(peaksByDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+  const info = {
+    sourceType: 'googledrive' as const,
+    name: meta.fileName,
+    fileId: meta.fileId,
+    fileSize: buf.length,
+    modifiedTime: meta.lastModifiedHeader || meta.modifiedLabel || nowIso,
+    versionSignature: `${meta.fileId}|${meta.fileName}|${buf.length}`,
+    remoteUrl,
+    updatedAt: nowIso,
+    totalDates: peaks.length,
+    dateRange: {
+      firstDate: peaks[0]?.date || '',
+      latestDate: peaks[peaks.length - 1]?.date || '',
+    },
+    recordCount: peaks.length,
+  };
+
+  return { peaks, info };
+}
+
+function parsePanel3WorkbookFast(
+  buf: Buffer,
+  meta: ScannedDriveFileMetadata,
+  remoteUrl: string
+): { records: any[]; allDates: string[]; info: any } {
+  const nowIso = new Date().toISOString();
+  if (!fs.existsSync(SECTION_PROFILES_DIR)) {
+    fs.mkdirSync(SECTION_PROFILES_DIR, { recursive: true });
+  }
+  const zip = openXlsxZipBuffer(buf);
+  const sharedStrings = parseXlsxSharedStrings(zip);
+  const byDate = new Map<string, any[]>();
+
+  for (let s = 1; s <= 25; s++) {
+    const xml = zip.readEntryText(`xl/worksheets/sheet${s}.xml`);
+    if (!xml) continue;
+    const { headers, rows } = parseXlsxWorksheetRows(xml, sharedStrings);
+    if (headers.length === 0 || rows.length === 0) continue;
+
+    const idxSecId = headers.findIndex((h) => /Sheet_Section_ID|Section_ID/i.test(h || ''));
+    const idxCat = headers.findIndex((h) => /^Category$/i.test(h || ''));
+    const idxDate = headers.findIndex((h) => /^Date$/i.test(h || ''));
+    const idxTime = headers.findIndex((h) => /^Time$|^Hour_Period$/i.test(h || ''));
+    const idxPhase = headers.findIndex((h) => /^Phase$/i.test(h || ''));
+    const idxMaxTf = headers.findIndex((h) => /Section_Max_Tf_C|Max_Fiber_Temp/i.test(h || ''));
+    const idxMaxTc = headers.findIndex((h) => /Section_Max_Tc_C|Max_Conductor_Temp/i.test(h || ''));
+    const idxPeakTime = headers.findIndex((h) => /Hourly_Peak_Time/i.test(h || ''));
+    const idxCkt3 = headers.findIndex((h) => /Power_Ckt3_MW/i.test(h || ''));
+    const idxCkt2 = headers.findIndex((h) => /Power_Ckt2_MW/i.test(h || ''));
+    const idxNkt = headers.findIndex((h) => /Power_33NKT_MW/i.test(h || ''));
+    const idxOil = headers.findIndex((h) => /Power_33Oil_MW/i.test(h || ''));
+    const idxTotal = headers.findIndex((h) => /Total_Power_MW|Power_Total_MW/i.test(h || ''));
+
+    for (const vals of rows) {
+      const rawDate = idxDate >= 0 ? vals[idxDate] : '';
+      const date = normalizeServerDateStr(rawDate);
+      const maxTf = idxMaxTf >= 0 ? parseFloat(vals[idxMaxTf] || '0') : 0;
+      if (!date || !(maxTf > 0)) continue;
+
+      const timeStr = (idxTime >= 0 ? vals[idxTime] : '') || '';
+      const hourIndex = Math.min(23, Math.max(0, parseInt(timeStr.slice(0, 2), 10) || 0));
+      const secId = (idxSecId >= 0 ? vals[idxSecId] : '') || '';
+      const cat = (idxCat >= 0 ? vals[idxCat] : '') || (secId.startsWith('1.') ? 'land' : 'submarine');
+      const rawPhase = (idxPhase >= 0 ? vals[idxPhase] : '') || '';
+      let normPhase = cat === 'land' ? 'Phase A' : 'Submarine (CH 3)';
+      if (rawPhase === 'A' || /^Phase\s*A$/i.test(rawPhase)) normPhase = 'Phase A';
+      else if (rawPhase === 'B' || /^Phase\s*B$/i.test(rawPhase)) normPhase = 'Phase B';
+      else if (rawPhase === 'C' || /^Phase\s*C$/i.test(rawPhase)) normPhase = 'Phase C';
+      else if (rawPhase === 'SM' || /Submarine/i.test(rawPhase)) normPhase = 'Submarine (CH 3)';
+
+      const hh = String(hourIndex).padStart(2, '0');
+      const hhNext = String((hourIndex + 1) % 24).padStart(2, '0');
+      const maxTc = (idxMaxTc >= 0 ? parseFloat(vals[idxMaxTc] || '0') : 0) || maxTf;
+      const ckt3MW = Number((idxCkt3 >= 0 ? parseFloat(vals[idxCkt3] || '0') || 0 : 0).toFixed(2));
+      const ckt2MW = Number((idxCkt2 >= 0 ? parseFloat(vals[idxCkt2] || '0') || 0 : 0).toFixed(2));
+      const nkt33MW = Number((idxNkt >= 0 ? parseFloat(vals[idxNkt] || '0') || 0 : 0).toFixed(2));
+      const oil33MW = Number((idxOil >= 0 ? parseFloat(vals[idxOil] || '0') || 0 : 0).toFixed(2));
+      const rawTot = idxTotal >= 0 ? parseFloat(vals[idxTotal] || '0') || 0 : 0;
+      const totalMW = Number((rawTot > 0 ? rawTot : ckt3MW + ckt2MW + nkt33MW + oil33MW).toFixed(2));
+
+      const rec = {
+        sectionId: secId,
+        date,
+        phase: normPhase,
+        hourIndex,
+        hourPeriod: `${hh}:00-${hhNext}:00`,
+        peakTime: (idxPeakTime >= 0 ? vals[idxPeakTime] : '') || `${hh}:00`,
+        maxFiberTempC: Number(maxTf.toFixed(2)),
+        meanFiberTempC: Number(maxTf.toFixed(2)),
+        maxConductorTempC: Number(maxTc.toFixed(2)),
+        meanConductorTempC: Number(maxTc.toFixed(2)),
+        ckt3MW,
+        ckt2MW,
+        nkt33MW,
+        oil33MW,
+        totalMW,
+      };
+      let list = byDate.get(date);
+      if (!list) {
+        list = [];
+        byDate.set(date, list);
+      }
+      list.push(rec);
+    }
+  }
+
+  const allDates = Array.from(byDate.keys()).sort();
+  let totalRecordCount = 0;
+  for (const [d, list] of byDate.entries()) {
+    totalRecordCount += list.length;
+    fs.writeFileSync(path.join(SECTION_PROFILES_DIR, `${d}.json`), JSON.stringify(list));
+  }
+  fs.writeFileSync(path.join(SECTION_PROFILES_DIR, 'all_dates.json'), JSON.stringify(allDates));
+
+  const recentDates = allDates.slice(-10);
+  const recentRecords: any[] = [];
+  for (const rd of recentDates) {
+    recentRecords.push(...(byDate.get(rd) || []));
+  }
+
+  const info = {
+    sourceType: 'googledrive' as const,
+    name: meta.fileName,
+    fileId: meta.fileId,
+    fileSize: buf.length,
+    modifiedTime: meta.lastModifiedHeader || meta.modifiedLabel || nowIso,
+    versionSignature: `${meta.fileId}|${meta.fileName}|${buf.length}`,
+    remoteUrl,
+    updatedAt: nowIso,
+    totalDates: allDates.length,
+    dateRange: {
+      firstDate: allDates[0] || '',
+      latestDate: allDates[allDates.length - 1] || '',
+    },
+    recordCount: totalRecordCount,
+  };
+
+  return { records: recentRecords, allDates, info };
+}
+
+async function downloadDriveFileWithCache(
+  meta: ScannedDriveFileMetadata,
+  authHeader = ''
+): Promise<Buffer> {
+  if (!fs.existsSync(DRIVE_DOWNLOADS_CACHE_DIR)) {
+    fs.mkdirSync(DRIVE_DOWNLOADS_CACHE_DIR, { recursive: true });
+  }
+  const ext = meta.fileName.toLowerCase().endsWith('.csv') ? 'csv' : 'xlsx';
+  const cachedFilePath = path.join(DRIVE_DOWNLOADS_CACHE_DIR, `${meta.fileId}.${ext}`);
+  if (fs.existsSync(cachedFilePath)) {
+    try {
+      const stat = fs.statSync(cachedFilePath);
+      if (stat.size > 100 && (meta.fileSize <= 0 || stat.size === meta.fileSize)) {
+        return fs.readFileSync(cachedFilePath);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const headers: Record<string, string> = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+  };
+  let fetchUrl = meta.downloadUrl;
+  if (authHeader && !meta.isGoogleSheets) {
+    fetchUrl = `https://www.googleapis.com/drive/v3/files/${meta.fileId}?alt=media`;
+    headers['Authorization'] = authHeader;
+  }
+
+  const res = await fetch(fetchUrl, { headers, redirect: 'follow' });
+  if (!res.ok) {
+    const fallbackRes =
+      fetchUrl !== meta.downloadUrl
+        ? await fetch(meta.downloadUrl, {
+            headers: { 'User-Agent': headers['User-Agent'] },
+            redirect: 'follow',
+          })
+        : null;
+    if (!fallbackRes || !fallbackRes.ok) {
+      throw new Error(`HTTP ${res.status} downloading ${meta.fileName}`);
+    }
+    const buf = Buffer.from(await fallbackRes.arrayBuffer());
+    fs.writeFileSync(cachedFilePath, buf);
+    return buf;
+  }
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  fs.writeFileSync(cachedFilePath, buf);
+  return buf;
+}
+
+function hasPanelDatabaseChanged(
+  scanned: ScannedDriveFileMetadata | null,
+  cachedInfo: any
+): boolean {
+  if (!scanned) return false;
+  if (!cachedInfo) return true;
+  if (cachedInfo.fileId && scanned.fileId !== cachedInfo.fileId) return true;
+  if (cachedInfo.name && scanned.fileName !== cachedInfo.name) return true;
+  if (scanned.fileSize > 0 && cachedInfo.fileSize && scanned.fileSize !== cachedInfo.fileSize) return true;
+  if (!cachedInfo.fileId && !cachedInfo.versionSignature) return true;
+  return false;
+}
+
+let activePublicFolderSyncPromise: Promise<any> | null = null;
+
+/**
+ * Automatic 3-Folder Shared Google Drive Scanner & Downloader.
+ * Scans the 3 shared Google Drive folder links, detects any newly uploaded file or changed version,
+ * and downloads + indexes only the changed database files.
+ */
+async function scanAndSyncThreePublicSharedFolders(options?: {
+  panel1Url?: string;
+  panel2Url?: string;
+  panel3Url?: string;
+  authHeader?: string;
+  forceDownload?: boolean;
+}): Promise<{
+  success: boolean;
+  scannedAt: string;
+  changesDetected: boolean;
+  panel1: { changed: boolean; updated: boolean; fileName: string; fileId: string; totalDates: number; dateRange: any; recordCount: number };
+  panel2: { changed: boolean; updated: boolean; fileName: string; fileId: string; totalDates: number; dateRange: any; recordCount: number };
+  panel3: { changed: boolean; updated: boolean; fileName: string; fileId: string; totalDates: number; dateRange: any; recordCount: number };
+}> {
+  if (activePublicFolderSyncPromise) {
+    return activePublicFolderSyncPromise;
+  }
+
+  activePublicFolderSyncPromise = (async () => {
+    try {
+      let currentDb: any = {
+        version: 2,
+        updatedAt: new Date().toISOString(),
+        panel1: null,
+        panel2: null,
+        panel3: null,
+        linksConfig: null,
+      };
+      if (fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
+        try {
+          currentDb = JSON.parse(fs.readFileSync(PUBLIC_DEFAULT_DB_FILE, 'utf-8')) || currentDb;
+        } catch {
+          // ignore
+        }
+      }
+
+      const panel1Url =
+        options?.panel1Url ||
+        currentDb?.linksConfig?.panel1Url ||
+        DEFAULT_PUBLIC_THREE_PANEL_LINKS.panel1Url;
+      const panel2Url =
+        options?.panel2Url ||
+        currentDb?.linksConfig?.panel2Url ||
+        DEFAULT_PUBLIC_THREE_PANEL_LINKS.panel2Url;
+      const panel3Url =
+        options?.panel3Url ||
+        currentDb?.linksConfig?.panel3Url ||
+        DEFAULT_PUBLIC_THREE_PANEL_LINKS.panel3Url;
+      const authHeader = options?.authHeader || '';
+
+      // 1. Scan all 3 shared Google Drive folders concurrently
+      const [scan1, scan2, scan3] = await Promise.all([
+        scanSharedDriveFolderMetadata(panel1Url, 'xlsx', authHeader),
+        scanSharedDriveFolderMetadata(panel2Url, 'csv', authHeader),
+        scanSharedDriveFolderMetadata(panel3Url, 'xlsx', authHeader),
+      ]);
+
+      // Also verify that section_profiles_by_date/all_dates.json is populated and matches panel3
+      let allDatesPopulated = false;
+      const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
+      if (fs.existsSync(allDatesFile)) {
+        try {
+          const ad = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
+          if (Array.isArray(ad) && ad.length > 0 && ad.length === (currentDb?.panel3?.info?.totalDates || 0)) {
+            allDatesPopulated = true;
+          }
+        } catch {
+          allDatesPopulated = false;
+        }
+      }
+
+      const p1Changed =
+        Boolean(options?.forceDownload) ||
+        !currentDb?.panel1?.records?.length ||
+        hasPanelDatabaseChanged(scan1, currentDb?.panel1?.info);
+
+      const p2Changed =
+        Boolean(options?.forceDownload) ||
+        !currentDb?.panel2?.peaks?.length ||
+        hasPanelDatabaseChanged(scan2, currentDb?.panel2?.info);
+
+      const p3Changed =
+        Boolean(options?.forceDownload) ||
+        !allDatesPopulated ||
+        !currentDb?.panel3?.records?.length ||
+        hasPanelDatabaseChanged(scan3, currentDb?.panel3?.info);
+
+      let p1Updated = false;
+      let p2Updated = false;
+      let p3Updated = false;
+
+      // 2. Download and parse any panel where a change or newer file was detected
+      if (p1Changed && scan1) {
+        try {
+          const buf1 = await downloadDriveFileWithCache(scan1, authHeader);
+          const parsed1 = parsePanel1WorkbookFast(buf1, scan1, panel1Url);
+          if (parsed1.records.length > 0) {
+            currentDb.panel1 = parsed1;
+            p1Updated = true;
+          }
+        } catch (e) {
+          console.warn('Auto-sync Panel 1 warning:', e);
+        }
+      }
+
+      if (p2Changed && scan2) {
+        try {
+          const buf2 = await downloadDriveFileWithCache(scan2, authHeader);
+          const parsed2 = parsePanel2CsvFast(
+            buf2,
+            scan2,
+            panel2Url,
+            currentDb?.panel2?.peaks || []
+          );
+          if (parsed2.peaks.length > 0) {
+            currentDb.panel2 = parsed2;
+            p2Updated = true;
+          }
+        } catch (e) {
+          console.warn('Auto-sync Panel 2 warning:', e);
+        }
+      }
+
+      if (p3Changed && scan3) {
+        try {
+          const buf3 = await downloadDriveFileWithCache(scan3, authHeader);
+          const parsed3 = parsePanel3WorkbookFast(buf3, scan3, panel3Url);
+          if (parsed3.allDates.length > 0) {
+            currentDb.panel3 = parsed3;
+            p3Updated = true;
+          }
+        } catch (e) {
+          console.warn('Auto-sync Panel 3 warning:', e);
+        }
+      }
+
+      const anyUpdated = p1Updated || p2Updated || p3Updated;
+      if (anyUpdated) {
+        currentDb.updatedAt = new Date().toISOString();
+        currentDb.linksConfig = {
+          panel1Url,
+          panel2Url,
+          panel3Url,
+          updatedAt: currentDb.updatedAt,
+        };
+        const rawOut = JSON.stringify(currentDb);
+        fs.writeFileSync(PUBLIC_DEFAULT_DB_FILE, rawOut, 'utf-8');
+        invalidatePublicDefaultDbCache();
+        cachedPublicDefaultDbResponseJson = `{"success":true,"data":${rawOut}}`;
+        cachedPublicDefaultDbResponseGzip = zlib.gzipSync(
+          Buffer.from(cachedPublicDefaultDbResponseJson, 'utf-8')
+        );
+      }
+
+      const p1Info = currentDb?.panel1?.info || {};
+      const p2Info = currentDb?.panel2?.info || {};
+      const p3Info = currentDb?.panel3?.info || {};
+
+      return {
+        success: true,
+        scannedAt: new Date().toISOString(),
+        changesDetected: anyUpdated,
+        panel1: {
+          changed: p1Changed,
+          updated: p1Updated,
+          fileName: p1Info.name || scan1?.fileName || '',
+          fileId: p1Info.fileId || scan1?.fileId || '',
+          totalDates: p1Info.totalDates || 0,
+          dateRange: p1Info.dateRange || { firstDate: '', latestDate: '' },
+          recordCount: p1Info.recordCount || 0,
+        },
+        panel2: {
+          changed: p2Changed,
+          updated: p2Updated,
+          fileName: p2Info.name || scan2?.fileName || '',
+          fileId: p2Info.fileId || scan2?.fileId || '',
+          totalDates: p2Info.totalDates || 0,
+          dateRange: p2Info.dateRange || { firstDate: '', latestDate: '' },
+          recordCount: p2Info.recordCount || 0,
+        },
+        panel3: {
+          changed: p3Changed,
+          updated: p3Updated,
+          fileName: p3Info.name || scan3?.fileName || '',
+          fileId: p3Info.fileId || scan3?.fileId || '',
+          totalDates: p3Info.totalDates || 0,
+          dateRange: p3Info.dateRange || { firstDate: '', latestDate: '' },
+          recordCount: p3Info.recordCount || 0,
+        },
+      };
+    } finally {
+      activePublicFolderSyncPromise = null;
+    }
+  })();
+
+  return activePublicFolderSyncPromise;
+}
+
+// Endpoint to automatically scan the 3 shared Google Drive folders and sync any changed/new database files
+app.get('/api/scan-and-sync-public-folders', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || (req.query.token ? `Bearer ${req.query.token}` : '');
+    const result = await scanAndSyncThreePublicSharedFolders({
+      panel1Url: req.query.panel1Url ? String(req.query.panel1Url) : undefined,
+      panel2Url: req.query.panel2Url ? String(req.query.panel2Url) : undefined,
+      panel3Url: req.query.panel3Url ? String(req.query.panel3Url) : undefined,
+      authHeader,
+      forceDownload: req.query.force === '1',
+    });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to scan and sync public shared Google Drive folders',
+    });
+  }
+});
+
+app.post('/api/scan-and-sync-public-folders', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || (req.body?.token ? `Bearer ${req.body.token}` : '');
+    const result = await scanAndSyncThreePublicSharedFolders({
+      panel1Url: req.body?.panel1Url,
+      panel2Url: req.body?.panel2Url,
+      panel3Url: req.body?.panel3Url,
+      authHeader,
+      forceDownload: Boolean(req.body?.force),
+    });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to scan and sync public shared Google Drive folders',
+    });
+  }
+});
+
 app.get('/api/public-default-databases', (req, res) => {
   try {
     if (!cachedPublicDefaultDbResponseJson && fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
@@ -972,7 +2063,7 @@ app.post('/api/public-default-databases', (req, res) => {
       return res.status(400).json({ error: 'Invalid public default databases payload' });
     }
     let current: any = {
-      version: 1,
+      version: 2,
       updatedAt: new Date().toISOString(),
       panel1: null,
       panel2: null,
@@ -993,6 +2084,7 @@ app.post('/api/public-default-databases', (req, res) => {
     current.updatedAt = new Date().toISOString();
     const rawOut = JSON.stringify(current);
     fs.writeFileSync(PUBLIC_DEFAULT_DB_FILE, rawOut, 'utf-8');
+    invalidatePublicDefaultDbCache();
     cachedPublicDefaultDbResponseJson = `{"success":true,"data":${rawOut}}`;
     cachedPublicDefaultDbResponseGzip = zlib.gzipSync(Buffer.from(cachedPublicDefaultDbResponseJson, 'utf-8'));
     return res.json({ success: true, updatedAt: current.updatedAt });
@@ -1000,8 +2092,6 @@ app.post('/api/public-default-databases', (req, res) => {
     return res.status(500).json({ error: err?.message || 'Failed to save public default databases' });
   }
 });
-
-const SECTION_PROFILES_DIR = path.join(process.cwd(), '.cache', 'section_profiles_by_date');
 
 // Fast retrieval of Section Daily Profiles per Date or Date-List
 app.get('/api/section-daily-profile', (req, res) => {
@@ -1080,8 +2170,8 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
       } catch {}
     }
 
-    // Return the latest 5 dates of records for instant in-memory rendering; any other date is fetched on demand in <10ms
-    const recentDates = allDates.slice(-5);
+    // Return the latest 7 dates of records for instant in-memory rendering; any other date is fetched on demand in <10ms
+    const recentDates = allDates.slice(-7);
     let recentRecords: any[] = [];
     for (const rd of recentDates) {
       const p = path.join(SECTION_PROFILES_DIR, `${rd}.json`);
@@ -1093,10 +2183,12 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
       }
     }
 
-    let fileName = 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-18.xlsx';
+    let fileName = 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx';
+    let fileId = '';
+    let versionSignature = '';
 
-    // Fallback to PUBLIC_DEFAULT_DB_FILE (.dts-public-default-databases.json) if SECTION_PROFILES_DIR was not populated yet
-    if ((allDates.length === 0 || recentRecords.length === 0) && fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
+    // Check PUBLIC_DEFAULT_DB_FILE (.dts-public-default-databases.json) for metadata & fallback
+    if (fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
       try {
         const parsed = JSON.parse(fs.readFileSync(PUBLIC_DEFAULT_DB_FILE, 'utf-8'));
         const p3 = parsed?.panel3;
@@ -1107,9 +2199,9 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
           if (recentRecords.length === 0 && Array.isArray(p3.records) && p3.records.length > 0) {
             recentRecords = p3.records;
           }
-          if (p3.info?.name) {
-            fileName = p3.info.name;
-          }
+          if (p3.info?.name) fileName = p3.info.name;
+          if (p3.info?.fileId) fileId = p3.info.fileId;
+          if (p3.info?.versionSignature) versionSignature = p3.info.versionSignature;
         }
       } catch {}
     }
@@ -1117,12 +2209,14 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
     const responsePayload = {
       success: true,
       fileName,
+      fileId,
+      versionSignature,
       allDates,
       records: recentRecords,
       totalDates: allDates.length,
       dateRange: {
         firstDate: allDates[0] || '2025-07-01',
-        latestDate: allDates[allDates.length - 1] || '2026-10-18',
+        latestDate: allDates[allDates.length - 1] || '2026-10-23',
       },
       recordCount: allDates.length * 744,
     };
@@ -1141,203 +2235,43 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
 app.get('/api/fetch-shared-database', async (req, res) => {
   try {
     const rawUrl = String(req.query.url || '').trim();
-    const DRIVE_DOWNLOADS_CACHE_DIR = path.join(process.cwd(), '.cache', 'drive_downloads');
-    if (!fs.existsSync(DRIVE_DOWNLOADS_CACHE_DIR)) {
-      fs.mkdirSync(DRIVE_DOWNLOADS_CACHE_DIR, { recursive: true });
-    }
-
-    // Unique cryptographic SHA-256 cache key to prevent collision between distinct folders
-    const cacheKey = crypto
-      .createHash('sha256')
-      .update(`${rawUrl}|${req.query.format || ''}|${req.query.binary || ''}`)
-      .digest('hex')
-      .slice(0, 32);
-    const metaCacheFile = path.join(DRIVE_DOWNLOADS_CACHE_DIR, `${cacheKey}.meta.json`);
-    const binCacheFile = path.join(DRIVE_DOWNLOADS_CACHE_DIR, `${cacheKey}.bin`);
-    const forceRefresh = req.query.force === '1';
-
-    if (!forceRefresh && fs.existsSync(metaCacheFile) && fs.existsSync(binCacheFile)) {
-      try {
-        const meta = JSON.parse(fs.readFileSync(metaCacheFile, 'utf-8'));
-        const ageMs = Date.now() - new Date(meta.cachedAt).getTime();
-        // 30-minute cache window
-        // 30-minute cache window
-        if (ageMs < 1800000) {
-          const cachedBuf = fs.readFileSync(binCacheFile);
-          const wantsBinary = req.query.binary === '1' || req.query.format === 'binary';
-          if (wantsBinary) {
-            res.setHeader('Content-Type', meta.contentType || 'application/octet-stream');
-            res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(meta.fileName)}"`);
-            res.setHeader('X-File-Name', encodeURIComponent(meta.fileName));
-            res.setHeader('Access-Control-Expose-Headers', 'X-File-Name, Content-Disposition');
-            return res.send(cachedBuf);
-          }
-          return res.json({
-            success: true,
-            fileName: meta.fileName,
-            contentType: meta.contentType,
-            base64: cachedBuf.toString('base64'),
-            cached: true,
-          });
-        }
-      } catch (e) {
-        // ignore cache read error
-      }
-    }
-
+    const requestedFormat = String(req.query.format || '').toLowerCase() === 'csv' ? 'csv' : 'xlsx';
     const authHeader = req.headers.authorization || (req.query.token ? `Bearer ${req.query.token}` : '');
-    let fetchUrl = rawUrl;
-    let isGoogleSheets = false;
-    let explicitFileName = '';
-    let isDriveApiMedia = false;
 
-    // 1. Check if it is a Google Drive folder link: /folders/FOLDER_ID
-    const folderMatch = rawUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
-    if (folderMatch) {
-      const folderId = folderMatch[1];
-      let foundFiles: { name: string; id: string; mimeType?: string }[] = [];
-
-      // If auth token is present, try Google Drive API v3 first
-      if (authHeader) {
-        try {
-          const driveApiRes = await fetch(
-            `https://www.googleapis.com/drive/v3/files?q=%27${folderId}%27+in+parents+and+trashed%3Dfalse&fields=files(id%2Cname%2CmimeType)&orderBy=modifiedTime+desc`,
-            { headers: { Authorization: authHeader } }
-          );
-          if (driveApiRes.ok) {
-            const driveData = await driveApiRes.json();
-            if (Array.isArray(driveData.files) && driveData.files.length > 0) {
-              foundFiles = driveData.files.map((f: any) => ({ name: f.name, id: f.id, mimeType: f.mimeType }));
-            }
-          }
-        } catch (e) {
-          console.warn('Drive API v3 folder listing fallback:', e);
-        }
+    // Always scan live folder/file metadata first so newly uploaded files or new versions are detected immediately
+    const scannedMeta = await scanSharedDriveFolderMetadata(rawUrl, requestedFormat, authHeader);
+    if (scannedMeta) {
+      const buffer = await downloadDriveFileWithCache(scannedMeta, authHeader);
+      const contentType = scannedMeta.fileName.toLowerCase().endsWith('.csv')
+        ? 'text/csv'
+        : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const wantsBinary = req.query.binary === '1' || req.query.format === 'binary';
+      if (wantsBinary) {
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(scannedMeta.fileName)}"`);
+        res.setHeader('X-File-Name', encodeURIComponent(scannedMeta.fileName));
+        res.setHeader('X-File-Id', scannedMeta.fileId);
+        res.setHeader('X-Version-Signature', encodeURIComponent(scannedMeta.versionSignature));
+        res.setHeader(
+          'Access-Control-Expose-Headers',
+          'X-File-Name, X-File-Id, X-Version-Signature, Content-Disposition'
+        );
+        return res.send(buffer);
       }
 
-      // If no files found yet, fall back to Google Drive HTML scraper
-      if (foundFiles.length === 0) {
-        const folderHtmlRes = await fetch(`https://drive.google.com/drive/folders/${folderId}`, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-        });
-        if (folderHtmlRes.ok) {
-          const folderHtml = await folderHtmlRes.text();
-          const regex = /aria-label="([^"]+\.(?:xlsx|csv|xls))[^"]*"[^>]*?ssk=[\x27"][^\x27"]*?:([a-zA-Z0-9_-]{20,})-0-16/gi;
-          let m: RegExpExecArray | null;
-          while ((m = regex.exec(folderHtml)) !== null) {
-            foundFiles.push({ name: m[1], id: m[2] });
-          }
-          if (foundFiles.length === 0) {
-            const sskMatches = [...folderHtml.matchAll(/ssk=[\x27"][0-9]+:[a-zA-Z0-9_-]+:([a-zA-Z0-9_-]{25,})-0-16[\x27"]/g)];
-            const nameMatches = [...folderHtml.matchAll(/aria-label=[\x27"]([^\x27"]+\.(?:xlsx|csv|xls))/gi)];
-            if (sskMatches.length > 0 && nameMatches.length > 0) {
-              foundFiles.push({ name: nameMatches[0][1], id: sskMatches[0][1] });
-            }
-          }
-        }
-      }
-
-      if (foundFiles.length > 0) {
-        const targetFile = foundFiles[0];
-        explicitFileName = targetFile.name;
-        if (targetFile.mimeType === 'application/vnd.google-apps.spreadsheet') {
-          const requestedFormat = String(req.query.format || '').toLowerCase();
-          const format = requestedFormat === 'csv' ? 'csv' : 'xlsx';
-          fetchUrl = `https://docs.google.com/spreadsheets/d/${targetFile.id}/export?format=${format}`;
-          isGoogleSheets = true;
-        } else if (authHeader) {
-          fetchUrl = `https://www.googleapis.com/drive/v3/files/${targetFile.id}?alt=media`;
-          isDriveApiMedia = true;
-        } else {
-          fetchUrl = `https://drive.usercontent.google.com/download?id=${targetFile.id}&export=download&confirm=t`;
-        }
-      } else {
-        return res.status(404).json({
-          error: 'No Excel (.xlsx) or CSV (.csv) database files found inside the shared Google Drive folder.',
-        });
-      }
-    } else {
-      // 2. Check if it is a Google Sheets URL: https://docs.google.com/spreadsheets/d/FILE_ID/...
-      const sheetsMatch = rawUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-      if (sheetsMatch) {
-        const sheetId = sheetsMatch[1];
-        const gidMatch = rawUrl.match(/[#&?]gid=([0-9]+)/);
-        const gidQuery = gidMatch ? `&gid=${gidMatch[1]}` : '';
-        const requestedFormat = String(req.query.format || '').toLowerCase();
-        const format = requestedFormat === 'csv' ? 'csv' : 'xlsx';
-        fetchUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=${format}${gidQuery}`;
-        isGoogleSheets = true;
-      } else {
-        // 3. Check if it is a Google Drive direct file link: /file/d/FILE_ID or ?id=FILE_ID
-        const driveFileMatch =
-          rawUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
-          rawUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-        if (driveFileMatch) {
-          const fileId = driveFileMatch[1];
-          if (authHeader) {
-            fetchUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
-            isDriveApiMedia = true;
-          } else {
-            fetchUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
-          }
-        }
-      }
-    }
-
-    const fetchHeaders: Record<string, string> = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
-    };
-    if (authHeader && (isDriveApiMedia || fetchUrl.includes('googleapis.com'))) {
-      fetchHeaders['Authorization'] = authHeader;
-    }
-
-    const response = await fetch(fetchUrl, {
-      headers: fetchHeaders,
-      redirect: 'follow',
-    });
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: `Failed to download shared file (HTTP ${response.status}). Make sure link sharing is set to "Anyone with the link".`,
+      return res.json({
+        success: true,
+        fileName: scannedMeta.fileName,
+        fileId: scannedMeta.fileId,
+        fileSize: buffer.length,
+        versionSignature: scannedMeta.versionSignature,
+        contentType,
+        base64: buffer.toString('base64'),
       });
     }
 
-    const contentType = response.headers.get('content-type') || '';
-    const contentDisposition = response.headers.get('content-disposition') || '';
-    let fileName = explicitFileName || (isGoogleSheets ? 'Google_Sheets_Database.xlsx' : 'Shared_Drive_Database.csv');
-    const fnMatch = contentDisposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
-    if (fnMatch && fnMatch[1]) {
-      fileName = decodeURIComponent(fnMatch[1]);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    // Save to server-side disk cache for fast instant future retrieval
-    try {
-      fs.writeFileSync(binCacheFile, buffer);
-      fs.writeFileSync(
-        metaCacheFile,
-        JSON.stringify({ fileName, contentType, cachedAt: new Date().toISOString() })
-      );
-    } catch (e) {
-      console.warn('Failed to save to download cache:', e);
-    }
-
-    const wantsBinary = req.query.binary === '1' || req.query.format === 'binary';
-    if (wantsBinary) {
-      res.setHeader('Content-Type', contentType || 'application/octet-stream');
-      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
-      res.setHeader('X-File-Name', encodeURIComponent(fileName));
-      res.setHeader('Access-Control-Expose-Headers', 'X-File-Name, Content-Disposition');
-      return res.send(buffer);
-    }
-
-    return res.json({
-      success: true,
-      fileName,
-      contentType,
-      base64: buffer.toString('base64'),
+    return res.status(404).json({
+      error: 'No Excel (.xlsx) or CSV (.csv) database files found inside the shared Google Drive link.',
     });
   } catch (err: any) {
     return res.status(500).json({
@@ -1363,6 +2297,10 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    // Automatically scan the 3 shared Google Drive folders on startup and sync any updated database files
+    void scanAndSyncThreePublicSharedFolders().catch((err) => {
+      console.warn('Initial background shared folder scan warning:', err);
+    });
   });
 }
 

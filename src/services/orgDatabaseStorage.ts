@@ -114,6 +114,10 @@ export interface DataPanelSourceInfo {
   totalDates: number;
   dateRange: { firstDate: string; latestDate: string };
   recordCount: number;
+  fileId?: string;
+  fileSize?: number;
+  modifiedTime?: string;
+  versionSignature?: string;
 }
 
 const STORAGE_KEY_CONFIG = 'org_dts_master_database_config_v2';
@@ -345,8 +349,17 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
 
   if (p1 && Array.isArray(p1.records) && p1.records.length > 0 && p1.config) {
     savedDefaultPanel1 = p1;
-    // Apply if local storage didn't already have a newer custom file or if local storage dropped records due to quota
-    if (!memoryPanel1Info || memoryPanel1Info.sourceType === 'default' || !memoryRecords || memoryRecords.length !== p1.records.length) {
+    const isP1Updated =
+      !memoryPanel1Info ||
+      memoryPanel1Info.sourceType === 'default' ||
+      !memoryRecords ||
+      memoryRecords.length !== p1.records.length ||
+      (p1.info?.versionSignature && p1.info.versionSignature !== memoryPanel1Info.versionSignature) ||
+      (p1.info?.name && p1.info.name !== memoryPanel1Info.name) ||
+      p1.config.totalDates !== memoryConfig?.totalDates ||
+      p1.config.dateRange?.latestDate !== memoryConfig?.dateRange?.latestDate;
+
+    if (isP1Updated) {
       memoryConfig = p1.config;
       memoryRecords = p1.records;
       memoryPanel1Info = p1.info || memoryPanel1Info;
@@ -356,6 +369,7 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
           localStorage.setItem(STORAGE_KEY_PANEL1_INFO, JSON.stringify(memoryPanel1Info));
         }
       } catch {}
+      void idbSet('panel1', p1);
       rebuildIndexes();
       didUpdate = true;
     }
@@ -363,7 +377,15 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
 
   if (p2 && Array.isArray(p2.peaks) && p2.peaks.length > 0) {
     savedDefaultPanel2 = p2;
-    if (!memoryPanel2Info || memoryPanel2Info.sourceType === 'default' || memoryPowerPeaksOnly.size !== p2.peaks.length) {
+    const isP2Updated =
+      !memoryPanel2Info ||
+      memoryPanel2Info.sourceType === 'default' ||
+      memoryPowerPeaksOnly.size !== p2.peaks.length ||
+      (p2.info?.versionSignature && p2.info.versionSignature !== memoryPanel2Info.versionSignature) ||
+      (p2.info?.name && p2.info.name !== memoryPanel2Info.name) ||
+      p2.info?.dateRange?.latestDate !== memoryPanel2Info.dateRange?.latestDate;
+
+    if (isP2Updated) {
       memoryPowerPeaksOnly.clear();
       p2.peaks.forEach((pk: CircuitDailyPeakPower) => {
         memoryPowerPeaksOnly.set(pk.date, pk);
@@ -376,6 +398,7 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
         }
         localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2.peaks));
       } catch {}
+      void idbSet('panel2', p2);
       rebuildIndexes();
       didUpdate = true;
     }
@@ -395,6 +418,12 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
       rebuildSectionProfileIndexes();
     }
     memoryPanel3Info = p3.info || memoryPanel3Info;
+    try {
+      if (memoryPanel3Info) {
+        localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(memoryPanel3Info));
+      }
+    } catch {}
+    void idbSet('panel3', p3);
     didUpdate = true;
   }
 
@@ -521,31 +550,6 @@ function initFromStorage() {
   if (memoryConfig !== null) return;
 
   try {
-    const rawCfg = localStorage.getItem(STORAGE_KEY_CONFIG);
-    if (rawCfg) {
-      memoryConfig = JSON.parse(rawCfg);
-    }
-    const rawData = localStorage.getItem(STORAGE_KEY_DATA);
-    if (rawData) {
-      memoryRecords = JSON.parse(rawData);
-      rebuildIndexes();
-    }
-    const rawPower = localStorage.getItem(STORAGE_KEY_POWER_PEAKS);
-    if (rawPower) {
-      try {
-        const parsedPower: CircuitDailyPeakPower[] = JSON.parse(rawPower);
-        parsedPower.forEach((p) => {
-          memoryPowerPeaksOnly.set(p.date, p);
-          memoryCircuitPeaksByDate.set(p.date, p);
-        });
-      } catch (e) {}
-    }
-    const rawProfile = localStorage.getItem(STORAGE_KEY_SECTION_PROFILE);
-    if (rawProfile) {
-      try {
-        memorySectionProfileRecords = JSON.parse(rawProfile);
-      } catch (e) {}
-    }
     const rawP1 = localStorage.getItem(STORAGE_KEY_PANEL1_INFO);
     if (rawP1) {
       try { memoryPanel1Info = JSON.parse(rawP1); } catch (e) {}
@@ -558,8 +562,45 @@ function initFromStorage() {
     if (rawP3) {
       try { memoryPanel3Info = JSON.parse(rawP3); } catch (e) {}
     }
+
+    const rawCfg = localStorage.getItem(STORAGE_KEY_CONFIG);
+    if (rawCfg) {
+      const parsedCfg = JSON.parse(rawCfg);
+      // Discard legacy synthetic seed if present
+      if (parsedCfg?.databaseFileName === 'Samui_Submarine_Daily_Max_Temp_2024-2026.xlsx') {
+        localStorage.removeItem(STORAGE_KEY_CONFIG);
+        localStorage.removeItem(STORAGE_KEY_DATA);
+      } else {
+        memoryConfig = parsedCfg;
+      }
+    }
+    const rawData = localStorage.getItem(STORAGE_KEY_DATA);
+    if (rawData && memoryConfig) {
+      memoryRecords = JSON.parse(rawData);
+      rebuildIndexes();
+    }
+    const rawPower = localStorage.getItem(STORAGE_KEY_POWER_PEAKS);
+    if (rawPower) {
+      if (!memoryPanel2Info || memoryPanel2Info.sourceType === 'default') {
+        localStorage.removeItem(STORAGE_KEY_POWER_PEAKS);
+      } else {
+        try {
+          const parsedPower: CircuitDailyPeakPower[] = JSON.parse(rawPower);
+          parsedPower.forEach((p) => {
+            memoryPowerPeaksOnly.set(p.date, p);
+            memoryCircuitPeaksByDate.set(p.date, p);
+          });
+        } catch (e) {}
+      }
+    }
+    const rawProfile = localStorage.getItem(STORAGE_KEY_SECTION_PROFILE);
+    if (rawProfile && memoryPanel3Info && memoryPanel3Info.sourceType !== 'default') {
+      try {
+        memorySectionProfileRecords = JSON.parse(rawProfile);
+      } catch (e) {}
+    }
     const rawSecProfiles = localStorage.getItem(STORAGE_KEY_SECTION_PROFILES);
-    if (rawSecProfiles) {
+    if (rawSecProfiles && memoryPanel3Info && memoryPanel3Info.sourceType !== 'default') {
       try {
         const parsedProfiles: OrgSectionHourlyRecord[] = JSON.parse(rawSecProfiles);
         if (Array.isArray(parsedProfiles) && parsedProfiles.length > 0) {
@@ -570,81 +611,6 @@ function initFromStorage() {
     }
   } catch (err) {
     console.warn('Failed to load org database from localStorage:', err);
-  }
-
-  // Auto-load default power peaks spanning 2023-2026 ONLY if no power records exist at all
-  if (memoryCircuitPeaksByDate.size === 0 && !memoryPanel2Info) {
-    memoryCircuitPeaksByDate.clear();
-    memoryPowerPeaksOnly.clear();
-    const start = new Date('2023-01-01');
-    const end = new Date('2026-12-31');
-    const curr = new Date(start);
-    while (curr <= end) {
-      const yr = curr.getFullYear().toString();
-      const mo = String(curr.getMonth() + 1).padStart(2, '0');
-      const da = String(curr.getDate()).padStart(2, '0');
-      const dateKey = `${yr}-${mo}-${da}`;
-
-      const baseCkt3 = 38 + Math.sin(curr.getTime() / 86400000 / 40) * 12 + (Math.random() * 3 - 1.5);
-      const baseCkt2 = 32 + Math.cos(curr.getTime() / 86400000 / 45) * 10 + (Math.random() * 3 - 1.5);
-      const baseNkt = 14 + Math.sin(curr.getTime() / 86400000 / 50) * 4;
-      const baseOil = 11 + Math.cos(curr.getTime() / 86400000 / 55) * 3;
-      const total = baseCkt3 + baseCkt2 + baseNkt + baseOil;
-
-      const peak: CircuitDailyPeakPower = {
-        date: dateKey,
-        year: yr,
-        monthDay: `${mo}-${da}`,
-        ckt3MaxMW: Number(baseCkt3.toFixed(2)),
-        ckt2MaxMW: Number(baseCkt2.toFixed(2)),
-        nkt33MaxMW: Number(baseNkt.toFixed(2)),
-        oil33MaxMW: Number(baseOil.toFixed(2)),
-        totalIslandMaxMW: Number(total.toFixed(2)),
-        fiberMaxTempC: 0,
-      };
-      memoryPowerPeaksOnly.set(dateKey, peak);
-      memoryCircuitPeaksByDate.set(dateKey, peak);
-
-      curr.setDate(curr.getDate() + 1);
-    }
-    try {
-      localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(Array.from(memoryPowerPeaksOnly.values())));
-    } catch (e) {}
-  }
-
-  // Auto-seed default Fiber Temperature database spanning 2024-2026 ONLY if no records exist at all
-  if ((!memoryRecords || memoryRecords.length === 0) && !memoryPanel1Info) {
-    const defaultRecs = generateDefaultOrgRecords();
-    memoryRecords = defaultRecs;
-    const datesSet = new Set<string>();
-    defaultRecs.forEach((r) => datesSet.add(r.date));
-    const sortedDates = Array.from(datesSet).sort();
-    const sortedYears = Array.from(new Set(sortedDates.map((d) => d.slice(0, 4)))).sort();
-
-    memoryConfig = {
-      hasDatabase: true,
-      databaseFileName: 'Samui_Submarine_Daily_Max_Temp_2024-2026.xlsx',
-      uploadedAt: new Date().toISOString(),
-      fileFormat: 'xlsx',
-      totalRecords: defaultRecs.length,
-      totalDates: sortedDates.length,
-      dateRange: {
-        firstDate: sortedDates[0] || '2024-01-01',
-        latestDate: sortedDates[sortedDates.length - 1] || '2026-09-30',
-      },
-      availableDates: sortedDates,
-      availableYears: sortedYears,
-    };
-    try {
-      localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
-    } catch (e) {}
-    rebuildIndexes();
-  }
-
-  // Auto-seed default Section Daily Profile database (Panel 3) if empty
-  if ((!memorySectionProfileRecords || memorySectionProfileRecords.length === 0) && !memoryPanel3Info) {
-    memorySectionProfileRecords = generateDefaultSectionDailyProfileRecords();
-    rebuildSectionProfileIndexes();
   }
 
   if (!memoryConfig) {
@@ -2141,7 +2107,13 @@ export async function syncPanel1FromFastEndpoint(url: string): Promise<{
   config: OrgDatabaseConfig;
 } | null> {
   try {
-    const cachedDb = await fetchSharedServerDefaultDatabases(false);
+    await fetch('/api/scan-and-sync-public-folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ panel1Url: url }),
+    }).catch(() => null);
+
+    const cachedDb = await fetchSharedServerDefaultDatabases(true);
     const p1 = cachedDb?.panel1;
     if (
       p1 &&
@@ -2149,6 +2121,7 @@ export async function syncPanel1FromFastEndpoint(url: string): Promise<{
       p1.records.length > 0 &&
       p1.config &&
       (url.includes('1CMSH2f5hAl0N6F3PHhpr9mwStcX29kgS') ||
+        url.includes('1awYIr-GJNqlG5clQa6C12_XMJ_mQRbce') ||
         url.includes('1Z7Sy8SEajFuqvfZJkTtBbV0fXEBZHD6N') ||
         p1.info?.remoteUrl === url)
     ) {
@@ -2158,12 +2131,14 @@ export async function syncPanel1FromFastEndpoint(url: string): Promise<{
       try {
         localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
       } catch {}
+      void idbSet('panel1', p1);
       rebuildIndexes();
       const fileName =
         p1.info?.name ||
         p1.config.databaseFileName ||
-        'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-18 (1).xlsx';
+        'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx';
       const info: DataPanelSourceInfo = {
+        ...(p1.info || {}),
         sourceType: 'remote_link',
         name: fileName,
         remoteUrl: url,
@@ -2200,13 +2175,20 @@ export async function syncPanel2FromFastEndpoint(url: string): Promise<{
   dateRange: { firstDate: string; latestDate: string };
 } | null> {
   try {
-    const cachedDb = await fetchSharedServerDefaultDatabases(false);
+    await fetch('/api/scan-and-sync-public-folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ panel2Url: url }),
+    }).catch(() => null);
+
+    const cachedDb = await fetchSharedServerDefaultDatabases(true);
     const p2 = cachedDb?.panel2;
     if (
       p2 &&
       Array.isArray(p2.peaks) &&
       p2.peaks.length > 0 &&
       (url.includes('1jqS95Z-nF1SivlJFuka8CcIKiyFBMrZ6') ||
+        url.includes('1RkqwwAwFjw4lF8YAA30hxLW1reYoqSE6') ||
         url.includes('1TnB2X_ctCOsFCQ_4oBJfNMTsilSXmFP-') ||
         p2.info?.remoteUrl === url)
     ) {
@@ -2219,16 +2201,18 @@ export async function syncPanel2FromFastEndpoint(url: string): Promise<{
       try {
         localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2.peaks));
       } catch {}
+      void idbSet('panel2', p2);
       rebuildIndexes();
       const sortedDates = p2.peaks.map((p: CircuitDailyPeakPower) => p.date).sort();
       const fileName =
         p2.info?.name ||
-        'Daily_Maximum_Power_Consumption_Database_Updated_2026-09-30_to_2026-10-18.csv';
+        'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-18_to_2026-10-23.csv';
       const dateRange = p2.info?.dateRange || {
         firstDate: sortedDates[0] || '2025-07-01',
-        latestDate: sortedDates[sortedDates.length - 1] || '2026-10-18',
+        latestDate: sortedDates[sortedDates.length - 1] || '2026-10-23',
       };
       const info: DataPanelSourceInfo = {
+        ...(p2.info || {}),
         sourceType: 'remote_link',
         name: fileName,
         remoteUrl: url,
@@ -2264,11 +2248,17 @@ export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
   dateRange: { firstDate: string; latestDate: string };
 } | null> {
   try {
+    await fetch('/api/scan-and-sync-public-folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ panel3Url: url }),
+    }).catch(() => null);
+
     const fastRes = await fetch(`/api/fetch-shared-section-profiles?url=${encodeURIComponent(url)}`)
       .then((r) => (r.ok && (r.headers.get('content-type') || '').includes('application/json') ? r.json() : null))
       .catch(() => null);
 
-    const cachedDb = await fetchSharedServerDefaultDatabases(false);
+    const cachedDb = await fetchSharedServerDefaultDatabases(true);
     const p3Cached = cachedDb?.panel3;
 
     const recordsToUse: OrgSectionHourlyRecord[] =
@@ -2302,15 +2292,16 @@ export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
       const dateRange = fastRes?.dateRange ||
         p3Cached?.info?.dateRange || {
           firstDate: memorySectionProfileDates[0] || '2025-07-01',
-          latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-18',
+          latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-23',
         };
       const recordCount = fastRes?.recordCount || p3Cached?.info?.recordCount || totalDates * 744;
       const fileName =
         fastRes?.fileName ||
         p3Cached?.info?.name ||
-        'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-18.xlsx';
+        'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx';
 
       const info: DataPanelSourceInfo = {
+        ...(p3Cached?.info || {}),
         sourceType: 'remote_link',
         name: fileName,
         remoteUrl: url,
@@ -2328,6 +2319,7 @@ export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
       try {
         localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(info));
       } catch {}
+      void idbSet('panel3', savedDefaultPanel3);
       notifyListeners();
 
       return {
@@ -2362,39 +2354,13 @@ export function resetPanel1ToSample(): void {
     return;
   }
 
-  const defaultRecs = generateDefaultOrgRecords();
-  memoryRecords = defaultRecs;
-  const datesSet = new Set<string>();
-  defaultRecs.forEach((r) => datesSet.add(r.date));
-  const sortedDates = Array.from(datesSet).sort();
-  const sortedYears = Array.from(new Set(sortedDates.map((d) => d.slice(0, 4)))).sort();
-
-  memoryConfig = {
-    hasDatabase: true,
-    databaseFileName: 'Samui_Submarine_Daily_Max_Temp_2024-2026.xlsx',
-    uploadedAt: new Date().toISOString(),
-    fileFormat: 'xlsx',
-    totalRecords: defaultRecs.length,
-    totalDates: sortedDates.length,
-    dateRange: {
-      firstDate: sortedDates[0] || '2024-01-01',
-      latestDate: sortedDates[sortedDates.length - 1] || '2026-09-30',
-    },
-    availableDates: sortedDates,
-    availableYears: sortedYears,
-  };
-  try {
-    localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
-    localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(defaultRecs));
-    localStorage.removeItem(STORAGE_KEY_PANEL1_INFO);
-  } catch (e) {}
-  memoryPanel1Info = null;
-  rebuildIndexes();
-  notifyListeners();
+  hasStartedAsyncHydration = false;
+  void hydrateFromPublicDefaultDatabases();
+  void syncAllPublicSharedTargetFolders(true);
 }
 
 /**
- * Reset Panel 2 to the latest saved default uploaded file (or baseline if none uploaded yet)
+ * Reset Panel 2 to the latest saved default uploaded file (or live Google Drive folder if none cached yet)
  */
 export function resetPanel2ToSample(): void {
   if (savedDefaultPanel2 && savedDefaultPanel2.peaks.length > 0) {
@@ -2414,50 +2380,13 @@ export function resetPanel2ToSample(): void {
     return;
   }
 
-  memoryCircuitPeaksByDate.clear();
-  memoryPowerPeaksOnly.clear();
-  const start = new Date('2023-01-01');
-  const end = new Date('2026-12-31');
-  const curr = new Date(start);
-  while (curr <= end) {
-    const yr = curr.getFullYear().toString();
-    const mo = String(curr.getMonth() + 1).padStart(2, '0');
-    const da = String(curr.getDate()).padStart(2, '0');
-    const dateKey = `${yr}-${mo}-${da}`;
-
-    const baseCkt3 = 38 + Math.sin(curr.getTime() / 86400000 / 40) * 12 + (Math.random() * 3 - 1.5);
-    const baseCkt2 = 32 + Math.cos(curr.getTime() / 86400000 / 45) * 10 + (Math.random() * 3 - 1.5);
-    const baseNkt = 14 + Math.sin(curr.getTime() / 86400000 / 50) * 4;
-    const baseOil = 11 + Math.cos(curr.getTime() / 86400000 / 55) * 3;
-    const total = baseCkt3 + baseCkt2 + baseNkt + baseOil;
-
-    const peak: CircuitDailyPeakPower = {
-      date: dateKey,
-      year: yr,
-      monthDay: `${mo}-${da}`,
-      ckt3MaxMW: Number(baseCkt3.toFixed(2)),
-      ckt2MaxMW: Number(baseCkt2.toFixed(2)),
-      nkt33MaxMW: Number(baseNkt.toFixed(2)),
-      oil33MaxMW: Number(baseOil.toFixed(2)),
-      totalIslandMaxMW: Number(total.toFixed(2)),
-      fiberMaxTempC: 0,
-    };
-    memoryPowerPeaksOnly.set(dateKey, peak);
-    memoryCircuitPeaksByDate.set(dateKey, peak);
-    curr.setDate(curr.getDate() + 1);
-  }
-
-  try {
-    localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(Array.from(memoryPowerPeaksOnly.values())));
-    localStorage.removeItem(STORAGE_KEY_PANEL2_INFO);
-  } catch (e) {}
-  memoryPanel2Info = null;
-  rebuildIndexes();
-  notifyListeners();
+  hasStartedAsyncHydration = false;
+  void hydrateFromPublicDefaultDatabases();
+  void syncAllPublicSharedTargetFolders(true);
 }
 
 /**
- * Reset Panel 3 to the latest saved default uploaded file (or baseline if none uploaded yet)
+ * Reset Panel 3 to the latest saved default uploaded file (or live Google Drive folder if none cached yet)
  */
 export function resetPanel3ToSample(): void {
   if (savedDefaultPanel3 && savedDefaultPanel3.records.length > 0) {
@@ -2478,14 +2407,9 @@ export function resetPanel3ToSample(): void {
     return;
   }
 
-  memorySectionProfileRecords = generateDefaultSectionDailyProfileRecords();
-  rebuildSectionProfileIndexes();
-  try {
-    localStorage.removeItem(STORAGE_KEY_SECTION_PROFILES);
-    localStorage.removeItem(STORAGE_KEY_PANEL3_INFO);
-  } catch (e) {}
-  memoryPanel3Info = null;
-  notifyListeners();
+  hasStartedAsyncHydration = false;
+  void hydrateFromPublicDefaultDatabases();
+  void syncAllPublicSharedTargetFolders(true);
 }
 
 /**
@@ -2540,20 +2464,20 @@ export const KNOWN_DEFAULT_GOOGLE_DRIVE_FILES: Record<
 > = {
   // Folder 1: Daily Peak Temp
   '1CMSH2f5hAl0N6F3PHhpr9mwStcX29kgS': {
-    fileId: '1Z7Sy8SEajFuqvfZJkTtBbV0fXEBZHD6N',
-    fileName: 'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-18 (1).xlsx',
+    fileId: '1awYIr-GJNqlG5clQa6C12_XMJ_mQRbce',
+    fileName: 'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
     format: 'xlsx',
   },
   // Folder 2: 4-Circuit Power Record
   '1jqS95Z-nF1SivlJFuka8CcIKiyFBMrZ6': {
-    fileId: '1TnB2X_ctCOsFCQ_4oBJfNMTsilSXmFP-',
-    fileName: 'Daily_Maximum_Power_Consumption_Database_Updated_2026-09-30_to_2026-10-18.csv',
+    fileId: '1RkqwwAwFjw4lF8YAA30hxLW1reYoqSE6',
+    fileName: 'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-18_to_2026-10-23.csv',
     format: 'csv',
   },
   // Folder 3: 24-Hour Section Profile
   '15rgLYl3V7sqPDNPY8zOLEz9eDBtZLj2_': {
-    fileId: '1cZTbNwPPL9rom44BZIyI_f_m1mSyHYwK',
-    fileName: 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-18.xlsx',
+    fileId: '1ThUhJl74Ly_7HpHgsAxEfW2qc9RJYaK0',
+    fileName: 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
     format: 'xlsx',
   },
 };
@@ -2839,12 +2763,46 @@ export async function syncAllPublicSharedTargetFolders(
     message: '',
   };
 
-  onProgress?.(6, 'Connecting to Shared Folder 1 (Daily Peak Fiber & Conductor Temp)...');
-  await new Promise((r) => setTimeout(r, 30));
+  onProgress?.(4, 'Scanning 3 Shared Google Drive Folders for newly uploaded or updated database files...');
+  await new Promise((r) => setTimeout(r, 20));
 
-  const cachedServerDb = await fetchSharedServerDefaultDatabases(false);
+  let scanResult: any = null;
+  try {
+    const scanRes = await fetch('/api/scan-and-sync-public-folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        panel1Url: links.panel1Url,
+        panel2Url: links.panel2Url,
+        panel3Url: links.panel3Url,
+        token: accessToken,
+      }),
+    });
+    if (scanRes.ok && (scanRes.headers.get('content-type') || '').includes('application/json')) {
+      scanResult = await scanRes.json();
+      if (scanResult?.changesDetected || scanResult?.anyUpdated) {
+        const changedNames = [
+          scanResult.panel1?.changed ? scanResult.panel1.fileName : null,
+          scanResult.panel2?.changed ? scanResult.panel2.fileName : null,
+          scanResult.panel3?.changed ? scanResult.panel3.fileName : null,
+        ].filter(Boolean);
+        onProgress?.(
+          11,
+          `Detected & downloaded new database file(s): ${changedNames.join(', ')}`
+        );
+        await new Promise((r) => setTimeout(r, 80));
+      } else {
+        onProgress?.(10, 'Verified all 3 Google Drive Shared Folders are on the latest version...');
+      }
+    }
+  } catch (scanErr) {
+    console.warn('Live folder scan warning (using server/cached databases):', scanErr);
+  }
 
-  // 1. Panel 1: Daily Peak Temperature (6% - 35%)
+  // Always force-refresh the server default databases after the folder scan so any newly downloaded data is picked up
+  const cachedServerDb = await fetchSharedServerDefaultDatabases(true);
+
+  // 1. Panel 1: Daily Peak Temperature (12% - 35%)
   if (links.panel1Url) {
     try {
       onProgress?.(14, 'Energizing Folder 1: Reading 19-Section Daily Peak Temperature...');
@@ -2856,16 +2814,22 @@ export async function syncAllPublicSharedTargetFolders(
         p1Cached.config &&
         (!p1Cached.info?.remoteUrl || p1Cached.info.remoteUrl === links.panel1Url)
       ) {
-        await new Promise((r) => setTimeout(r, 60));
-        onProgress?.(24, 'Indexing 14,725 Section Records across 475 Dates (Folder 1)...');
+        await new Promise((r) => setTimeout(r, 50));
+        const p1TotalRecords = p1Cached.config.totalRecords || p1Cached.records.length;
+        const p1TotalDates = p1Cached.config.totalDates;
+        onProgress?.(
+          24,
+          `Indexing ${p1TotalRecords.toLocaleString()} Section Records across ${p1TotalDates} Dates (Folder 1)...`
+        );
         memoryConfig = p1Cached.config;
         memoryRecords = p1Cached.records;
         savedDefaultPanel1 = p1Cached;
         try {
           localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
         } catch {}
+        void idbSet('panel1', p1Cached);
         rebuildIndexes();
-        await new Promise((r) => setTimeout(r, 60));
+        await new Promise((r) => setTimeout(r, 50));
         onProgress?.(32, 'Synchronizing Heat Map (2.1) & Section Peak telemetry...');
         const p1Info: DataPanelSourceInfo = {
           ...(p1Cached.info || {}),
@@ -2873,12 +2837,12 @@ export async function syncAllPublicSharedTargetFolders(
           name:
             p1Cached.info?.name ||
             p1Cached.config.databaseFileName ||
-            'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-18 (1).xlsx',
+            'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
           remoteUrl: links.panel1Url,
-          updatedAt: new Date().toISOString(),
+          updatedAt: p1Cached.info?.updatedAt || new Date().toISOString(),
           totalDates: p1Cached.config.totalDates,
           dateRange: p1Cached.config.dateRange,
-          recordCount: p1Cached.config.totalRecords || p1Cached.records.length,
+          recordCount: p1TotalRecords,
         };
         memoryPanel1Info = p1Info;
         try {
@@ -2886,7 +2850,7 @@ export async function syncAllPublicSharedTargetFolders(
         } catch {}
         result.panel1 = {
           success: true,
-          count: p1Cached.config.totalRecords || p1Cached.config.totalDates,
+          count: p1TotalRecords || p1TotalDates,
           name: p1Info.name,
         };
       } else {
@@ -2923,7 +2887,7 @@ export async function syncAllPublicSharedTargetFolders(
     }
   }
   onProgress?.(35, 'Shared Folder 1 Synchronized (100%)');
-  await new Promise((r) => setTimeout(r, 50));
+  await new Promise((r) => setTimeout(r, 40));
 
   // 2. Panel 2: 4-Circuit Power Record (36% - 65%)
   if (links.panel2Url) {
@@ -2936,8 +2900,11 @@ export async function syncAllPublicSharedTargetFolders(
         p2Cached.peaks.length > 0 &&
         (!p2Cached.info?.remoteUrl || p2Cached.info.remoteUrl === links.panel2Url)
       ) {
-        await new Promise((r) => setTimeout(r, 60));
-        onProgress?.(53, 'Indexing 115kV Ckt #3, Ckt #2, 33kV NKT & Oil-Filled MW (Folder 2)...');
+        await new Promise((r) => setTimeout(r, 50));
+        onProgress?.(
+          53,
+          `Indexing ${p2Cached.peaks.length} Dates of 115kV Ckt #3, Ckt #2, 33kV NKT & Oil-Filled MW (Folder 2)...`
+        );
         memoryPowerPeaksOnly.clear();
         p2Cached.peaks.forEach((pk: CircuitDailyPeakPower) => {
           memoryPowerPeaksOnly.set(pk.date, pk);
@@ -2947,8 +2914,9 @@ export async function syncAllPublicSharedTargetFolders(
         try {
           localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2Cached.peaks));
         } catch {}
+        void idbSet('panel2', p2Cached);
         rebuildIndexes();
-        await new Promise((r) => setTimeout(r, 60));
+        await new Promise((r) => setTimeout(r, 50));
         onProgress?.(62, 'Synchronizing 4-Circuit Yearly Comparison (2.4)...');
         const sortedP2Dates = p2Cached.peaks.map((p: CircuitDailyPeakPower) => p.date).sort();
         const p2Info: DataPanelSourceInfo = {
@@ -2956,13 +2924,13 @@ export async function syncAllPublicSharedTargetFolders(
           sourceType: 'googledrive',
           name:
             p2Cached.info?.name ||
-            'Daily_Maximum_Power_Consumption_Database_Updated_2026-09-30_to_2026-10-18.csv',
+            'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-18_to_2026-10-23.csv',
           remoteUrl: links.panel2Url,
-          updatedAt: new Date().toISOString(),
+          updatedAt: p2Cached.info?.updatedAt || new Date().toISOString(),
           totalDates: p2Cached.peaks.length,
           dateRange: p2Cached.info?.dateRange || {
             firstDate: sortedP2Dates[0] || '2025-07-01',
-            latestDate: sortedP2Dates[sortedP2Dates.length - 1] || '2026-10-18',
+            latestDate: sortedP2Dates[sortedP2Dates.length - 1] || '2026-10-23',
           },
           recordCount: p2Cached.peaks.length,
         };
@@ -3009,7 +2977,7 @@ export async function syncAllPublicSharedTargetFolders(
     }
   }
   onProgress?.(65, 'Shared Folder 2 Synchronized (100%)');
-  await new Promise((r) => setTimeout(r, 50));
+  await new Promise((r) => setTimeout(r, 40));
 
   // 3. Panel 3: Section Daily Profile (66% - 96%)
   if (links.panel3Url) {
@@ -3041,7 +3009,7 @@ export async function syncAllPublicSharedTargetFolders(
 
         if (recordsToUse.length > 0) {
           onProgress?.(84, 'Indexing 24-Hour Section Curves & Ckt #3 MW across 19 Sections (Folder 3)...');
-          await new Promise((r) => setTimeout(r, 60));
+          await new Promise((r) => setTimeout(r, 50));
 
           memorySectionProfileRecords = recordsToUse;
           if (allDatesToUse.length > 0) {
@@ -3051,7 +3019,7 @@ export async function syncAllPublicSharedTargetFolders(
           rebuildSectionProfileIndexes();
 
           onProgress?.(93, 'Synchronizing Daily Curve (2.2) & 3D Thermal Surface (2.3)...');
-          await new Promise((r) => setTimeout(r, 50));
+          await new Promise((r) => setTimeout(r, 40));
 
           const totalDatesCount =
             fastRes?.totalDates ||
@@ -3065,14 +3033,14 @@ export async function syncAllPublicSharedTargetFolders(
             name:
               fastRes?.fileName ||
               p3Cached?.info?.name ||
-              'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-18.xlsx',
+              'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
             remoteUrl: links.panel3Url,
-            updatedAt: new Date().toISOString(),
+            updatedAt: p3Cached?.info?.updatedAt || new Date().toISOString(),
             totalDates: totalDatesCount,
             dateRange: fastRes?.dateRange ||
               p3Cached?.info?.dateRange || {
                 firstDate: memorySectionProfileDates[0] || '2025-07-01',
-                latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-18',
+                latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-23',
               },
             recordCount:
               fastRes?.recordCount ||
@@ -3089,6 +3057,7 @@ export async function syncAllPublicSharedTargetFolders(
           try {
             localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(defaultP3Info));
           } catch {}
+          void idbSet('panel3', savedDefaultPanel3);
 
           result.panel3 = {
             success: true,
@@ -3103,7 +3072,7 @@ export async function syncAllPublicSharedTargetFolders(
 
       if (!loadedFromFastEndpoint && p3Cached && Array.isArray(p3Cached.records) && p3Cached.records.length > 0) {
         onProgress?.(84, 'Indexing 24-Hour Section Curves & Ckt #3 MW across 19 Sections (Folder 3)...');
-        await new Promise((r) => setTimeout(r, 60));
+        await new Promise((r) => setTimeout(r, 50));
         const allDatesToUse: string[] =
           Array.isArray(p3Cached.allDates) && p3Cached.allDates.length > 0
             ? p3Cached.allDates
@@ -3120,13 +3089,13 @@ export async function syncAllPublicSharedTargetFolders(
         const p3Info: DataPanelSourceInfo = {
           ...(p3Cached.info || {}),
           sourceType: 'googledrive',
-          name: p3Cached.info?.name || 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-18.xlsx',
+          name: p3Cached.info?.name || 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
           remoteUrl: links.panel3Url,
-          updatedAt: new Date().toISOString(),
+          updatedAt: p3Cached.info?.updatedAt || new Date().toISOString(),
           totalDates: totalDatesCount,
           dateRange: p3Cached.info?.dateRange || {
             firstDate: memorySectionProfileDates[0] || '2025-07-01',
-            latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-18',
+            latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-23',
           },
           recordCount: p3Cached.info?.recordCount || totalDatesCount * 744,
         };
@@ -3139,6 +3108,7 @@ export async function syncAllPublicSharedTargetFolders(
         try {
           localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(p3Info));
         } catch {}
+        void idbSet('panel3', savedDefaultPanel3);
         result.panel3 = {
           success: true,
           count: totalDatesCount,
@@ -3197,12 +3167,13 @@ export async function syncAllPublicSharedTargetFolders(
   result.success = result.panel1.success || result.panel2.success || result.panel3.success;
 
   const successfulPanels: string[] = [];
-  if (result.panel1.success) successfulPanels.push(`Panel 1 (${result.panel1.count} temp records)`);
+  if (result.panel1.success) successfulPanels.push(`Panel 1 (${result.panel1.count.toLocaleString()} temp records)`);
   if (result.panel2.success) successfulPanels.push(`Panel 2 (${result.panel2.count} dates)`);
   if (result.panel3.success) successfulPanels.push(`Panel 3 (${result.panel3.count} dates)`);
 
   if (result.success) {
-    result.message = `Successfully loaded data from shared folders: ${successfulPanels.join(', ')}.`;
+    const updatePrefix = scanResult?.anyUpdated ? 'Detected & auto-downloaded updated Google Drive files! ' : '';
+    result.message = `${updatePrefix}Successfully loaded data from shared folders: ${successfulPanels.join(', ')}.`;
   } else {
     const errorDetails = [result.panel1.error, result.panel2.error, result.panel3.error]
       .filter(Boolean)

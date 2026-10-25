@@ -2782,8 +2782,16 @@ export function buildMultiSheetDatabase(
       const prev = rowMap.get(key);
       if (!prev) {
         rowMap.set(key, nr);
-      } else if (!hasExistingMasterRowData(prev) && hasExistingMasterRowData(nr)) {
-        rowMap.set(key, nr);
+      } else {
+        const mergedRow: DatabaseSheetRow = { ...prev };
+        for (const [k, v] of Object.entries(nr)) {
+          const prevVal = mergedRow[k];
+          const isPrevEmpty = prevVal === '' || prevVal === undefined || prevVal === null;
+          if (isPrevEmpty && v !== '' && v !== undefined && v !== null) {
+            mergedRow[k] = v;
+          }
+        }
+        rowMap.set(key, mergedRow);
       }
     }
 
@@ -2853,8 +2861,16 @@ export async function buildMultiSheetDatabaseAsync(
       const prev = rowMap.get(key);
       if (!prev) {
         rowMap.set(key, nr);
-      } else if (!hasExistingMasterRowData(prev) && hasExistingMasterRowData(nr)) {
-        rowMap.set(key, nr);
+      } else {
+        const mergedRow: DatabaseSheetRow = { ...prev };
+        for (const [k, v] of Object.entries(nr)) {
+          const prevVal = mergedRow[k];
+          const isPrevEmpty = prevVal === '' || prevVal === undefined || prevVal === null;
+          if (isPrevEmpty && v !== '' && v !== undefined && v !== null) {
+            mergedRow[k] = v;
+          }
+        }
+        rowMap.set(key, mergedRow);
       }
     }
 
@@ -3056,41 +3072,75 @@ export function parseUploadedDatabaseForUpdate(
         secInfo.category
       );
 
+      // Preserve any extra original columns on `r` without internal keys
+      const cleanOriginalCols: Record<string, any> = {};
+      for (const [k, v] of Object.entries(r)) {
+        if (!k.startsWith('_')) {
+          cleanOriginalCols[k] = v;
+          cleanOriginalCols[k.trim()] = v;
+        }
+      }
+
       // Extract any per-DOF columns (`Tf_DOF_*`, `Tc_DOF_*`, `Time_DOF_*`) present in the uploaded sheet
       const distinctDofs = getSectionDistinctDofs(secInfo);
       const dofValuesMap: Record<string, number | string | ''> = {};
       const dofTfNums: number[] = [];
       const dofTcNums: number[] = [];
 
-      // Also scan all raw keys on row `r` for `Tf_DOF_<num>m_C` / `Tc_DOF_<num>m_C` with any decimal precision
+      // Scan all raw keys on row `r` for any pattern representing DOF fiber or conductor temperature
       const parsedRawTfByDof = new Map<number, number>();
       const parsedRawTcByDof = new Map<number, number>();
       const parsedRawTimeByDof = new Map<number, string>();
-      for (const key of Object.keys(r)) {
-        const tfMatch = key.match(/^Tf[_ ]?DOF[_ ]?([\d.]+)m?(?:[_ ]?C)?$/i);
-        if (tfMatch) {
-          const dNum = parseFloat(tfMatch[1]);
-          const val = toNumOrEmptyCell(r[key]);
-          if (!isNaN(dNum) && typeof val === 'number' && val > 0) {
-            parsedRawTfByDof.set(dNum, val);
-          }
-          continue;
-        }
-        const tcMatch = key.match(/^Tc[_ ]?DOF[_ ]?([\d.]+)m?(?:[_ ]?C)?$/i);
-        if (tcMatch) {
-          const dNum = parseFloat(tcMatch[1]);
-          const val = toNumOrEmptyCell(r[key]);
-          if (!isNaN(dNum) && typeof val === 'number' && val > 0) {
-            parsedRawTcByDof.set(dNum, val);
-          }
-          continue;
-        }
-        const timeMatch = key.match(/^Time[_ ]?DOF[_ ]?([\d.]+)m?$/i);
+
+      for (const rawKey of Object.keys(r)) {
+        if (rawKey.startsWith('_')) continue;
+        const key = rawKey.trim();
+        const cleanKey = key.replace(/[°\\[\\]()]/g, '').trim();
+
+        // Check if key is a time column
+        const timeMatch = cleanKey.match(/Time[_ ]?DOF[_ ]?([\d.]+)m?/i);
         if (timeMatch) {
           const dNum = parseFloat(timeMatch[1]);
-          const tStr = String(r[key] || '').trim();
-          if (!isNaN(dNum) && tStr) {
-            parsedRawTimeByDof.set(dNum, tStr);
+          const tStr = String(r[rawKey] || '').trim();
+          if (!isNaN(dNum) && tStr) parsedRawTimeByDof.set(dNum, tStr);
+          continue;
+        }
+
+        const val = toNumOrEmptyCell(r[rawKey]);
+        if (typeof val !== 'number' || isNaN(val) || val <= 0) continue;
+
+        // Check if key explicitly relates to Tc
+        const isTc = /\bTc\b|^Tc[_ ]|[_ ]Tc/i.test(cleanKey);
+
+        // Match any numeric meter position in the key (e.g. Tf_DOF_2020.94m_C, 2020.94m, DOF 2020.94, Tf 2020.94)
+        const numMatch = cleanKey.match(/(?:Tf|Tc|DOF)?[_ ]*([0-9]+\.?[0-9]*)/i);
+        if (numMatch) {
+          const dNum = parseFloat(numMatch[1]);
+          if (!isNaN(dNum) && dNum > 0) {
+            if (isTc) {
+              if (!parsedRawTcByDof.has(dNum)) parsedRawTcByDof.set(dNum, val);
+            } else {
+              if (!parsedRawTfByDof.has(dNum)) parsedRawTfByDof.set(dNum, val);
+            }
+          }
+        }
+      }
+
+      // Positional column fallback for standard 19-sheet database tables
+      // Col 0: Sheet_Section_ID, Col 1: Section_Name, Col 2: Category, Col 3: Date, Col 4: Phase
+      // Col 5, 6: DOF 0 Tf, Tc
+      // Col 7, 8: DOF 1 Tf, Tc
+      // ...
+      if (Array.isArray(colVals) && colVals.length >= 5 + distinctDofs.length * 2) {
+        for (let dofIdx = 0; dofIdx < distinctDofs.length; dofIdx++) {
+          const dof = distinctDofs[dofIdx];
+          const posTfVal = toNumOrEmptyCell(colVals[5 + dofIdx * 2]);
+          const posTcVal = toNumOrEmptyCell(colVals[5 + dofIdx * 2 + 1]);
+          if (typeof posTfVal === 'number' && posTfVal > 0 && !parsedRawTfByDof.has(dof)) {
+            parsedRawTfByDof.set(dof, posTfVal);
+          }
+          if (typeof posTcVal === 'number' && posTcVal > 0 && !parsedRawTcByDof.has(dof)) {
+            parsedRawTcByDof.set(dof, posTcVal);
           }
         }
       }
@@ -3102,9 +3152,32 @@ export function parseUploadedDatabaseForUpdate(
         const tfCol = `Tf_DOF_${dofKey}m_C`;
         const tcCol = `Tc_DOF_${dofKey}m_C`;
 
-        let tfCell = toNumOrEmptyCell(
-          r[tfCol] ?? r[`Tf_DOF_${dofKey1}m_C`] ?? r[`Tf_DOF_${dofKey0}m_C`]
-        );
+        let tfCell: number | '' = '';
+        let tcCell: number | '' = '';
+
+        // Strategy 1: Direct key lookup across common naming conventions
+        const candidateTfKeys = [
+          tfCol,
+          `Tf_DOF_${dofKey1}m_C`,
+          `Tf_DOF_${dofKey0}m_C`,
+          `Tf_DOF_${dofKey}m`,
+          `Tf_${dofKey}m_C`,
+          `Tf_${dofKey}m`,
+          `Tf_${dofKey}`,
+          `DOF_${dofKey}m`,
+          `DOF_${dofKey}`,
+          `${dofKey}m`,
+          dofKey,
+        ];
+        for (const cand of candidateTfKeys) {
+          const v = toNumOrEmptyCell(r[cand] ?? cleanOriginalCols[cand]);
+          if (typeof v === 'number' && v > 0) {
+            tfCell = v;
+            break;
+          }
+        }
+
+        // Strategy 2: Numeric distance lookup within 0.6m
         if (tfCell === '') {
           for (const [dNum, v] of parsedRawTfByDof.entries()) {
             if (Math.abs(dNum - dof) < 0.6) {
@@ -3114,9 +3187,23 @@ export function parseUploadedDatabaseForUpdate(
           }
         }
 
-        let tcCell = toNumOrEmptyCell(
-          r[tcCol] ?? r[`Tc_DOF_${dofKey1}m_C`] ?? r[`Tc_DOF_${dofKey0}m_C`]
-        );
+        const candidateTcKeys = [
+          tcCol,
+          `Tc_DOF_${dofKey1}m_C`,
+          `Tc_DOF_${dofKey0}m_C`,
+          `Tc_DOF_${dofKey}m`,
+          `Tc_${dofKey}m_C`,
+          `Tc_${dofKey}m`,
+          `Tc_${dofKey}`,
+        ];
+        for (const cand of candidateTcKeys) {
+          const v = toNumOrEmptyCell(r[cand] ?? cleanOriginalCols[cand]);
+          if (typeof v === 'number' && v > 0) {
+            tcCell = v;
+            break;
+          }
+        }
+
         if (tcCell === '') {
           for (const [dNum, v] of parsedRawTcByDof.entries()) {
             if (Math.abs(dNum - dof) < 0.6) {
@@ -3128,12 +3215,14 @@ export function parseUploadedDatabaseForUpdate(
 
         dofValuesMap[tfCol] = tfCell;
         dofValuesMap[tcCol] = tcCell;
+
         for (const [dNum, tStr] of parsedRawTimeByDof.entries()) {
           if (Math.abs(dNum - dof) < 0.6) {
             dofValuesMap[`Time_DOF_${dofKey}m`] = tStr;
             break;
           }
         }
+
         if (typeof tfCell === 'number' && tfCell > 0) {
           dofTfNums.push(tfCell);
           const dofStoreKey = `${secInfo.sectionId}_${phase}_${dateKey}_${dofKey}`;
@@ -3220,14 +3309,6 @@ export function parseUploadedDatabaseForUpdate(
         validDatesSet.add(dateKey);
       }
 
-      // Preserve any extra original columns on `r` without internal keys
-      const cleanOriginalCols: Record<string, any> = {};
-      for (const [k, v] of Object.entries(r)) {
-        if (!k.startsWith('_')) {
-          cleanOriginalCols[k] = v;
-        }
-      }
-
       const sheetRow: DatabaseSheetRow = {
         ...cleanOriginalCols,
         Sheet_Section_ID: secInfo.sectionId,
@@ -3235,7 +3316,6 @@ export function parseUploadedDatabaseForUpdate(
         Category: secInfo.category,
         Date: dateKey,
         Phase: phase,
-        ...dofValuesMap,
         Max_Fiber_Temp_C: maxTfCell,
         Min_Fiber_Temp_C: minTfCell,
         Mean_Fiber_Temp_C: meanTfCell,
@@ -3258,6 +3338,15 @@ export function parseUploadedDatabaseForUpdate(
         File_Name_Max: String(r.File_Name_Max || r.File_Name_Peak || r.Source_TEPR_File || ''),
         File_Name_Min: String(r.File_Name_Min || r.Source_TEPR_File || ''),
       };
+
+      // Set standard DOF columns on sheetRow, strictly PRESERVING any existing non-empty value in cleanOriginalCols
+      for (const [k, v] of Object.entries(dofValuesMap)) {
+        if (v !== '' && v !== undefined && v !== null) {
+          sheetRow[k] = v;
+        } else if (sheetRow[k] === undefined || sheetRow[k] === null) {
+          sheetRow[k] = '';
+        }
+      }
 
       // Also seed `store.sections` for this uploaded record if not already present
       if (typeof maxTfCell === 'number' && maxTfCell > 0) {
@@ -3381,11 +3470,18 @@ export async function buildUpdatedMultiSheetDatabaseAsync(
       const key = `${nr.Date}_${normPh}`;
       const prev = rowMap.get(key);
 
-      // Strictly keep existing data record from uploaded file untouched; only insert if no existing valid record and nr has valid data
       if (!prev) {
         rowMap.set(key, nr);
-      } else if (!hasExistingMasterRowData(prev) && hasExistingMasterRowData(nr)) {
-        rowMap.set(key, nr);
+      } else {
+        const mergedRow: DatabaseSheetRow = { ...prev };
+        for (const [k, v] of Object.entries(nr)) {
+          const prevVal = mergedRow[k];
+          const isPrevEmpty = prevVal === '' || prevVal === undefined || prevVal === null;
+          if (isPrevEmpty && v !== '' && v !== undefined && v !== null) {
+            mergedRow[k] = v;
+          }
+        }
+        rowMap.set(key, mergedRow);
       }
     }
 
@@ -3639,11 +3735,19 @@ export async function buildUpdatedSectionDailyProfileDatabaseAsync(
       const normPh = normalizePhaseCode(nr.Phase, sec.category);
       const key = `${nr.Date}_${hNum}_${normPh}`;
       const prev = rowMap.get(key);
-      // Strictly keep existing valid row untouched; only insert if no existing record or prev was empty and nr has data
+      // Strictly keep existing valid row untouched; only enrich missing fields if nr has data
       if (!prev) {
         rowMap.set(key, nr);
-      } else if (!hasExistingProfileRowData(prev) && hasExistingProfileRowData(nr)) {
-        rowMap.set(key, nr);
+      } else {
+        const mergedRow: SectionDailyProfileRow = { ...prev };
+        for (const [k, v] of Object.entries(nr)) {
+          const prevVal = (mergedRow as any)[k];
+          const isPrevEmpty = prevVal === '' || prevVal === undefined || prevVal === null;
+          if (isPrevEmpty && v !== '' && v !== undefined && v !== null) {
+            (mergedRow as any)[k] = v;
+          }
+        }
+        rowMap.set(key, mergedRow);
       }
     }
 

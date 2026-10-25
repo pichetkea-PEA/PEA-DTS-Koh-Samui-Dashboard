@@ -65,8 +65,8 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
       const elapsedMs = Date.now() - startTimeRef.current;
 
       setDisplayProgress((prev) => {
-        // Wait until actual background sync finishes (or 8s safety timeout) before reaching 100%
-        const canComplete = isSyncComplete || syncProgress >= 100 || elapsedMs >= 8000;
+        // Wait until actual background scan & download finishes (or 45s safety timeout) before reaching 100%
+        const canComplete = isSyncComplete || syncProgress >= 100 || elapsedMs >= 45000;
 
         if (prev >= 100 && canComplete) {
           clearInterval(timer);
@@ -76,12 +76,12 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
         // Smoothly follow actual syncProgress without jumping ahead of actual loading
         const targetFromSync = canComplete
           ? 100
-          : Math.min(96, Math.max(syncProgress, prev + 0.85));
+          : Math.min(96, Math.max(syncProgress, prev + 0.35));
 
         const gap = Math.max(0, targetFromSync - prev);
         const step = canComplete
           ? Math.max(3.6, gap * 0.34)
-          : Math.max(0.8, Math.min(2.6, gap * 0.24 + 0.45));
+          : Math.max(0.35, Math.min(2.6, gap * 0.24 + 0.25));
 
         const next = Math.min(targetFromSync, prev + step);
 
@@ -135,20 +135,24 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
   const activeFolderStep =
     roundedPct >= 100
       ? 'ALL 3 FOLDERS SYNCHRONIZED (3 / 3)'
-      : folder1Pct < 100
-        ? 'STEP 1 OF 3 · LOADING SHARED FOLDER 1'
-        : folder2Pct < 100
-          ? 'STEP 2 OF 3 · LOADING SHARED FOLDER 2'
-          : 'STEP 3 OF 3 · LOADING SHARED FOLDER 3';
+      : syncProgress < 12
+        ? 'AUTO-SCANNING 3 SHARED GOOGLE DRIVE FOLDERS FOR UPDATES'
+        : folder1Pct < 100
+          ? 'STEP 1 OF 3 · LOADING SHARED FOLDER 1'
+          : folder2Pct < 100
+            ? 'STEP 2 OF 3 · LOADING SHARED FOLDER 2'
+            : 'STEP 3 OF 3 · LOADING SHARED FOLDER 3';
 
   const dynamicStatusHeadline =
     roundedPct >= 100
       ? 'All 3 Shared Google Drive Telemetry Folders Synchronized (100%)'
-      : folder1Pct < 100
-        ? syncStatusText || 'Reading Shared Folder 1: Daily Peak Fiber & Conductor Temp (19 Sections)...'
-        : folder2Pct < 100
-          ? 'Reading Shared Folder 2: 4-Circuit Submarine Power Load (115kV & 33kV)...'
-          : 'Reading Shared Folder 3: 24-Hour Section Daily Profile & Ckt #3 MW...';
+      : syncStatusText
+        ? syncStatusText
+        : folder1Pct < 100
+          ? 'Reading Shared Folder 1: Daily Peak Fiber & Conductor Temp (19 Sections)...'
+          : folder2Pct < 100
+            ? 'Reading Shared Folder 2: 4-Circuit Submarine Power Load (115kV & 33kV)...'
+            : 'Reading Shared Folder 3: 24-Hour Section Daily Profile & Ckt #3 MW...';
 
   const radius = 86;
   const circumference = 2 * Math.PI * radius;
