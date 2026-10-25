@@ -100,6 +100,7 @@ import { PowerConsumptionPage } from './components/PowerConsumptionPage';
 import { SectionAnalyzingPage } from './components/SectionAnalyzingPage';
 import { RiskManagementPage } from './components/RiskManagementPage';
 import { YearlyComparisonPage } from './components/YearlyComparisonPage';
+import { AdminAiSummaryPage } from './components/AdminAiSummaryPage';
 import { VideoGameLoadingScreen } from './components/VideoGameLoadingScreen';
 import { PublicElectricalLoadingScreen } from './components/PublicElectricalLoadingScreen';
 
@@ -3125,6 +3126,16 @@ export default function App() {
           /* PAGE 7: Multi-Year Visual Chart Comparison ("Yearly comparison") — Isolated Filters & Uploaded/URL Data Only */
           <div className="space-y-6 animate-in fade-in duration-200">
             <YearlyComparisonPage showNotification={showNotification} />
+          </div>
+        ) : activeTab === 'ai_summary' ? (
+          /* PAGE 8: Executive AI Summary ("AI Summary") — Single-Page Quarterly & Monthly Report from 3 Shared Drive Links */
+          <div className="space-y-6 animate-in fade-in duration-200">
+            <AdminAiSummaryPage
+              dbConfig={dbConfig}
+              powerSummariesByDate={powerSummariesByDate}
+              ensurePowerSummaryForDate={ensurePowerSummaryForDate}
+              showNotification={showNotification}
+            />
           </div>
         ) : (
           /* PAGE 6: System Thermal Risk Management & International Standards Mitigation ("Risk Management Page") */

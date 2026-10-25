@@ -155,6 +155,35 @@ export async function runSystemRiskAiReport(params: {
   return data;
 }
 
+export async function runExecutiveAiSummaryReport(params: {
+  reportType: 'quarterly' | 'monthly';
+  periodLabel: string;
+  year: string;
+  quarterOrMonth: string;
+  dateRange: { firstDate: string; latestDate: string; totalDays: number };
+  tempSummary: any;
+  powerSummary: any;
+  weatherSummary: any;
+  touristSummary: any;
+}): Promise<{
+  success: boolean;
+  report: string;
+  modelUsed?: string;
+  processedAt: string;
+}> {
+  const res = await fetch('/api/agent/executive-ai-summary', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data.success) {
+    throw new Error(data.error || 'Failed to generate Executive AI Summary report');
+  }
+  return data;
+}
+
 import { jsPDF } from 'jspdf';
 
 // Convert Markdown-like text to clean structured HTML for PDF print/download

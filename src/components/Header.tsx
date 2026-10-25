@@ -26,7 +26,8 @@ export type AppPageTab =
   | 'power'
   | 'analyzing'
   | 'risk'
-  | 'yearly';
+  | 'yearly'
+  | 'ai_summary';
 
 interface HeaderProps {
   user: User | null;
@@ -124,6 +125,14 @@ export const Header: React.FC<HeaderProps> = ({
       subtitle: 'Multi-Year Visual Charts',
       icon: Layers,
     },
+    {
+      id: 'ai_summary',
+      num: '8',
+      label: 'AI Summary',
+      shortLabel: 'AI Summary',
+      subtitle: 'Quarterly & Monthly Report',
+      icon: Sparkles,
+    },
   ];
 
   const getTabAgent = () => {
@@ -142,6 +151,8 @@ export const Header: React.FC<HeaderProps> = ({
         return 'IEC Risk Consultant';
       case 'yearly':
         return 'Multi-Year Comparator';
+      case 'ai_summary':
+        return 'Executive AI Reporter';
     }
   };
 
