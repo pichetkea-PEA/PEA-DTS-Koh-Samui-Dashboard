@@ -1,23 +1,17 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import * as THREE from 'three';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Box,
   Calendar,
   Layers,
-  Thermometer,
   Zap,
-  Eye,
-  Camera,
-  Maximize2,
-  Sliders,
-  Sparkles,
-  Info,
-  Clock,
   Radio,
   Loader2,
   Database,
   Grid,
   ShieldCheck,
+  RotateCcw,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import {
   CIRCUIT_3_SECTIONS,
@@ -57,47 +51,157 @@ export interface Public3DPowerTempPageProps {
   onReadTemperature?: (scannedMeta?: any[], year?: string, month?: string, date?: string) => Promise<void>;
 }
 
-// Helper to create a canvas sprite text label for 3D axis markers
-function makeTextSprite(
-  message: string,
-  parameters?: {
-    fontface?: string;
-    fontsize?: number;
-    textColor?: string;
-    backgroundColor?: string;
+interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+interface ProjectedVec {
+  sx: number;
+  sy: number;
+  depth: number;
+  scale: number;
+}
+
+const DEFAULT_ROT_X = 0.34;
+const DEFAULT_ROT_Y = -0.52;
+const DEFAULT_ZOOM = 1.05;
+
+function projectPoint3D(
+  pt: Vec3,
+  rotX: number,
+  rotY: number,
+  zoom: number,
+  width: number,
+  height: number
+): ProjectedVec {
+  // Center offset so the 3D box (Y: 0..22) sits vertically balanced in the viewport
+  const cx = pt.x + 1.2;
+  const cy = pt.y - 9.8;
+  const cz = pt.z;
+
+  // Rotate around Y axis (yaw)
+  const cosY = Math.cos(rotY);
+  const sinY = Math.sin(rotY);
+  const x1 = cx * cosY + cz * sinY;
+  const z1 = -cx * sinY + cz * cosY;
+
+  // Rotate around X axis (pitch)
+  const cosX = Math.cos(rotX);
+  const sinX = Math.sin(rotX);
+  const y2 = cy * cosX - z1 * sinX;
+  const z2 = cy * sinX + z1 * cosX;
+
+  const fov = Math.min(width * 0.72, 680) * zoom;
+  const cameraDist = 66;
+  const denom = Math.max(15, cameraDist - z2);
+  const scale = fov / denom;
+
+  return {
+    sx: width * 0.52 + x1 * scale,
+    sy: height * 0.54 - y2 * scale,
+    depth: z2,
+    scale,
+  };
+}
+
+function drawRoundedPill(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+  fillStyle: string,
+  strokeStyle?: string,
+  lineWidth = 1
+) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+  ctx.fillStyle = fillStyle;
+  ctx.fill();
+  if (strokeStyle) {
+    ctx.strokeStyle = strokeStyle;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
   }
-): THREE.Sprite {
-  const fontface = parameters?.fontface || 'Courier New, monospace';
-  const fontsize = parameters?.fontsize || 28;
-  const textColor = parameters?.textColor || '#ffffff';
-  const backgroundColor = parameters?.backgroundColor || 'rgba(15, 23, 42, 0.85)';
+}
 
-  const canvas = document.createElement('canvas');
-  canvas.width = 256;
-  canvas.height = 64;
-  const context = canvas.getContext('2d');
-  if (context) {
-    context.fillStyle = backgroundColor;
-    context.roundRect(4, 4, canvas.width - 8, canvas.height - 8, 8);
-    context.fill();
-
-    context.font = `bold ${fontsize}px ${fontface}`;
-    context.fillStyle = textColor;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillText(message, canvas.width / 2, canvas.height / 2);
+function draw3DTextBadge(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  proj: ProjectedVec,
+  options: {
+    textColor: string;
+    bgColor: string;
+    borderColor?: string;
+    fontSize?: number;
+    paddingX?: number;
+    paddingY?: number;
+    offsetX?: number;
+    offsetY?: number;
   }
+) {
+  const fontSize = options.fontSize || 11;
+  const padX = options.paddingX ?? 7;
+  const padY = options.paddingY ?? 4;
+  const ox = options.offsetX ?? 0;
+  const oy = options.offsetY ?? 0;
 
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.minFilter = THREE.LinearFilter;
-  const spriteMaterial = new THREE.SpriteMaterial({
-    map: texture,
-    transparent: true,
-    depthTest: false,
-  });
-  const sprite = new THREE.Sprite(spriteMaterial);
-  sprite.scale.set(7, 1.75, 1);
-  return sprite;
+  ctx.save();
+  ctx.font = `700 ${fontSize}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+  const metrics = ctx.measureText(text);
+  const boxW = metrics.width + padX * 2;
+  const boxH = fontSize + padY * 2;
+  const bx = proj.sx + ox - boxW / 2;
+  const by = proj.sy + oy - boxH / 2;
+
+  drawRoundedPill(
+    ctx,
+    bx,
+    by,
+    boxW,
+    boxH,
+    6,
+    options.bgColor,
+    options.borderColor,
+    1
+  );
+
+  ctx.fillStyle = options.textColor;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, proj.sx + ox, proj.sy + oy + 0.5);
+  ctx.restore();
+}
+
+function getThermalColorRGB(tempC: number): { r: number; g: number; b: number; hex: string } {
+  if (tempC >= 55) {
+    return { r: 244, g: 63, b: 94, hex: '#f43f5e' }; // Rose / Hot
+  }
+  if (tempC >= 42) {
+    const t = Math.min(1, Math.max(0, (tempC - 42) / 13));
+    const r = Math.round(245 + (244 - 245) * t);
+    const g = Math.round(158 + (63 - 158) * t);
+    const b = Math.round(11 + (94 - 11) * t);
+    return { r, g, b, hex: `rgb(${r},${g},${b})` };
+  }
+  const t = Math.min(1, Math.max(0, (tempC - 26) / 16));
+  const r = Math.round(6 + (245 - 6) * t);
+  const g = Math.round(182 + (158 - 182) * t);
+  const b = Math.round(212 + (11 - 212) * t);
+  return { r, g, b, hex: `rgb(${r},${g},${b})` };
 }
 
 export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
@@ -105,20 +209,23 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
   onAdminLoginClick,
   isAdminLoggedIn,
   onGoToFolderAsset,
-  parsedFiles = [],
-  scannedFiles = [],
-  powerScannedFiles = [],
-  dateFilteredParsedFiles = [],
-  activeDailyPowerSummary = null,
-  powerSummariesByDate,
   selectedDateFilter = 'all',
   selectedPhaseFilter = 'all',
-  onReadTemperature,
 }) => {
-  const mountRef = useRef<HTMLDivElement | null>(null);
-  const resetViewRef = useRef<(() => void) | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [profileDbVersion, setProfileDbVersion] = useState<number>(0);
+
+  // Camera state stored in refs for 60fps drag performance + state trigger for redraw
+  const cameraRef = useRef<{ rotX: number; rotY: number; zoom: number }>({
+    rotX: DEFAULT_ROT_X,
+    rotY: DEFAULT_ROT_Y,
+    zoom: DEFAULT_ZOOM,
+  });
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+  const hoveredIdxRef = useRef<number | null>(null);
+  const projectedNodesRef = useRef<Array<{ idx: number; sx: number; sy: number; point: ActualTelemetryPoint }>>([]);
 
   useEffect(() => {
     const unsub = subscribeOrgDatabase(() => {
@@ -163,7 +270,7 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
   const [gatherCurrentSecName, setGatherCurrentSecName] = useState<string>('');
   const [gatherCurrentEquation, setGatherCurrentEquation] = useState<string>('Charlie');
 
-  // Cache of all 19 gathered sections per date: dateKey -> Map<sectionId, ActualDailyTelemetrySummary>
+  // Cache of all gathered sections per date: dateKey -> Map<sectionId, ActualDailyTelemetrySummary>
   const cachedDaysMapRef = useRef<Map<string, Map<string, ActualDailyTelemetrySummary>>>(new Map());
 
   // Automatically sync selectedDate and gatheredDate when Panel 3 dates update or user changes date
@@ -173,11 +280,15 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
       setSelectedDate(latest);
       setGatheredDate(latest);
       setHasGathered(true);
-      void fetchSectionDailyProfileForDate(latest);
+      void fetchSectionDailyProfileForDate(latest).then(() => {
+        setProfileDbVersion((v) => v + 1);
+      });
     } else if (selectedDate) {
       setGatheredDate(selectedDate);
       setHasGathered(true);
-      void fetchSectionDailyProfileForDate(selectedDate);
+      void fetchSectionDailyProfileForDate(selectedDate).then(() => {
+        setProfileDbVersion((v) => v + 1);
+      });
     }
   }, [availableDates, selectedDate]);
 
@@ -233,6 +344,7 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
         cachedDaysMapRef.current.set(selectedDate, dayMap);
         setGatheredDate(selectedDate);
         setHasGathered(true);
+        setProfileDbVersion((v) => v + 1);
         setIsGathering(false);
         setTimeout(() => {
           setIsGatheringModalOpen(false);
@@ -288,374 +400,735 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
     profileDbVersion,
   ]);
 
-  const isDateCached = cachedDaysMapRef.current.has(selectedDate);
   const isPendingGather = false;
 
-  // -------------------------------------------------------------------------
-  // THREE.JS 3D SCENE SETUP WITH AXIS MARKERS & FILLED AREA UNDER CURVE
-  // -------------------------------------------------------------------------
-  useEffect(() => {
-    const container = mountRef.current;
-    if (!container) return;
+  // Ensure we always have a sorted 24-hour point array to render the 3D manifold
+  const plotPoints: ActualTelemetryPoint[] = useMemo(() => {
+    const raw = actualTelemetry?.points || [];
+    if (raw.length > 1) {
+      return [...raw].sort((a, b) => a.timeMinutes - b.timeMinutes);
+    }
+    return [];
+  }, [actualTelemetry]);
 
-    while (container.firstChild) {
-      container.removeChild(container.firstChild);
+  // -------------------------------------------------------------------------
+  // HARDWARE-INDEPENDENT 3D SPATIAL MANIFOLD RENDERER (HTML5 2D CANVAS)
+  // Guarantees 100% visibility across all third-party browsers, VDIs & GPUs
+  // -------------------------------------------------------------------------
+  const render3DScene = useCallback(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    const width = Math.max(320, container.clientWidth || 960);
+    const height = 560;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
     }
 
-    const width = container.clientWidth || 960;
-    const height = 560;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x070b14);
+    ctx.save();
+    ctx.scale(dpr, dpr);
 
-    const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 1000);
-    camera.position.set(0, 11, 64);
-    camera.lookAt(0, 0, 0);
+    // 1. Deep space radial gradient background
+    const bgGrad = ctx.createRadialGradient(
+      width * 0.52,
+      height * 0.48,
+      30,
+      width * 0.52,
+      height * 0.5,
+      Math.max(width, height) * 0.7
+    );
+    bgGrad.addColorStop(0, '#0f172a');
+    bgGrad.addColorStop(0.55, '#070b14');
+    bgGrad.addColorStop(1, '#03060c');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, width, height);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    container.appendChild(renderer.domElement);
+    const { rotX, rotY, zoom } = cameraRef.current;
+    const proj = (x: number, y: number, z: number) =>
+      projectPoint3D({ x, y, z }, rotX, rotY, zoom, width, height);
 
-    // Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.95);
-    scene.add(ambientLight);
-
-    const dirLight1 = new THREE.DirectionalLight(0x06b6d4, 1.2);
-    dirLight1.position.set(30, 40, 30);
-    scene.add(dirLight1);
-
-    const dirLight2 = new THREE.DirectionalLight(0xf59e0b, 0.85);
-    dirLight2.position.set(-30, 20, -30);
-    scene.add(dirLight2);
-
-    // Pivot group centered at (0, 0, 0) in the middle of the viewport
-    const DEFAULT_ROT_X = 0.22;
-    const DEFAULT_ROT_Y = -0.38;
-    const pivotGroup = new THREE.Group();
-    pivotGroup.position.set(0, -1.5, 0);
-    pivotGroup.rotation.set(DEFAULT_ROT_X, DEFAULT_ROT_Y, 0);
-    scene.add(pivotGroup);
-
-    // Offset mainGroup inside pivotGroup so the 3D bounding box & axis labels are centered at (0, 0, 0)
-    const mainGroup = new THREE.Group();
-    mainGroup.position.set(2.5, -10.5, 0);
-    pivotGroup.add(mainGroup);
-
-    resetViewRef.current = () => {
-      pivotGroup.rotation.set(DEFAULT_ROT_X, DEFAULT_ROT_Y, 0);
-      camera.position.set(0, 11, 64);
-      camera.lookAt(0, 0, 0);
-    };
-
-    // -----------------------------------------------------------------------
-    // 3D BOUNDING BOX & GRID PLANES
-    // Dimensions: X = 32 (Time 0..24 hrs), Y = 24 (Temp 0..90 °C), Z = 28 (Power 0..100 MW)
-    // -----------------------------------------------------------------------
+    // 3D Box dimensions
+    // X: Time 00:00..24:00 mapped to [-16, +16] (width 32)
+    // Y: Conductor Temp 0..90°C mapped to [0, 22] (height 22)
+    // Z: Circuit 3 Power 0..100 MW mapped to [+13, -13] (depth 26)
     const BOX_X = 32;
-    const BOX_Y = 24;
-    const BOX_Z = 28;
+    const BOX_Y = 22;
+    const BOX_Z = 26;
+    const halfX = BOX_X / 2;
+    const halfZ = BOX_Z / 2;
 
-    // Grid Floor (XZ plane at Y = 0)
-    const gridFloor = new THREE.GridHelper(32, 16, 0x06b6d4, 0x1e293b);
-    gridFloor.position.set(0, 0, 0);
-    mainGroup.add(gridFloor);
-
-    // -----------------------------------------------------------------------
-    // AXIS MARKERS & LINES FOR ALL 3 DIMENSIONS (Item 2.3 Requirement)
-    // 1. X-Axis: Time in hourly (00:00 to 24:00)
-    // 2. Y-Axis: Amplitude (Conductor Temperature in °C)
-    // 3. Z-Axis: Power Flow in MW (0 to 100 MW)
-    // -----------------------------------------------------------------------
-    const axisGroup = new THREE.Group();
-    mainGroup.add(axisGroup);
-
-    // X-Axis Line (Time, Cyan)
-    const xLineGeo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(-BOX_X / 2, 0, BOX_Z / 2),
-      new THREE.Vector3(BOX_X / 2, 0, BOX_Z / 2),
-    ]);
-    const xLineMat = new THREE.LineBasicMaterial({ color: 0x06b6d4, linewidth: 2 });
-    axisGroup.add(new THREE.Line(xLineGeo, xLineMat));
-
-    // Y-Axis Line (Temperature, Amber)
-    const yLineGeo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(-BOX_X / 2, 0, BOX_Z / 2),
-      new THREE.Vector3(-BOX_X / 2, BOX_Y, BOX_Z / 2),
-    ]);
-    const yLineMat = new THREE.LineBasicMaterial({ color: 0xf59e0b, linewidth: 2 });
-    axisGroup.add(new THREE.Line(yLineGeo, yLineMat));
-
-    // Z-Axis Line (Power Flow MW, Emerald)
-    const zLineGeo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(-BOX_X / 2, 0, BOX_Z / 2),
-      new THREE.Vector3(-BOX_X / 2, 0, -BOX_Z / 2),
-    ]);
-    const zLineMat = new THREE.LineBasicMaterial({ color: 0x10b981, linewidth: 2 });
-    axisGroup.add(new THREE.Line(zLineGeo, zLineMat));
-
-    // X-Axis Hourly Time Markers (00:00, 04:00, 08:00, 12:00, 16:00, 20:00, 24:00)
-    const hourlyLabels = [
-      { text: '00:00', x: -BOX_X / 2 },
-      { text: '04:00', x: -BOX_X / 2 + (BOX_X / 6) * 1 },
-      { text: '08:00', x: -BOX_X / 2 + (BOX_X / 6) * 2 },
-      { text: '12:00', x: -BOX_X / 2 + (BOX_X / 6) * 3 },
-      { text: '16:00', x: -BOX_X / 2 + (BOX_X / 6) * 4 },
-      { text: '20:00', x: -BOX_X / 2 + (BOX_X / 6) * 5 },
-      { text: '24:00', x: BOX_X / 2 },
+    // 2. Draw Back Wall Grid (XY plane at Z = -halfZ, i.e. 100 MW back plane)
+    const backWallCorners = [
+      proj(-halfX, 0, -halfZ),
+      proj(halfX, 0, -halfZ),
+      proj(halfX, BOX_Y, -halfZ),
+      proj(-halfX, BOX_Y, -halfZ),
     ];
+    ctx.beginPath();
+    ctx.moveTo(backWallCorners[0].sx, backWallCorners[0].sy);
+    backWallCorners.slice(1).forEach((p) => ctx.lineTo(p.sx, p.sy));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.38)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(51, 65, 85, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
 
-    hourlyLabels.forEach((lbl) => {
-      // Small vertical tick mark
-      const tickGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(lbl.x, -0.6, BOX_Z / 2),
-        new THREE.Vector3(lbl.x, 0.6, BOX_Z / 2),
-      ]);
-      axisGroup.add(new THREE.Line(tickGeo, new THREE.LineBasicMaterial({ color: 0x38bdf8 })));
+    // Back wall horizontal temperature grid lines (20, 40, 60, 80, 90°C)
+    [20, 40, 60, 80, 90].forEach((tC) => {
+      const yVal = (tC / 90) * BOX_Y;
+      const p1 = proj(-halfX, yVal, -halfZ);
+      const p2 = proj(halfX, yVal, -halfZ);
+      ctx.beginPath();
+      ctx.moveTo(p1.sx, p1.sy);
+      ctx.lineTo(p2.sx, p2.sy);
+      ctx.strokeStyle = tC === 60 ? 'rgba(245, 158, 11, 0.22)' : 'rgba(51, 65, 85, 0.35)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    });
 
-      // 3D Canvas Sprite text label
-      const sprite = makeTextSprite(lbl.text, {
-        fontsize: 26,
-        textColor: '#38bdf8',
-        backgroundColor: 'rgba(15, 23, 42, 0.85)',
+    // Back wall vertical time lines
+    for (let i = 1; i < 6; i++) {
+      const xVal = -halfX + (BOX_X / 6) * i;
+      const p1 = proj(xVal, 0, -halfZ);
+      const p2 = proj(xVal, BOX_Y, -halfZ);
+      ctx.beginPath();
+      ctx.moveTo(p1.sx, p1.sy);
+      ctx.lineTo(p2.sx, p2.sy);
+      ctx.strokeStyle = 'rgba(51, 65, 85, 0.28)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // 3. Draw Side Wall Grid (YZ plane at X = -halfX)
+    const sideWallCorners = [
+      proj(-halfX, 0, halfZ),
+      proj(-halfX, 0, -halfZ),
+      proj(-halfX, BOX_Y, -halfZ),
+      proj(-halfX, BOX_Y, halfZ),
+    ];
+    ctx.beginPath();
+    ctx.moveTo(sideWallCorners[0].sx, sideWallCorners[0].sy);
+    sideWallCorners.slice(1).forEach((p) => ctx.lineTo(p.sx, p.sy));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.42)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(51, 65, 85, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    [20, 40, 60, 80, 90].forEach((tC) => {
+      const yVal = (tC / 90) * BOX_Y;
+      const p1 = proj(-halfX, yVal, halfZ);
+      const p2 = proj(-halfX, yVal, -halfZ);
+      ctx.beginPath();
+      ctx.moveTo(p1.sx, p1.sy);
+      ctx.lineTo(p2.sx, p2.sy);
+      ctx.strokeStyle = 'rgba(245, 158, 11, 0.2)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    });
+
+    for (let i = 1; i < 4; i++) {
+      const zVal = halfZ - (BOX_Z / 4) * i;
+      const p1 = proj(-halfX, 0, zVal);
+      const p2 = proj(-halfX, BOX_Y, zVal);
+      ctx.beginPath();
+      ctx.moveTo(p1.sx, p1.sy);
+      ctx.lineTo(p2.sx, p2.sy);
+      ctx.strokeStyle = 'rgba(16, 185, 129, 0.18)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // 4. Draw Floor Grid (XZ plane at Y = 0)
+    const floorCorners = [
+      proj(-halfX, 0, halfZ),
+      proj(halfX, 0, halfZ),
+      proj(halfX, 0, -halfZ),
+      proj(-halfX, 0, -halfZ),
+    ];
+    ctx.beginPath();
+    ctx.moveTo(floorCorners[0].sx, floorCorners[0].sy);
+    floorCorners.slice(1).forEach((p) => ctx.lineTo(p.sx, p.sy));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(8, 47, 73, 0.24)';
+    ctx.fill();
+
+    // Floor grid lines along X (12 subdivisions = every 2 hours)
+    for (let i = 0; i <= 12; i++) {
+      const xVal = -halfX + (BOX_X / 12) * i;
+      const p1 = proj(xVal, 0, halfZ);
+      const p2 = proj(xVal, 0, -halfZ);
+      ctx.beginPath();
+      ctx.moveTo(p1.sx, p1.sy);
+      ctx.lineTo(p2.sx, p2.sy);
+      ctx.strokeStyle = i % 2 === 0 ? 'rgba(6, 182, 212, 0.32)' : 'rgba(30, 41, 59, 0.65)';
+      ctx.lineWidth = i % 2 === 0 ? 1.1 : 0.8;
+      ctx.stroke();
+    }
+
+    // Floor grid lines along Z (8 subdivisions = every 12.5 MW)
+    for (let j = 0; j <= 8; j++) {
+      const zVal = halfZ - (BOX_Z / 8) * j;
+      const p1 = proj(-halfX, 0, zVal);
+      const p2 = proj(halfX, 0, zVal);
+      ctx.beginPath();
+      ctx.moveTo(p1.sx, p1.sy);
+      ctx.lineTo(p2.sx, p2.sy);
+      ctx.strokeStyle = j % 2 === 0 ? 'rgba(16, 185, 129, 0.28)' : 'rgba(30, 41, 59, 0.65)';
+      ctx.lineWidth = j % 2 === 0 ? 1.1 : 0.8;
+      ctx.stroke();
+    }
+
+    // 5. Plot 3D Manifold (Filled Area Under Curve + Floor Track + 3D Trajectory Ribbon)
+    const screenNodes: Array<{
+      idx: number;
+      sx: number;
+      sy: number;
+      baseSx: number;
+      baseSy: number;
+      pos3D: Vec3;
+      point: ActualTelemetryPoint;
+    }> = [];
+
+    if (plotPoints.length > 1) {
+      const rawNodes = plotPoints.map((pt, idx) => {
+        const timeFrac = Math.max(0, Math.min(1, pt.timeMinutes / 1440));
+        const px = -halfX + timeFrac * BOX_X;
+        const py = Math.max(0, Math.min(BOX_Y, (pt.conductorTempC / 90) * BOX_Y));
+        const pz = halfZ - Math.max(0, Math.min(1, pt.pCkt3MW / 100)) * BOX_Z;
+        const pTop = proj(px, py, pz);
+        const pBase = proj(px, 0, pz);
+        return {
+          idx,
+          sx: pTop.sx,
+          sy: pTop.sy,
+          baseSx: pBase.sx,
+          baseSy: pBase.sy,
+          pos3D: { x: px, y: py, z: pz },
+          point: pt,
+        };
       });
-      sprite.position.set(lbl.x, -2, BOX_Z / 2 + 2);
-      axisGroup.add(sprite);
+
+      screenNodes.push(...rawNodes);
+
+      // Subdivide each hourly interval into 4 sub-steps for a smooth 3D curtain manifold
+      const densePoints: Array<{ pos: Vec3; tempC: number; mw: number }> = [];
+      for (let i = 0; i < rawNodes.length - 1; i++) {
+        const n0 = rawNodes[Math.max(0, i - 1)];
+        const n1 = rawNodes[i];
+        const n2 = rawNodes[i + 1];
+        const n3 = rawNodes[Math.min(rawNodes.length - 1, i + 2)];
+        const steps = 4;
+        for (let s = 0; s < steps; s++) {
+          const t = s / steps;
+          const t2 = t * t;
+          const t3 = t2 * t;
+          // Catmull-Rom spline interpolation
+          const interp = (v0: number, v1: number, v2: number, v3: number) =>
+            0.5 *
+            (2 * v1 +
+              (-v0 + v2) * t +
+              (2 * v0 - 5 * v1 + 4 * v2 - v3) * t2 +
+              (-v0 + 3 * v1 - 3 * v2 + v3) * t3);
+
+          densePoints.push({
+            pos: {
+              x: n1.pos3D.x + (n2.pos3D.x - n1.pos3D.x) * t,
+              y: Math.max(0, interp(n0.pos3D.y, n1.pos3D.y, n2.pos3D.y, n3.pos3D.y)),
+              z: Math.max(-halfZ, Math.min(halfZ, interp(n0.pos3D.z, n1.pos3D.z, n2.pos3D.z, n3.pos3D.z))),
+            },
+            tempC: n1.point.conductorTempC + (n2.point.conductorTempC - n1.point.conductorTempC) * t,
+            mw: n1.point.pCkt3MW + (n2.point.pCkt3MW - n1.point.pCkt3MW) * t,
+          });
+        }
+      }
+      const lastNode = rawNodes[rawNodes.length - 1];
+      densePoints.push({
+        pos: lastNode.pos3D,
+        tempC: lastNode.point.conductorTempC,
+        mw: lastNode.point.pCkt3MW,
+      });
+
+      // 5A. Floor shadow / power footprint line (at Y = 0)
+      ctx.beginPath();
+      densePoints.forEach((dp, i) => {
+        const pFloor = proj(dp.pos.x, 0, dp.pos.z);
+        if (i === 0) ctx.moveTo(pFloor.sx, pFloor.sy);
+        else ctx.lineTo(pFloor.sx, pFloor.sy);
+      });
+      ctx.strokeStyle = 'rgba(16, 185, 129, 0.65)';
+      ctx.lineWidth = 2.2;
+      ctx.stroke();
+
+      // 5B. Filled 3D Curtain Manifold Polygons (depth-sorted along segments)
+      for (let i = 0; i < densePoints.length - 1; i++) {
+        const d1 = densePoints[i];
+        const d2 = densePoints[i + 1];
+        const c1 = proj(d1.pos.x, d1.pos.y, d1.pos.z);
+        const c2 = proj(d2.pos.x, d2.pos.y, d2.pos.z);
+        const b1 = proj(d1.pos.x, 0, d1.pos.z);
+        const b2 = proj(d2.pos.x, 0, d2.pos.z);
+
+        const avgTemp = (d1.tempC + d2.tempC) * 0.5;
+        const col = getThermalColorRGB(avgTemp);
+
+        const topY = Math.min(c1.sy, c2.sy);
+        const botY = Math.max(b1.sy, b2.sy);
+        const grad = ctx.createLinearGradient(0, topY, 0, Math.max(topY + 10, botY));
+        grad.addColorStop(0, `rgba(${col.r}, ${col.g}, ${col.b}, 0.72)`);
+        grad.addColorStop(0.55, `rgba(${col.r}, ${col.g}, ${col.b}, 0.36)`);
+        grad.addColorStop(1, 'rgba(6, 182, 212, 0.14)');
+
+        ctx.beginPath();
+        ctx.moveTo(c1.sx, c1.sy);
+        ctx.lineTo(c2.sx, c2.sy);
+        ctx.lineTo(b2.sx, b2.sy);
+        ctx.lineTo(b1.sx, b1.sy);
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+
+      // 5C. Vertical hourly drop pillars inside the manifold for 3D depth perception
+      rawNodes.forEach((node) => {
+        ctx.beginPath();
+        ctx.moveTo(node.sx, node.sy);
+        ctx.lineTo(node.baseSx, node.baseSy);
+        ctx.strokeStyle = 'rgba(251, 191, 36, 0.25)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Floor anchor dot
+        ctx.beginPath();
+        ctx.arc(node.baseSx, node.baseSy, 2.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.8)';
+        ctx.fill();
+      });
+
+      // 5D. Glowing 3D Trajectory Tube (Outer Glow + Core Metallic Line + Specular Highlight)
+      ctx.save();
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+
+      // Pass 1: Outer thermal glow
+      ctx.beginPath();
+      densePoints.forEach((dp, i) => {
+        const p = proj(dp.pos.x, dp.pos.y, dp.pos.z);
+        if (i === 0) ctx.moveTo(p.sx, p.sy);
+        else ctx.lineTo(p.sx, p.sy);
+      });
+      ctx.strokeStyle = 'rgba(245, 158, 11, 0.35)';
+      ctx.lineWidth = 10;
+      ctx.stroke();
+
+      // Pass 2: Main 3D Tube Core
+      ctx.beginPath();
+      densePoints.forEach((dp, i) => {
+        const p = proj(dp.pos.x, dp.pos.y, dp.pos.z);
+        if (i === 0) ctx.moveTo(p.sx, p.sy);
+        else ctx.lineTo(p.sx, p.sy);
+      });
+      ctx.strokeStyle = '#f59e0b';
+      ctx.lineWidth = 4.5;
+      ctx.stroke();
+
+      // Pass 3: Specular top highlight
+      ctx.beginPath();
+      densePoints.forEach((dp, i) => {
+        const p = proj(dp.pos.x, dp.pos.y, dp.pos.z);
+        if (i === 0) ctx.moveTo(p.sx, p.sy - 1);
+        else ctx.lineTo(p.sx, p.sy - 1);
+      });
+      ctx.strokeStyle = '#fef3c7';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.restore();
+
+      // 5E. Hourly 3D Sphere Nodes
+      rawNodes.forEach((node) => {
+        const isHovered = hoveredIdxRef.current === node.idx;
+        const radius = isHovered ? 6 : 3.6;
+        ctx.beginPath();
+        ctx.arc(node.sx, node.sy, radius, 0, Math.PI * 2);
+        ctx.fillStyle = isHovered ? '#38bdf8' : '#fbbf24';
+        ctx.fill();
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      });
+    }
+
+    // 6. Draw Primary 3D Axis Lines & Ticks (Foreground crisp overlay)
+    // X-Axis (Time 00:00..24:00, Cyan)
+    const xStart = proj(-halfX, 0, halfZ);
+    const xEnd = proj(halfX, 0, halfZ);
+    ctx.beginPath();
+    ctx.moveTo(xStart.sx, xStart.sy);
+    ctx.lineTo(xEnd.sx, xEnd.sy);
+    ctx.strokeStyle = '#06b6d4';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    // Y-Axis (Conductor Temp 0..90°C, Amber)
+    const yStart = proj(-halfX, 0, halfZ);
+    const yEnd = proj(-halfX, BOX_Y, halfZ);
+    ctx.beginPath();
+    ctx.moveTo(yStart.sx, yStart.sy);
+    ctx.lineTo(yEnd.sx, yEnd.sy);
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    // Z-Axis (Circuit 3 Power Flow 0..100 MW, Emerald)
+    const zStart = proj(-halfX, 0, halfZ);
+    const zEnd = proj(-halfX, 0, -halfZ);
+    ctx.beginPath();
+    ctx.moveTo(zStart.sx, zStart.sy);
+    ctx.lineTo(zEnd.sx, zEnd.sy);
+    ctx.strokeStyle = '#10b981';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    // X-Axis Ticks & Labels
+    const hourlyLabels = [
+      { text: '00:00', x: -halfX },
+      { text: '04:00', x: -halfX + (BOX_X / 6) * 1 },
+      { text: '08:00', x: -halfX + (BOX_X / 6) * 2 },
+      { text: '12:00', x: -halfX + (BOX_X / 6) * 3 },
+      { text: '16:00', x: -halfX + (BOX_X / 6) * 4 },
+      { text: '20:00', x: -halfX + (BOX_X / 6) * 5 },
+      { text: '24:00', x: halfX },
+    ];
+    hourlyLabels.forEach((lbl) => {
+      const tTop = proj(lbl.x, 0.5, halfZ);
+      const tBot = proj(lbl.x, -0.5, halfZ);
+      ctx.beginPath();
+      ctx.moveTo(tTop.sx, tTop.sy);
+      ctx.lineTo(tBot.sx, tBot.sy);
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+
+      const lblPos = proj(lbl.x, -1.8, halfZ + 1.8);
+      draw3DTextBadge(ctx, lbl.text, lblPos, {
+        textColor: '#7dd3fc',
+        bgColor: 'rgba(15, 23, 42, 0.88)',
+        borderColor: 'rgba(56, 189, 248, 0.35)',
+        fontSize: 10,
+      });
     });
 
-    // X-Axis Global Title Marker
-    const xTitleSprite = makeTextSprite('TIME (HOURLY)', {
-      fontsize: 30,
-      textColor: '#06b6d4',
-      backgroundColor: 'rgba(6, 182, 212, 0.25)',
+    const xTitlePos = proj(0, -4.2, halfZ + 3.2);
+    draw3DTextBadge(ctx, 'TIME (HOURLY)', xTitlePos, {
+      textColor: '#22d3ee',
+      bgColor: 'rgba(8, 51, 68, 0.85)',
+      borderColor: 'rgba(6, 182, 212, 0.55)',
+      fontSize: 11,
+      paddingX: 10,
+      paddingY: 4,
     });
-    xTitleSprite.scale.set(10, 2.2, 1);
-    xTitleSprite.position.set(0, -4.5, BOX_Z / 2 + 3);
-    axisGroup.add(xTitleSprite);
 
-    // Y-Axis Temperature Amplitude Markers (20°C, 40°C, 60°C, 80°C)
+    // Y-Axis Ticks & Labels
     const tempLabels = [
       { text: '20°C', y: (20 / 90) * BOX_Y },
       { text: '40°C', y: (40 / 90) * BOX_Y },
       { text: '60°C', y: (60 / 90) * BOX_Y },
       { text: '80°C', y: (80 / 90) * BOX_Y },
     ];
-
     tempLabels.forEach((lbl) => {
-      const tickGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(-BOX_X / 2 - 0.6, lbl.y, BOX_Z / 2),
-        new THREE.Vector3(-BOX_X / 2 + 0.6, lbl.y, BOX_Z / 2),
-      ]);
-      axisGroup.add(new THREE.Line(tickGeo, new THREE.LineBasicMaterial({ color: 0xf59e0b })));
+      const tL = proj(-halfX - 0.5, lbl.y, halfZ);
+      const tR = proj(-halfX + 0.5, lbl.y, halfZ);
+      ctx.beginPath();
+      ctx.moveTo(tL.sx, tL.sy);
+      ctx.lineTo(tR.sx, tR.sy);
+      ctx.strokeStyle = '#f59e0b';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
 
-      const sprite = makeTextSprite(lbl.text, {
-        fontsize: 26,
-        textColor: '#f59e0b',
-        backgroundColor: 'rgba(15, 23, 42, 0.85)',
+      const lblPos = proj(-halfX - 3.2, lbl.y, halfZ);
+      draw3DTextBadge(ctx, lbl.text, lblPos, {
+        textColor: '#fcd34d',
+        bgColor: 'rgba(15, 23, 42, 0.88)',
+        borderColor: 'rgba(245, 158, 11, 0.35)',
+        fontSize: 10,
       });
-      sprite.position.set(-BOX_X / 2 - 4.5, lbl.y, BOX_Z / 2);
-      axisGroup.add(sprite);
     });
 
-    // Y-Axis Global Title Marker
-    const yTitleSprite = makeTextSprite('CONDUCTOR TEMP (°C)', {
-      fontsize: 28,
-      textColor: '#f59e0b',
-      backgroundColor: 'rgba(245, 158, 11, 0.25)',
+    const yTitlePos = proj(-halfX - 3.5, BOX_Y + 2.3, halfZ);
+    draw3DTextBadge(ctx, 'CONDUCTOR TEMP (°C)', yTitlePos, {
+      textColor: '#fbbf24',
+      bgColor: 'rgba(69, 26, 3, 0.85)',
+      borderColor: 'rgba(245, 158, 11, 0.55)',
+      fontSize: 11,
+      paddingX: 10,
+      paddingY: 4,
     });
-    yTitleSprite.scale.set(13, 2.3, 1);
-    yTitleSprite.position.set(-BOX_X / 2 - 5, BOX_Y + 2.5, BOX_Z / 2);
-    axisGroup.add(yTitleSprite);
 
-    // Z-Axis Power Flow Markers (0 MW, 25 MW, 50 MW, 75 MW, 100 MW)
+    // Z-Axis Ticks & Labels
     const powerLabels = [
-      { text: '0 MW', z: BOX_Z / 2 },
-      { text: '25 MW', z: BOX_Z / 2 - (BOX_Z / 4) * 1 },
-      { text: '50 MW', z: BOX_Z / 2 - (BOX_Z / 4) * 2 },
-      { text: '75 MW', z: BOX_Z / 2 - (BOX_Z / 4) * 3 },
-      { text: '100 MW', z: -BOX_Z / 2 },
+      { text: '0 MW', z: halfZ },
+      { text: '25 MW', z: halfZ - (BOX_Z / 4) * 1 },
+      { text: '50 MW', z: halfZ - (BOX_Z / 4) * 2 },
+      { text: '75 MW', z: halfZ - (BOX_Z / 4) * 3 },
+      { text: '100 MW', z: -halfZ },
     ];
-
     powerLabels.forEach((lbl) => {
-      const tickGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(-BOX_X / 2 - 0.6, 0, lbl.z),
-        new THREE.Vector3(-BOX_X / 2 + 0.6, 0, lbl.z),
-      ]);
-      axisGroup.add(new THREE.Line(tickGeo, new THREE.LineBasicMaterial({ color: 0x10b981 })));
+      const tL = proj(-halfX - 0.5, 0, lbl.z);
+      const tR = proj(-halfX + 0.5, 0, lbl.z);
+      ctx.beginPath();
+      ctx.moveTo(tL.sx, tL.sy);
+      ctx.lineTo(tR.sx, tR.sy);
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
 
-      const sprite = makeTextSprite(lbl.text, {
-        fontsize: 24,
-        textColor: '#10b981',
-        backgroundColor: 'rgba(15, 23, 42, 0.85)',
+      const lblPos = proj(-halfX - 3.8, 0, lbl.z);
+      draw3DTextBadge(ctx, lbl.text, lblPos, {
+        textColor: '#6ee7b7',
+        bgColor: 'rgba(15, 23, 42, 0.88)',
+        borderColor: 'rgba(16, 185, 129, 0.35)',
+        fontSize: 10,
       });
-      sprite.position.set(-BOX_X / 2 - 4.5, 0, lbl.z);
-      axisGroup.add(sprite);
     });
 
-    // Z-Axis Global Title Marker
-    const zTitleSprite = makeTextSprite('POWER FLOW (MW)', {
-      fontsize: 28,
-      textColor: '#10b981',
-      backgroundColor: 'rgba(16, 185, 129, 0.25)',
+    const zTitlePos = proj(-halfX - 4.2, 0, -halfZ - 2.6);
+    draw3DTextBadge(ctx, 'POWER FLOW (MW)', zTitlePos, {
+      textColor: '#34d399',
+      bgColor: 'rgba(6, 78, 59, 0.85)',
+      borderColor: 'rgba(16, 185, 129, 0.55)',
+      fontSize: 11,
+      paddingX: 10,
+      paddingY: 4,
     });
-    zTitleSprite.scale.set(11, 2.3, 1);
-    zTitleSprite.position.set(-BOX_X / 2 - 4, 0, -BOX_Z / 2 - 3.5);
-    axisGroup.add(zTitleSprite);
 
-    // -----------------------------------------------------------------------
-    // PLOT 3D CURVE & FILLED AREA UNDER PLOTTED CURVE WITH COLOR (Item 2.3 Requirement)
-    // Mapping:
-    // X = normalized time across [-BOX_X/2, BOX_X/2]
-    // Y = (conductorTempC / 90) * BOX_Y
-    // Z = BOX_Z/2 - (powerCkt3MW / 100) * BOX_Z
-    // -----------------------------------------------------------------------
-    const points = actualTelemetry.points;
-    if (points && points.length > 1) {
-      const curvePoints3D: THREE.Vector3[] = [];
-      const basePoints3D: THREE.Vector3[] = [];
-      const vertexColors: number[] = [];
-
-      points.forEach((pt: ActualTelemetryPoint) => {
-        const timeFraction = Math.max(0, Math.min(1, pt.timeMinutes / 1440));
-        const px = -BOX_X / 2 + timeFraction * BOX_X;
-        const py = Math.max(0, (pt.conductorTempC / 90) * BOX_Y);
-        const pz = BOX_Z / 2 - Math.max(0, Math.min(1, pt.pCkt3MW / 100)) * BOX_Z;
-
-        curvePoints3D.push(new THREE.Vector3(px, py, pz));
-        basePoints3D.push(new THREE.Vector3(px, 0, pz)); // Baseline on floor
-      });
-
-      // 1. Plotted 3D Tube / Core Line
-      const catmullCurve = new THREE.CatmullRomCurve3(curvePoints3D);
-      const tubeGeo = new THREE.TubeGeometry(catmullCurve, 64, 0.45, 12, false);
-      const tubeMat = new THREE.MeshStandardMaterial({
-        color: 0xf59e0b,
-        emissive: 0xd97706,
-        emissiveIntensity: 0.5,
-        roughness: 0.2,
-        metalness: 0.8,
-      });
-      const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat);
-      mainGroup.add(tubeMesh);
-
-      // 2. FILLED AREA UNDER PLOTTED CURVE (Triangle Strip Polygon Mesh with Gradient Color)
-      // Creates a solid vertical curtain / ribbon dropping from curve down to baseline
-      const filledAreaGeo = new THREE.BufferGeometry();
-      const areaVertices: number[] = [];
-      const areaColors: number[] = [];
-
-      for (let i = 0; i < curvePoints3D.length - 1; i++) {
-        const c1 = curvePoints3D[i];
-        const c2 = curvePoints3D[i + 1];
-        const b1 = basePoints3D[i];
-        const b2 = basePoints3D[i + 1];
-
-        // Triangle 1: c1, b1, c2
-        areaVertices.push(c1.x, c1.y, c1.z);
-        areaVertices.push(b1.x, b1.y, b1.z);
-        areaVertices.push(c2.x, c2.y, c2.z);
-
-        // Triangle 2: c2, b1, b2
-        areaVertices.push(c2.x, c2.y, c2.z);
-        areaVertices.push(b1.x, b1.y, b1.z);
-        areaVertices.push(b2.x, b2.y, b2.z);
-
-        // Color interpolation based on temperature (Cyan cool -> Amber warm -> Red hot)
-        const t1 = Math.min(1, Math.max(0, (points[i].conductorTempC - 25) / 50));
-        const t2 = Math.min(1, Math.max(0, (points[i + 1].conductorTempC - 25) / 50));
-
-        // Vertex 1: c1 (Warm)
-        areaColors.push(0.96 * t1 + 0.02 * (1 - t1), 0.62 * t1 + 0.71 * (1 - t1), 0.04 * t1 + 0.83 * (1 - t1));
-        // Vertex 2: b1 (Cooler at floor baseline)
-        areaColors.push(0.02, 0.55, 0.75);
-        // Vertex 3: c2 (Warm)
-        areaColors.push(0.96 * t2 + 0.02 * (1 - t2), 0.62 * t2 + 0.71 * (1 - t2), 0.04 * t2 + 0.83 * (1 - t2));
-
-        // Triangle 2 vertices
-        areaColors.push(0.96 * t2 + 0.02 * (1 - t2), 0.62 * t2 + 0.71 * (1 - t2), 0.04 * t2 + 0.83 * (1 - t2));
-        areaColors.push(0.02, 0.55, 0.75);
-        areaColors.push(0.02, 0.55, 0.75);
+    // 7. Peak Point 3D Beacon & Callout Badge
+    if (screenNodes.length > 0) {
+      let peakNode = screenNodes[0];
+      for (const n of screenNodes) {
+        if (n.point.conductorTempC > peakNode.point.conductorTempC) {
+          peakNode = n;
+        }
       }
 
-      filledAreaGeo.setAttribute('position', new THREE.Float32BufferAttribute(areaVertices, 3));
-      filledAreaGeo.setAttribute('color', new THREE.Float32BufferAttribute(areaColors, 3));
-      filledAreaGeo.computeVertexNormals();
+      // Outer pulse ring
+      ctx.beginPath();
+      ctx.arc(peakNode.sx, peakNode.sy, 11, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.28)';
+      ctx.fill();
 
-      const filledAreaMat = new THREE.MeshStandardMaterial({
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.68,
-        side: THREE.DoubleSide,
-        roughness: 0.3,
-        metalness: 0.2,
-      });
-
-      const filledAreaMesh = new THREE.Mesh(filledAreaGeo, filledAreaMat);
-      mainGroup.add(filledAreaMesh);
-
-      // 3. Peak Point Sphere Marker
-      const peakIdx = points.reduce(
-        (maxI, p, idx, arr) => (p.conductorTempC > arr[maxI].conductorTempC ? idx : maxI),
-        0
+      // Core 3D sphere
+      const sphereGrad = ctx.createRadialGradient(
+        peakNode.sx - 2,
+        peakNode.sy - 2,
+        1,
+        peakNode.sx,
+        peakNode.sy,
+        7
       );
-      if (peakIdx >= 0 && peakIdx < curvePoints3D.length) {
-        const peakPos = curvePoints3D[peakIdx];
-        const peakGeo = new THREE.SphereGeometry(0.9, 16, 16);
-        const peakMat = new THREE.MeshStandardMaterial({
-          color: 0xef4444,
-          emissive: 0xdc2626,
-          emissiveIntensity: 0.8,
-        });
-        const peakSphere = new THREE.Mesh(peakGeo, peakMat);
-        peakSphere.position.copy(peakPos);
-        mainGroup.add(peakSphere);
+      sphereGrad.addColorStop(0, '#fecaca');
+      sphereGrad.addColorStop(0.45, '#ef4444');
+      sphereGrad.addColorStop(1, '#991b1b');
+      ctx.beginPath();
+      ctx.arc(peakNode.sx, peakNode.sy, 6.8, 0, Math.PI * 2);
+      ctx.fillStyle = sphereGrad;
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
 
-        // Peak Label Sprite
-        const peakSprite = makeTextSprite(
-          `PEAK ${points[peakIdx].conductorTempC.toFixed(1)}°C @ ${points[peakIdx].time}`,
-          { fontsize: 26, textColor: '#fecaca', backgroundColor: 'rgba(220, 38, 38, 0.9)' }
-        );
-        peakSprite.scale.set(12, 2.5, 1);
-        peakSprite.position.set(peakPos.x, peakPos.y + 3.2, peakPos.z);
-        mainGroup.add(peakSprite);
+      // Connector stem to peak badge
+      const badgePos = proj(peakNode.pos3D.x, peakNode.pos3D.y + 3.2, peakNode.pos3D.z);
+      ctx.beginPath();
+      ctx.moveTo(peakNode.sx, peakNode.sy - 7);
+      ctx.lineTo(badgePos.sx, badgePos.sy + 10);
+      ctx.strokeStyle = 'rgba(248, 113, 113, 0.85)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      draw3DTextBadge(
+        ctx,
+        `PEAK ${peakNode.point.conductorTempC.toFixed(1)}°C @ ${peakNode.point.time} (${peakNode.point.pCkt3MW.toFixed(1)} MW)`,
+        badgePos,
+        {
+          textColor: '#fef2f2',
+          bgColor: 'rgba(185, 28, 28, 0.92)',
+          borderColor: 'rgba(252, 165, 165, 0.7)',
+          fontSize: 11,
+          paddingX: 9,
+          paddingY: 5,
+        }
+      );
+
+      // 8. Interactive Hover Crosshair Projections
+      if (hoveredIdxRef.current !== null && screenNodes[hoveredIdxRef.current]) {
+        const hNode = screenNodes[hoveredIdxRef.current];
+        const pAxisX = proj(hNode.pos3D.x, 0, halfZ);
+        const pAxisY = proj(-halfX, hNode.pos3D.y, halfZ);
+        const pAxisZ = proj(-halfX, 0, hNode.pos3D.z);
+
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1.4;
+
+        // Drop line to floor & X-axis
+        ctx.beginPath();
+        ctx.moveTo(hNode.sx, hNode.sy);
+        ctx.lineTo(hNode.baseSx, hNode.baseSy);
+        ctx.lineTo(pAxisX.sx, pAxisX.sy);
+        ctx.strokeStyle = '#38bdf8';
+        ctx.stroke();
+
+        // Projection line to Y-axis (Conductor Temp)
+        ctx.beginPath();
+        ctx.moveTo(hNode.sx, hNode.sy);
+        ctx.lineTo(pAxisY.sx, pAxisY.sy);
+        ctx.strokeStyle = '#fbbf24';
+        ctx.stroke();
+
+        // Projection line from floor to Z-axis (Power MW)
+        ctx.beginPath();
+        ctx.moveTo(hNode.baseSx, hNode.baseSy);
+        ctx.lineTo(pAxisZ.sx, pAxisZ.sy);
+        ctx.strokeStyle = '#34d399';
+        ctx.stroke();
+        ctx.restore();
       }
     }
 
-    // Interactive manual mouse drag rotation (stationary by default in center area)
-    let isMouseDown = false;
-    let prevMouseX = 0;
-    let prevMouseY = 0;
+    projectedNodesRef.current = screenNodes.map((n) => ({
+      idx: n.idx,
+      sx: n.sx,
+      sy: n.sy,
+      point: n.point,
+    }));
+
+    ctx.restore();
+  }, [plotPoints]);
+
+  const handleResetView = useCallback(() => {
+    cameraRef.current = {
+      rotX: DEFAULT_ROT_X,
+      rotY: DEFAULT_ROT_Y,
+      zoom: DEFAULT_ZOOM,
+    };
+    render3DScene();
+  }, [render3DScene]);
+
+  const handleZoom = useCallback(
+    (delta: number) => {
+      cameraRef.current.zoom = Math.max(0.7, Math.min(1.65, cameraRef.current.zoom + delta));
+      render3DScene();
+    },
+    [render3DScene]
+  );
+
+  // Set up interactive drag rotation, wheel zoom, hover inspection & ResizeObserver
+  useEffect(() => {
+    render3DScene();
+
+    const container = containerRef.current;
+    const canvas = canvasRef.current;
+    if (!container || !canvas) return;
+
+    let isDragging = false;
+    let prevX = 0;
+    let prevY = 0;
 
     const onMouseDown = (e: MouseEvent) => {
-      isMouseDown = true;
-      prevMouseX = e.clientX;
-      prevMouseY = e.clientY;
+      isDragging = true;
+      prevX = e.clientX;
+      prevY = e.clientY;
     };
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!isMouseDown) return;
-      const deltaX = e.clientX - prevMouseX;
-      const deltaY = e.clientY - prevMouseY;
-      pivotGroup.rotation.y += deltaX * 0.007;
-      pivotGroup.rotation.x = Math.max(
-        -0.45,
-        Math.min(0.85, pivotGroup.rotation.x + deltaY * 0.007)
-      );
-      prevMouseX = e.clientX;
-      prevMouseY = e.clientY;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      if (isDragging) {
+        const dx = e.clientX - prevX;
+        const dy = e.clientY - prevY;
+        cameraRef.current.rotY += dx * 0.008;
+        cameraRef.current.rotX = Math.max(
+          -0.25,
+          Math.min(0.95, cameraRef.current.rotX + dy * 0.008)
+        );
+        prevX = e.clientX;
+        prevY = e.clientY;
+        render3DScene();
+        return;
+      }
+
+      // Check hover proximity to projected 3D nodes
+      if (mx >= 0 && mx <= rect.width && my >= 0 && my <= rect.height) {
+        let bestIdx: number | null = null;
+        let bestDist = 28; // snap radius in px
+        for (const node of projectedNodesRef.current) {
+          const dist = Math.hypot(node.sx - mx, node.sy - my);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestIdx = node.idx;
+          }
+        }
+        if (bestIdx !== hoveredIdxRef.current) {
+          hoveredIdxRef.current = bestIdx;
+          setHoveredIdx(bestIdx);
+          render3DScene();
+        }
+      }
     };
 
     const onMouseUp = () => {
-      isMouseDown = false;
+      isDragging = false;
+    };
+
+    const onMouseLeave = () => {
+      if (hoveredIdxRef.current !== null) {
+        hoveredIdxRef.current = null;
+        setHoveredIdx(null);
+        render3DScene();
+      }
+    };
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        isDragging = true;
+        prevX = e.touches[0].clientX;
+        prevY = e.touches[0].clientY;
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!isDragging || e.touches.length !== 1) return;
+      const dx = e.touches[0].clientX - prevX;
+      const dy = e.touches[0].clientY - prevY;
+      cameraRef.current.rotY += dx * 0.008;
+      cameraRef.current.rotX = Math.max(
+        -0.25,
+        Math.min(0.95, cameraRef.current.rotX + dy * 0.008)
+      );
+      prevX = e.touches[0].clientX;
+      prevY = e.touches[0].clientY;
+      render3DScene();
+    };
+
+    const onTouchEnd = () => {
+      isDragging = false;
     };
 
     const onResize = () => {
-      if (!container) return;
-      const newW = container.clientWidth || 960;
-      camera.aspect = newW / height;
-      camera.updateProjectionMatrix();
-      camera.lookAt(0, 0, 0);
-      renderer.setSize(newW, height);
+      render3DScene();
     };
 
     const resizeObserver =
@@ -663,33 +1136,31 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
     if (resizeObserver) {
       resizeObserver.observe(container);
     }
-    window.addEventListener('resize', onResize);
 
-    container.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('resize', onResize);
+    canvas.addEventListener('mousedown', onMouseDown);
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
-
-    // Animation Loop (stationary in center — no automatic continuous rotation)
-    let animId: number;
-    const animate = () => {
-      animId = requestAnimationFrame(animate);
-      renderer.render(scene, camera);
-    };
-    animate();
+    canvas.addEventListener('mouseleave', onMouseLeave);
+    canvas.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('touchend', onTouchEnd);
 
     return () => {
-      cancelAnimationFrame(animId);
       if (resizeObserver) resizeObserver.disconnect();
       window.removeEventListener('resize', onResize);
-      container.removeEventListener('mousedown', onMouseDown);
+      canvas.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
-      renderer.dispose();
-      while (container.firstChild) {
-        container.removeChild(container.firstChild);
-      }
+      canvas.removeEventListener('mouseleave', onMouseLeave);
+      canvas.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
     };
-  }, [actualTelemetry, hasGathered]);
+  }, [render3DScene, hasGathered]);
+
+  const hoveredPoint =
+    hoveredIdx !== null && plotPoints[hoveredIdx] ? plotPoints[hoveredIdx] : null;
 
   if (!hasAnyDataSource) {
     return (
@@ -706,7 +1177,7 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
   return (
     <div className="space-y-4 animate-in fade-in duration-300">
       {/* Top Filter and Context Bar */}
-      <div className="bg-slate-900/90 backdrop-blur-xl p-4 rounded-2xl border border-cyan-500/20 shadow-[0_4px_25px_rgba(6,182,212,0.06)] flex flex-wrap items-center justify-between gap-3">
+      <div className="bg-slate-900/90 p-4 rounded-2xl border border-cyan-500/20 shadow-[0_4px_25px_rgba(6,182,212,0.06)] flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
             <span className="p-2 rounded-xl bg-purple-950/60 text-purple-400 border border-purple-500/30 shadow-[0_0_12px_rgba(168,85,247,0.25)]">
@@ -907,25 +1378,50 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
           </button>
         </div>
       ) : (
-        <div className="relative bg-slate-950 rounded-3xl border border-purple-500/20 overflow-hidden shadow-[0_0_35px_rgba(168,85,247,0.08)]">
-          {/* Three.js canvas mount */}
-          <div ref={mountRef} className="w-full h-[560px] cursor-grab active:cursor-grabbing" />
+        <div
+          ref={containerRef}
+          className="relative bg-slate-950 rounded-3xl border border-purple-500/20 overflow-hidden shadow-[0_0_35px_rgba(168,85,247,0.08)]"
+        >
+          {/* Guaranteed 3D Spatial Projection Canvas */}
+          <canvas
+            ref={canvasRef}
+            className="block w-full h-[560px] cursor-grab active:cursor-grabbing select-none"
+          />
 
           {/* 3D Axis Markers HUD Legend */}
-          <div className="absolute top-4 left-4 z-20 bg-slate-950/90 backdrop-blur-md border border-purple-500/30 rounded-2xl p-3 text-slate-200 text-xs shadow-xl space-y-1.5 font-mono max-w-xs">
+          <div className="absolute top-4 left-4 z-20 bg-slate-950/92 border border-purple-500/30 rounded-2xl p-3 text-slate-200 text-xs shadow-xl space-y-1.5 font-mono max-w-xs">
             <div className="font-extrabold text-[11px] text-purple-300 flex items-center justify-between gap-2">
               <span className="flex items-center gap-1.5">
                 <Grid className="w-3.5 h-3.5 text-purple-400" />
                 3D AXES &amp; FILLED MANIFOLD
               </span>
-              <button
-                type="button"
-                onClick={() => resetViewRef.current?.()}
-                className="px-2 py-0.5 rounded-md bg-purple-500/20 hover:bg-purple-500/35 text-purple-200 border border-purple-500/40 text-[10px] font-bold transition-all cursor-pointer"
-                title="Reset 3D Chart to Center View"
-              >
-                Center View
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => handleZoom(0.12)}
+                  className="p-1 rounded-md bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-all cursor-pointer"
+                  title="Zoom In 3D"
+                >
+                  <ZoomIn className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleZoom(-0.12)}
+                  className="p-1 rounded-md bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-all cursor-pointer"
+                  title="Zoom Out 3D"
+                >
+                  <ZoomOut className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetView}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-500/20 hover:bg-purple-500/35 text-purple-200 border border-purple-500/40 text-[10px] font-bold transition-all cursor-pointer"
+                  title="Reset 3D Chart to Center View"
+                >
+                  <RotateCcw className="w-2.5 h-2.5" />
+                  Center View
+                </button>
+              </div>
             </div>
             <div className="space-y-1 text-[10px]">
               <div className="flex items-center gap-2 text-cyan-300">
@@ -941,13 +1437,13 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
                 <span>Z-Axis: Circuit 3 Power Flow (0–100 MW)</span>
               </div>
               <div className="pt-1 border-t border-slate-800 text-slate-400">
-                Locked in center area. Click &amp; drag manually to inspect 3D angles.
+                Locked in center area. Click &amp; drag manually to inspect 3D angles, or hover nodes to inspect hourly telemetry.
               </div>
             </div>
           </div>
 
           {/* Quick KPI stats overlay */}
-          <div className="absolute top-4 right-4 z-20 bg-slate-950/90 backdrop-blur-md border border-purple-500/30 rounded-2xl p-3 text-xs font-mono shadow-xl flex items-center gap-3">
+          <div className="absolute top-4 right-4 z-20 bg-slate-950/92 border border-purple-500/30 rounded-2xl p-3 text-xs font-mono shadow-xl flex items-center gap-3">
             <div>
               <span className="text-[10px] uppercase font-bold text-slate-400 block">Peak Conductor</span>
               <span className="font-extrabold text-sm text-amber-400">
@@ -962,6 +1458,31 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
               </span>
             </div>
           </div>
+
+          {/* Interactive Hovered Node Telemetry HUD */}
+          {hoveredPoint && (
+            <div className="absolute bottom-4 right-4 z-20 bg-slate-950/95 border border-cyan-500/40 rounded-2xl px-4 py-2.5 text-xs font-mono shadow-2xl flex items-center gap-4 animate-in fade-in duration-150">
+              <div>
+                <span className="text-[10px] text-slate-400 block uppercase">Time (X)</span>
+                <span className="font-bold text-cyan-300">{hoveredPoint.time}</span>
+              </div>
+              <div className="h-6 w-px bg-slate-800" />
+              <div>
+                <span className="text-[10px] text-slate-400 block uppercase">Conductor Tc (Y)</span>
+                <span className="font-bold text-amber-400">{hoveredPoint.conductorTempC.toFixed(2)} °C</span>
+              </div>
+              <div className="h-6 w-px bg-slate-800" />
+              <div>
+                <span className="text-[10px] text-slate-400 block uppercase">Fiber Tf</span>
+                <span className="font-bold text-sky-300">{hoveredPoint.fiberTempC.toFixed(2)} °C</span>
+              </div>
+              <div className="h-6 w-px bg-slate-800" />
+              <div>
+                <span className="text-[10px] text-slate-400 block uppercase">Circuit 3 (Z)</span>
+                <span className="font-bold text-emerald-400">{hoveredPoint.pCkt3MW.toFixed(1)} MW</span>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
