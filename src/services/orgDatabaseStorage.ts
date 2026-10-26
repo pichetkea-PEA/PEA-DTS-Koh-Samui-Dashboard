@@ -126,6 +126,7 @@ const STORAGE_KEY_FOLDER = 'org_dts_permanent_folder_config_v2';
 const STORAGE_KEY_POWER_PEAKS = 'org_dts_power_peaks_records_v2';
 const STORAGE_KEY_SECTION_PROFILE = 'org_dts_section_daily_profile_records_v2';
 const STORAGE_KEY_SECTION_PROFILES = STORAGE_KEY_SECTION_PROFILE;
+const STORAGE_KEY_SECTION_PROFILE_DATES = 'org_dts_section_daily_profile_dates_v2';
 const STORAGE_KEY_PANEL1_INFO = 'dts_data_panel1_source_info_v2';
 const STORAGE_KEY_PANEL2_INFO = 'dts_data_panel2_source_info_v2';
 const STORAGE_KEY_PANEL3_INFO = 'dts_data_panel3_source_info_v2';
@@ -133,6 +134,7 @@ const STORAGE_KEY_PANEL3_INFO = 'dts_data_panel3_source_info_v2';
 // In-memory cache for ultra-fast reactive queries
 let memoryConfig: OrgDatabaseConfig | null = null;
 let memoryRecords: OrgDatabaseRecord[] | null = null;
+let memoryRecordsByDate = new Map<string, OrgDatabaseRecord[]>();
 let memoryRecordsBySectionDate = new Map<string, OrgDatabaseRecord>();
 let memoryCircuitPeaksByDate = new Map<string, CircuitDailyPeakPower>();
 let memoryPowerPeaksOnly = new Map<string, CircuitDailyPeakPower>();
@@ -370,7 +372,6 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
         }
       } catch {}
       void idbSet('panel1', p1);
-      rebuildIndexes();
       didUpdate = true;
     }
   }
@@ -399,9 +400,12 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
         localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2.peaks));
       } catch {}
       void idbSet('panel2', p2);
-      rebuildIndexes();
       didUpdate = true;
     }
+  }
+
+  if (didUpdate) {
+    rebuildIndexes();
   }
 
   if (p3) {
@@ -409,9 +413,9 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
     if (Array.isArray(p3.allDates) && p3.allDates.length > 0) {
       memorySectionProfileAllDates = p3.allDates;
       memorySectionProfileDates = p3.allDates;
-    } else if (Array.isArray(p3.dates) && p3.dates.length > 0) {
-      memorySectionProfileAllDates = p3.dates;
-      memorySectionProfileDates = p3.dates;
+    } else if (Array.isArray((p3 as any).dates) && (p3 as any).dates.length > 0) {
+      memorySectionProfileAllDates = (p3 as any).dates;
+      memorySectionProfileDates = (p3 as any).dates;
     }
     if (Array.isArray(p3.records) && p3.records.length > 0) {
       memorySectionProfileRecords = p3.records;
@@ -421,6 +425,9 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
     try {
       if (memoryPanel3Info) {
         localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(memoryPanel3Info));
+      }
+      if (memorySectionProfileDates.length > 0) {
+        localStorage.setItem(STORAGE_KEY_SECTION_PROFILE_DATES, JSON.stringify(memorySectionProfileDates));
       }
     } catch {}
     void idbSet('panel3', p3);
@@ -439,6 +446,49 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
 }
 
 const fetchingDates = new Set<string>();
+const fetchingPanel1DofDates = new Set<string>();
+const loadedPanel1DofDates = new Set<string>();
+
+export async function fetchPanel1DofsForDate(date: string): Promise<boolean> {
+  if (!date || fetchingPanel1DofDates.has(date) || loadedPanel1DofDates.has(date)) return false;
+  const recs = memoryRecordsByDate.get(date);
+  if (recs && recs.length > 0 && recs[0].dofTfMax && Object.keys(recs[0].dofTfMax).length > 0) {
+    loadedPanel1DofDates.add(date);
+    return true;
+  }
+
+  fetchingPanel1DofDates.add(date);
+  try {
+    const res = await fetch(`/api/panel1-date-dofs?date=${encodeURIComponent(date)}`);
+    if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+      const data = await res.json();
+      if (data?.success && data?.dofsBySectionPhase && typeof data.dofsBySectionPhase === 'object') {
+        const dofsMap = data.dofsBySectionPhase;
+        const dateRecs = memoryRecordsByDate.get(date) || [];
+        let updatedAny = false;
+        for (const r of dateRecs) {
+          const entry = dofsMap[`${r.sectionId}_${r.phase}`];
+          if (entry) {
+            if (entry.dofTfMax) r.dofTfMax = entry.dofTfMax;
+            if (entry.dofTcMax) r.dofTcMax = entry.dofTcMax;
+            if (entry.dofTimeMax) r.dofTimeMax = entry.dofTimeMax;
+            updatedAny = true;
+          }
+        }
+        loadedPanel1DofDates.add(date);
+        if (updatedAny) {
+          notifyListeners();
+          return true;
+        }
+      }
+    }
+  } catch {
+    // ignore fetch error
+  } finally {
+    fetchingPanel1DofDates.delete(date);
+  }
+  return false;
+}
 
 export async function fetchSectionDailyProfileForDate(date: string): Promise<boolean> {
   if (!date || fetchingDates.has(date)) return false;
@@ -593,10 +643,14 @@ function initFromStorage() {
         } catch (e) {}
       }
     }
-    const rawProfile = localStorage.getItem(STORAGE_KEY_SECTION_PROFILE);
-    if (rawProfile && memoryPanel3Info && memoryPanel3Info.sourceType !== 'default') {
+    const rawSecDates = localStorage.getItem(STORAGE_KEY_SECTION_PROFILE_DATES);
+    if (rawSecDates) {
       try {
-        memorySectionProfileRecords = JSON.parse(rawProfile);
+        const parsedDates = JSON.parse(rawSecDates);
+        if (Array.isArray(parsedDates) && parsedDates.length > 0) {
+          memorySectionProfileAllDates = parsedDates;
+          memorySectionProfileDates = parsedDates;
+        }
       } catch (e) {}
     }
     const rawSecProfiles = localStorage.getItem(STORAGE_KEY_SECTION_PROFILES);
@@ -848,10 +902,16 @@ function generateDefaultOrgRecords(): OrgDatabaseRecord[] {
 }
 
 function rebuildIndexes() {
+  memoryRecordsByDate.clear();
   memoryRecordsBySectionDate.clear();
   memoryCircuitPeaksByDate.clear();
 
-  if (!memoryRecords || memoryRecords.length === 0) return;
+  if (!memoryRecords || memoryRecords.length === 0) {
+    memoryPowerPeaksOnly.forEach((p, d) => {
+      memoryCircuitPeaksByDate.set(d, p);
+    });
+    return;
+  }
 
   // Track max values per date
   const dateMap = new Map<string, {
@@ -864,8 +924,20 @@ function rebuildIndexes() {
   }>();
 
   for (const r of memoryRecords) {
+    // O(1) index by date
+    let dayList = memoryRecordsByDate.get(r.date);
+    if (!dayList) {
+      dayList = [];
+      memoryRecordsByDate.set(r.date, dayList);
+    }
+    dayList.push(r);
+
     // Key: `${sectionId}_${date}` and `${sectionId}_${phase}_${date}`
-    memoryRecordsBySectionDate.set(`${r.sectionId}_${r.date}`, r);
+    const baseSecDateKey = `${r.sectionId}_${r.date}`;
+    const prevSecDateRec = memoryRecordsBySectionDate.get(baseSecDateKey);
+    if (!prevSecDateRec || r.tfMax >= prevSecDateRec.tfMax) {
+      memoryRecordsBySectionDate.set(baseSecDateKey, r);
+    }
     memoryRecordsBySectionDate.set(`${r.sectionId}_${r.phase}_${r.date}`, r);
 
     // Compute peak power values for this date
@@ -1311,8 +1383,11 @@ export async function saveUploadedOrgDatabase(
 
     try {
       localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(config));
-      // Store compressed / slice if needed, or full data
-      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(records));
+      if (records.length <= 1500) {
+        localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(records));
+      } else {
+        localStorage.removeItem(STORAGE_KEY_DATA);
+      }
     } catch (quotaErr) {
       console.warn('Storage quota reached when saving full records to localStorage, keeping in-memory:', quotaErr);
     }
@@ -1354,6 +1429,7 @@ export function clearOrgDatabase() {
     availableYears: [],
   };
   memoryRecords = [];
+  memoryRecordsByDate.clear();
   memoryRecordsBySectionDate.clear();
   memoryCircuitPeaksByDate.clear();
 
@@ -1366,12 +1442,15 @@ export function clearOrgDatabase() {
 }
 
 /**
- * Get all records for a specific date across all sections
+ * Get all records for a specific date across all sections (O(1) lookup + automatic DOF hydration for historical dates)
  */
 export function getOrgRecordsForDate(dateKey: string): OrgDatabaseRecord[] {
   initFromStorage();
-  if (!memoryRecords) return [];
-  return memoryRecords.filter((r) => r.date === dateKey);
+  const list = memoryRecordsByDate.get(dateKey) || [];
+  if (list.length > 0 && (!list[0].dofTfMax || Object.keys(list[0].dofTfMax).length === 0)) {
+    void fetchPanel1DofsForDate(dateKey);
+  }
+  return list;
 }
 
 /**
@@ -1853,18 +1932,16 @@ export async function saveUploadedSectionDailyProfileDatabase(
     }
 
     memorySectionProfileRecords = records;
+    memorySectionProfileAllDates = Array.from(datesSet).sort();
     rebuildSectionProfileIndexes();
 
-    const sortedDates = Array.from(datesSet).sort();
+    const sortedDates = memorySectionProfileDates;
 
     try {
-      if (records.length <= 25000) {
-        localStorage.setItem(STORAGE_KEY_SECTION_PROFILES, JSON.stringify(records));
-      } else {
-        localStorage.setItem(STORAGE_KEY_SECTION_PROFILES, JSON.stringify(records.slice(-20000)));
-      }
+      localStorage.setItem(STORAGE_KEY_SECTION_PROFILE_DATES, JSON.stringify(sortedDates));
+      localStorage.removeItem(STORAGE_KEY_SECTION_PROFILES);
     } catch (e) {
-      console.warn('localStorage quota reached for section daily profiles; keeping full in memory');
+      // Ignore quota
     }
 
     const defaultP3Info: DataPanelSourceInfo = memoryPanel3Info || {
@@ -2014,7 +2091,19 @@ export function getOrgSectionDailyProfileForSectionDate(
 
 export function getOrgSectionDailyProfileDates(): string[] {
   initFromStorage();
-  return memorySectionProfileDates;
+  if (memorySectionProfileDates.length > 0) {
+    return memorySectionProfileDates;
+  }
+  if (memorySectionProfileAllDates.length > 0) {
+    return memorySectionProfileAllDates;
+  }
+  if (memoryConfig?.availableDates && memoryConfig.availableDates.length > 0) {
+    return memoryConfig.availableDates;
+  }
+  if (memoryCircuitPeaksByDate.size > 0) {
+    return Array.from(memoryCircuitPeaksByDate.keys()).sort();
+  }
+  return [];
 }
 
 export function getOrgSectionDailyProfileRecordsCount(): number {
@@ -2340,6 +2429,7 @@ export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
       };
       try {
         localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(info));
+        localStorage.setItem(STORAGE_KEY_SECTION_PROFILE_DATES, JSON.stringify(memorySectionProfileDates));
       } catch {}
       void idbSet('panel3', savedDefaultPanel3);
       notifyListeners();
@@ -2368,7 +2458,6 @@ export function resetPanel1ToSample(): void {
     memoryPanel1Info = savedDefaultPanel1.info;
     try {
       localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
-      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(memoryRecords));
       localStorage.setItem(STORAGE_KEY_PANEL1_INFO, JSON.stringify(memoryPanel1Info));
     } catch (e) {}
     rebuildIndexes();
@@ -2414,15 +2503,13 @@ export function resetPanel3ToSample(): void {
   if (savedDefaultPanel3 && savedDefaultPanel3.records.length > 0) {
     memorySectionProfileRecords = savedDefaultPanel3.records;
     if (Array.isArray(savedDefaultPanel3.allDates) && savedDefaultPanel3.allDates.length > 0) {
-      memorySectionProfileDates = savedDefaultPanel3.allDates;
+      memorySectionProfileAllDates = savedDefaultPanel3.allDates;
+      memorySectionProfileDates = [...savedDefaultPanel3.allDates];
     }
     memoryPanel3Info = savedDefaultPanel3.info;
     rebuildSectionProfileIndexes();
-    if (Array.isArray(savedDefaultPanel3.allDates) && savedDefaultPanel3.allDates.length > memorySectionProfileDates.length) {
-      memorySectionProfileDates = savedDefaultPanel3.allDates;
-    }
     try {
-      localStorage.setItem(STORAGE_KEY_SECTION_PROFILES, JSON.stringify(savedDefaultPanel3.records.slice(-15000)));
+      localStorage.setItem(STORAGE_KEY_SECTION_PROFILE_DATES, JSON.stringify(memorySectionProfileDates));
       localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(memoryPanel3Info));
     } catch (e) {}
     notifyListeners();
@@ -2785,8 +2872,11 @@ export async function syncAllPublicSharedTargetFolders(
     message: '',
   };
 
-  onProgress?.(4, 'Scanning 3 Shared Google Drive Folders for newly uploaded or updated database files...');
-  await new Promise((r) => setTimeout(r, 20));
+  onProgress?.(4, 'Connecting to Telemetry Cache & Scanning 3 Shared Google Drive Folders...');
+  await new Promise((r) => setTimeout(r, 10));
+
+  // Reuse already-started default database fetch so we don't download & parse the payload twice
+  let cachedServerDb = await fetchSharedServerDefaultDatabases(false);
 
   let scanResult: any = null;
   try {
@@ -2812,46 +2902,47 @@ export async function syncAllPublicSharedTargetFolders(
           11,
           `Detected & downloaded new database file(s): ${changedNames.join(', ')}`
         );
-        await new Promise((r) => setTimeout(r, 80));
+        cachedServerDb = await fetchSharedServerDefaultDatabases(true);
       } else {
         onProgress?.(10, 'Verified all 3 Google Drive Shared Folders are on the latest version...');
+        if (!cachedServerDb) {
+          cachedServerDb = await fetchSharedServerDefaultDatabases(true);
+        }
       }
     }
   } catch (scanErr) {
     console.warn('Live folder scan warning (using server/cached databases):', scanErr);
   }
 
-  // Always force-refresh the server default databases after the folder scan so any newly downloaded data is picked up
-  const cachedServerDb = await fetchSharedServerDefaultDatabases(true);
+  let needsIndexRebuild = false;
 
   // 1. Panel 1: Daily Peak Temperature (12% - 35%)
   if (links.panel1Url) {
     try {
-      onProgress?.(14, 'Energizing Folder 1: Reading 19-Section Daily Peak Temperature...');
+      onProgress?.(16, 'Energizing Folder 1: Reading 19-Section Daily Peak Temperature...');
       const p1Cached = cachedServerDb?.panel1;
       if (
         p1Cached &&
         Array.isArray(p1Cached.records) &&
         p1Cached.records.length > 0 &&
-        p1Cached.config &&
-        (!p1Cached.info?.remoteUrl || p1Cached.info.remoteUrl === links.panel1Url)
+        p1Cached.config
       ) {
-        await new Promise((r) => setTimeout(r, 50));
         const p1TotalRecords = p1Cached.config.totalRecords || p1Cached.records.length;
         const p1TotalDates = p1Cached.config.totalDates;
         onProgress?.(
-          24,
+          26,
           `Indexing ${p1TotalRecords.toLocaleString()} Section Records across ${p1TotalDates} Dates (Folder 1)...`
         );
-        memoryConfig = p1Cached.config;
-        memoryRecords = p1Cached.records;
-        savedDefaultPanel1 = p1Cached;
-        try {
-          localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
-        } catch {}
-        void idbSet('panel1', p1Cached);
-        rebuildIndexes();
-        await new Promise((r) => setTimeout(r, 50));
+        if (memoryRecords !== p1Cached.records || !memoryRecordsByDate.size) {
+          memoryConfig = p1Cached.config;
+          memoryRecords = p1Cached.records;
+          savedDefaultPanel1 = p1Cached;
+          needsIndexRebuild = true;
+          try {
+            localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
+          } catch {}
+          void idbSet('panel1', p1Cached);
+        }
         onProgress?.(32, 'Synchronizing Heat Map (2.1) & Section Peak telemetry...');
         const p1Info: DataPanelSourceInfo = {
           ...(p1Cached.info || {}),
@@ -2875,70 +2966,36 @@ export async function syncAllPublicSharedTargetFolders(
           count: p1TotalRecords || p1TotalDates,
           name: p1Info.name,
         };
-      } else {
-        const fileRes = await fetchRemoteDatabaseFile(links.panel1Url, 'xlsx', accessToken);
-        onProgress?.(18, 'Reading & indexing Daily Peak Temp records...');
-        if (fileRes.success && fileRes.buffer) {
-          const saveRes = await saveUploadedOrgDatabase(fileRes.buffer, fileRes.fileName, (p) => {
-            onProgress?.(Math.min(34, Math.round(18 + p * 16)), 'Indexing Daily Peak Temp records...');
-          });
-          if (saveRes.success) {
-            result.panel1 = {
-              success: true,
-              count: saveRes.config.totalRecords || saveRes.config.totalDates,
-              name: fileRes.fileName,
-            };
-            savePanel1SourceInfo({
-              sourceType: 'googledrive',
-              name: fileRes.fileName,
-              remoteUrl: links.panel1Url,
-              updatedAt: new Date().toISOString(),
-              totalDates: saveRes.config.totalDates,
-              dateRange: saveRes.config.dateRange,
-              recordCount: saveRes.config.totalRecords,
-            });
-          } else {
-            result.panel1 = { success: false, count: 0, error: formatErrorMessage(saveRes.error) };
-          }
-        } else {
-          result.panel1 = { success: false, count: 0, error: formatErrorMessage(fileRes.error) };
-        }
       }
     } catch (e: any) {
       result.panel1 = { success: false, count: 0, error: formatErrorMessage(e) };
     }
   }
   onProgress?.(35, 'Shared Folder 1 Synchronized (100%)');
-  await new Promise((r) => setTimeout(r, 40));
 
   // 2. Panel 2: 4-Circuit Power Record (36% - 65%)
   if (links.panel2Url) {
     try {
-      onProgress?.(42, 'Energizing Folder 2: Reading 4-Circuit Submarine Power Load...');
+      onProgress?.(44, 'Energizing Folder 2: Reading 4-Circuit Submarine Power Load...');
       const p2Cached = cachedServerDb?.panel2;
-      if (
-        p2Cached &&
-        Array.isArray(p2Cached.peaks) &&
-        p2Cached.peaks.length > 0 &&
-        (!p2Cached.info?.remoteUrl || p2Cached.info.remoteUrl === links.panel2Url)
-      ) {
-        await new Promise((r) => setTimeout(r, 50));
+      if (p2Cached && Array.isArray(p2Cached.peaks) && p2Cached.peaks.length > 0) {
         onProgress?.(
-          53,
+          54,
           `Indexing ${p2Cached.peaks.length} Dates of 115kV Ckt #3, Ckt #2, 33kV NKT & Oil-Filled MW (Folder 2)...`
         );
-        memoryPowerPeaksOnly.clear();
-        p2Cached.peaks.forEach((pk: CircuitDailyPeakPower) => {
-          memoryPowerPeaksOnly.set(pk.date, pk);
-          memoryCircuitPeaksByDate.set(pk.date, pk);
-        });
-        savedDefaultPanel2 = p2Cached;
-        try {
-          localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2Cached.peaks));
-        } catch {}
-        void idbSet('panel2', p2Cached);
-        rebuildIndexes();
-        await new Promise((r) => setTimeout(r, 50));
+        if (memoryPowerPeaksOnly.size !== p2Cached.peaks.length) {
+          memoryPowerPeaksOnly.clear();
+          p2Cached.peaks.forEach((pk: CircuitDailyPeakPower) => {
+            memoryPowerPeaksOnly.set(pk.date, pk);
+            memoryCircuitPeaksByDate.set(pk.date, pk);
+          });
+          savedDefaultPanel2 = p2Cached;
+          needsIndexRebuild = true;
+          try {
+            localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2Cached.peaks));
+          } catch {}
+          void idbSet('panel2', p2Cached);
+        }
         onProgress?.(62, 'Synchronizing 4-Circuit Yearly Comparison (2.4)...');
         const sortedP2Dates = p2Cached.peaks.map((p: CircuitDailyPeakPower) => p.date).sort();
         const p2Info: DataPanelSourceInfo = {
@@ -2965,218 +3022,121 @@ export async function syncAllPublicSharedTargetFolders(
           count: p2Cached.peaks.length,
           name: p2Info.name,
         };
-      } else {
-        const fileRes = await fetchRemoteDatabaseFile(links.panel2Url, 'csv', accessToken);
-        onProgress?.(48, 'Parsing 4-circuit daily power flows...');
-        if (fileRes.success && fileRes.buffer) {
-          const saveRes = await saveUploadedPowerDatabase(fileRes.buffer, fileRes.fileName, (p) => {
-            onProgress?.(Math.min(64, Math.round(48 + p * 16)), 'Parsing 4-circuit daily power flows...');
-          });
-          if (saveRes.success) {
-            result.panel2 = {
-              success: true,
-              count: saveRes.count,
-              name: fileRes.fileName,
-            };
-            savePanel2SourceInfo({
-              sourceType: 'googledrive',
-              name: fileRes.fileName,
-              remoteUrl: links.panel2Url,
-              updatedAt: new Date().toISOString(),
-              totalDates: saveRes.dates.length,
-              dateRange: saveRes.dateRange,
-              recordCount: saveRes.count,
-            });
-          } else {
-            result.panel2 = { success: false, count: 0, error: formatErrorMessage(saveRes.error) };
-          }
-        } else {
-          result.panel2 = { success: false, count: 0, error: formatErrorMessage(fileRes.error) };
-        }
       }
     } catch (e: any) {
       result.panel2 = { success: false, count: 0, error: formatErrorMessage(e) };
     }
   }
+
+  if (needsIndexRebuild) {
+    await new Promise((r) => setTimeout(r, 10));
+    rebuildIndexes();
+  }
+
   onProgress?.(65, 'Shared Folder 2 Synchronized (100%)');
-  await new Promise((r) => setTimeout(r, 40));
 
   // 3. Panel 3: Section Daily Profile (66% - 96%)
   if (links.panel3Url) {
     try {
-      onProgress?.(72, 'Energizing Folder 3: Fetching 24-Hour Section Daily Profile...');
-      let loadedFromFastEndpoint = false;
+      onProgress?.(74, 'Energizing Folder 3: Fetching 24-Hour Section Daily Profile...');
       const p3Cached = cachedServerDb?.panel3;
 
-      try {
-        const fastRes = await fetch(`/api/fetch-shared-section-profiles?url=${encodeURIComponent(links.panel3Url)}`).then(
-          (r) => (r.ok && (r.headers.get('content-type') || '').includes('application/json') ? r.json() : null)
-        ).catch(() => null);
+      let recordsToUse: OrgSectionHourlyRecord[] =
+        p3Cached && Array.isArray(p3Cached.records) && p3Cached.records.length > 0
+          ? p3Cached.records
+          : [];
 
-        const recordsToUse: OrgSectionHourlyRecord[] =
-          fastRes && fastRes.success && Array.isArray(fastRes.records) && fastRes.records.length > 0
-            ? fastRes.records
-            : p3Cached && Array.isArray(p3Cached.records) && p3Cached.records.length > 0
-              ? p3Cached.records
-              : [];
+      let allDatesToUse: string[] =
+        p3Cached && Array.isArray(p3Cached.allDates) && p3Cached.allDates.length > 0
+          ? p3Cached.allDates
+          : p3Cached && Array.isArray(p3Cached.dates) && p3Cached.dates.length > 0
+            ? p3Cached.dates
+            : [];
 
-        const allDatesToUse: string[] =
-          fastRes && Array.isArray(fastRes.allDates) && fastRes.allDates.length > 0
-            ? fastRes.allDates
-            : p3Cached && Array.isArray(p3Cached.allDates) && p3Cached.allDates.length > 0
-              ? p3Cached.allDates
-              : p3Cached && Array.isArray(p3Cached.dates) && p3Cached.dates.length > 0
-                ? p3Cached.dates
-                : [];
-
-        if (recordsToUse.length > 0) {
-          onProgress?.(84, 'Indexing 24-Hour Section Curves & Ckt #3 MW across 19 Sections (Folder 3)...');
-          await new Promise((r) => setTimeout(r, 50));
-
-          memorySectionProfileRecords = recordsToUse;
-          if (allDatesToUse.length > 0) {
-            memorySectionProfileAllDates = allDatesToUse;
-            memorySectionProfileDates = [...allDatesToUse];
+      // If cachedServerDb didn't include Panel 3 records, query the dedicated fast endpoint
+      if (recordsToUse.length === 0 || allDatesToUse.length === 0) {
+        const fastRes = await fetch(`/api/fetch-shared-section-profiles?url=${encodeURIComponent(links.panel3Url)}`)
+          .then((r) => (r.ok && (r.headers.get('content-type') || '').includes('application/json') ? r.json() : null))
+          .catch(() => null);
+        if (fastRes?.success) {
+          if (Array.isArray(fastRes.records) && fastRes.records.length > 0) {
+            recordsToUse = fastRes.records;
           }
-          rebuildSectionProfileIndexes();
-
-          onProgress?.(93, 'Synchronizing Daily Curve (2.2) & 3D Thermal Surface (2.3)...');
-          await new Promise((r) => setTimeout(r, 40));
-
-          const totalDatesCount =
-            fastRes?.totalDates ||
-            allDatesToUse.length ||
-            p3Cached?.info?.totalDates ||
-            memorySectionProfileDates.length;
-
-          const defaultP3Info: DataPanelSourceInfo = {
-            ...(p3Cached?.info || {}),
-            sourceType: 'googledrive',
-            name:
-              fastRes?.fileName ||
-              p3Cached?.info?.name ||
-              'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
-            remoteUrl: links.panel3Url,
-            updatedAt: p3Cached?.info?.updatedAt || new Date().toISOString(),
-            totalDates: totalDatesCount,
-            dateRange: fastRes?.dateRange ||
-              p3Cached?.info?.dateRange || {
-                firstDate: memorySectionProfileDates[0] || '2025-07-01',
-                latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-23',
-              },
-            recordCount:
-              fastRes?.recordCount ||
-              p3Cached?.info?.recordCount ||
-              totalDatesCount * 744,
-          };
-
-          savedDefaultPanel3 = {
-            records: recordsToUse,
-            allDates: memorySectionProfileDates,
-            info: defaultP3Info,
-          };
-          memoryPanel3Info = defaultP3Info;
-          try {
-            localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(defaultP3Info));
-          } catch {}
-          void idbSet('panel3', savedDefaultPanel3);
-
-          result.panel3 = {
-            success: true,
-            count: totalDatesCount,
-            name: defaultP3Info.name,
-          };
-          loadedFromFastEndpoint = true;
+          if (Array.isArray(fastRes.allDates) && fastRes.allDates.length > 0) {
+            allDatesToUse = fastRes.allDates;
+          }
         }
-      } catch (fastErr) {
-        console.warn('Fast section profile fetch fallback:', fastErr);
       }
 
-      if (!loadedFromFastEndpoint && p3Cached && Array.isArray(p3Cached.records) && p3Cached.records.length > 0) {
-        onProgress?.(84, 'Indexing 24-Hour Section Curves & Ckt #3 MW across 19 Sections (Folder 3)...');
-        await new Promise((r) => setTimeout(r, 50));
-        const allDatesToUse: string[] =
-          Array.isArray(p3Cached.allDates) && p3Cached.allDates.length > 0
-            ? p3Cached.allDates
-            : Array.isArray(p3Cached.dates) && p3Cached.dates.length > 0
-              ? p3Cached.dates
-              : [];
-        memorySectionProfileRecords = p3Cached.records;
+      if (allDatesToUse.length === 0 && memoryConfig?.availableDates?.length) {
+        allDatesToUse = [...memoryConfig.availableDates];
+      }
+
+      if (recordsToUse.length > 0 || allDatesToUse.length > 0) {
+        onProgress?.(85, 'Indexing 24-Hour Section Curves & Ckt #3 MW across 19 Sections (Folder 3)...');
+        await new Promise((r) => setTimeout(r, 10));
+
+        if (recordsToUse.length > 0 && memorySectionProfileRecords !== recordsToUse) {
+          memorySectionProfileRecords = recordsToUse;
+        }
         if (allDatesToUse.length > 0) {
           memorySectionProfileAllDates = allDatesToUse;
           memorySectionProfileDates = [...allDatesToUse];
         }
         rebuildSectionProfileIndexes();
-        const totalDatesCount = allDatesToUse.length || p3Cached.info?.totalDates || memorySectionProfileDates.length;
-        const p3Info: DataPanelSourceInfo = {
-          ...(p3Cached.info || {}),
+
+        onProgress?.(93, 'Synchronizing Daily Curve (2.2) & 3D Thermal Surface (2.3)...');
+
+        const totalDatesCount =
+          allDatesToUse.length ||
+          p3Cached?.info?.totalDates ||
+          memorySectionProfileDates.length;
+
+        const defaultP3Info: DataPanelSourceInfo = {
+          ...(p3Cached?.info || {}),
           sourceType: 'googledrive',
-          name: p3Cached.info?.name || 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
+          name:
+            p3Cached?.info?.name ||
+            'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
           remoteUrl: links.panel3Url,
-          updatedAt: p3Cached.info?.updatedAt || new Date().toISOString(),
+          updatedAt: p3Cached?.info?.updatedAt || new Date().toISOString(),
           totalDates: totalDatesCount,
-          dateRange: p3Cached.info?.dateRange || {
+          dateRange: p3Cached?.info?.dateRange || {
             firstDate: memorySectionProfileDates[0] || '2025-07-01',
             latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-23',
           },
-          recordCount: p3Cached.info?.recordCount || totalDatesCount * 744,
+          recordCount:
+            p3Cached?.info?.recordCount ||
+            totalDatesCount * 744,
         };
+
         savedDefaultPanel3 = {
-          records: p3Cached.records,
+          records: memorySectionProfileRecords,
           allDates: memorySectionProfileDates,
-          info: p3Info,
+          info: defaultP3Info,
         };
-        memoryPanel3Info = p3Info;
+        memoryPanel3Info = defaultP3Info;
         try {
-          localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(p3Info));
+          localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(defaultP3Info));
+          if (memorySectionProfileDates.length > 0) {
+            localStorage.setItem(STORAGE_KEY_SECTION_PROFILE_DATES, JSON.stringify(memorySectionProfileDates));
+          }
         } catch {}
         void idbSet('panel3', savedDefaultPanel3);
+
         result.panel3 = {
           success: true,
           count: totalDatesCount,
-          name: p3Info.name,
+          name: defaultP3Info.name,
         };
-        loadedFromFastEndpoint = true;
-      }
-
-      if (!loadedFromFastEndpoint) {
-        const fileRes = await fetchRemoteDatabaseFile(links.panel3Url, 'xlsx', accessToken);
-        onProgress?.(78, 'Compiling hourly section profiles across 19 sections...');
-        await new Promise((r) => setTimeout(r, 40));
-        if (fileRes.success && fileRes.buffer) {
-          const saveRes = await saveUploadedSectionDailyProfileDatabase(fileRes.buffer, fileRes.fileName, (p) => {
-            onProgress?.(Math.min(94, Math.round(78 + p * 16)), 'Compiling hourly section profiles...');
-          });
-          if (saveRes.success) {
-            result.panel3 = {
-              success: true,
-              count: saveRes.dates.length || saveRes.count,
-              name: fileRes.fileName,
-            };
-            savePanel3SourceInfo({
-              sourceType: 'googledrive',
-              name: fileRes.fileName,
-              remoteUrl: links.panel3Url,
-              updatedAt: new Date().toISOString(),
-              totalDates: saveRes.dates.length,
-              dateRange: saveRes.dateRange,
-              recordCount: saveRes.count,
-            });
-          } else {
-            result.panel3 = { success: false, count: 0, error: formatErrorMessage(saveRes.error) };
-          }
-        } else {
-          result.panel3 = { success: false, count: 0, error: formatErrorMessage(fileRes.error) };
-        }
       }
     } catch (e: any) {
       result.panel3 = { success: false, count: 0, error: formatErrorMessage(e) };
     }
   }
   onProgress?.(97, 'Shared Folder 3 Synchronized (100%)');
-  await new Promise((r) => setTimeout(r, 40));
 
-  // 4. Finalization & index rebuild: (98% - 100%)
+  // 4. Finalization & listener notification: (98% - 100%)
   onProgress?.(99, 'Finalizing Public Dashboard Views [2.1, 2.2, 2.3, 2.4]...');
   notifyListeners();
   await new Promise((r) => setTimeout(r, 30));

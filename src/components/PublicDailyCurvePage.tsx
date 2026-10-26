@@ -41,6 +41,7 @@ import {
 import {
   OrgDatabaseConfig,
   getOrgSectionDailyProfileDates,
+  fetchSectionDailyProfileForDate,
   subscribeOrgDatabase,
 } from '../services/orgDatabaseStorage';
 import { ParsedTeprFile } from '../services/teprParser';
@@ -224,6 +225,19 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
       }
     }
   }, [availableDates, compareDate1, compareDate2]);
+
+  // Proactively ensure hourly section profiles are loaded for active dates
+  useEffect(() => {
+    if (selectedDate) {
+      void fetchSectionDailyProfileForDate(selectedDate);
+    }
+    if (compareDate1) {
+      void fetchSectionDailyProfileForDate(compareDate1);
+    }
+    if (compareDate2) {
+      void fetchSectionDailyProfileForDate(compareDate2);
+    }
+  }, [selectedDate, compareDate1, compareDate2]);
 
   useEffect(() => {
     if (selectedPhaseFilter && selectedPhaseFilter !== 'all') {

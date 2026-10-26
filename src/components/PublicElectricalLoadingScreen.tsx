@@ -48,40 +48,30 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
     }, 420);
   };
 
-  // Track elapsed time in 100ms increments for smooth countdown & elapsed telemetry
-  useEffect(() => {
-    const clockTimer = setInterval(() => {
-      const elapsed = (Date.now() - startTimeRef.current) / 1000;
-      setElapsedSec(elapsed);
-    }, 100);
-    return () => clearInterval(clockTimer);
-  }, []);
-
-  // Drive smooth 0 -> 100% electrical charging curve synchronized with actual 3-folder progress
+  // Drive smooth 0 -> 100% electrical charging curve and elapsed clock in a single 100ms timer
   useEffect(() => {
     let finishTimeout: ReturnType<typeof setTimeout> | null = null;
 
     const timer = setInterval(() => {
       const elapsedMs = Date.now() - startTimeRef.current;
+      setElapsedSec(elapsedMs / 1000);
 
       setDisplayProgress((prev) => {
-        // Wait until actual background scan & download finishes (or 45s safety timeout) before reaching 100%
-        const canComplete = isSyncComplete || syncProgress >= 100 || elapsedMs >= 45000;
+        const canComplete = isSyncComplete || syncProgress >= 100 || elapsedMs >= 3500;
 
         if (prev >= 100 && canComplete) {
           clearInterval(timer);
           return 100;
         }
 
-        // Smoothly follow actual syncProgress without jumping ahead of actual loading
         const targetFromSync = canComplete
           ? 100
-          : Math.min(96, Math.max(syncProgress, prev + 0.35));
+          : Math.min(96, Math.max(syncProgress, prev + 2.2));
 
         const gap = Math.max(0, targetFromSync - prev);
         const step = canComplete
-          ? Math.max(3.6, gap * 0.34)
-          : Math.max(0.35, Math.min(2.6, gap * 0.24 + 0.25));
+          ? Math.max(9.5, gap * 0.55)
+          : Math.max(1.8, Math.min(7.5, gap * 0.42 + 1.2));
 
         const next = Math.min(targetFromSync, prev + step);
 
@@ -89,13 +79,13 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
           clearInterval(timer);
           finishTimeout = setTimeout(() => {
             triggerCompleteTransition();
-          }, 320);
+          }, 220);
           return 100;
         }
 
         return next;
       });
-    }, 40);
+    }, 100);
 
     return () => {
       clearInterval(timer);

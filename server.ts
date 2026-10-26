@@ -1061,6 +1061,92 @@ let cachedSectionProfilesFastResponse: any = null;
 
 const SECTION_PROFILES_DIR = path.join(RUNTIME_CACHE_ROOT, 'section_profiles_by_date');
 const DRIVE_DOWNLOADS_CACHE_DIR = path.join(RUNTIME_CACHE_ROOT, 'drive_downloads');
+const STATIC_PUBLIC_DATA_DIR = path.join(process.cwd(), 'public', 'data');
+
+// In-memory fast lookup maps seeded from /public/data/*.json.gz for 0ms cold-start response
+let compactSectionProfileAllDates: string[] = [];
+let compactSectionProfilesByDate: Record<string, any[][]> = {};
+let panel1DofsByDateMap: Record<string, Record<string, { dofTfMax?: Record<string, number>; dofTcMax?: Record<string, number>; dofTimeMax?: Record<string, string> }>> = {};
+
+function expandCompactProfileRow(date: string, tuple: any[]) {
+  const [secId, phCode, hourIndex, peakTime, maxTf, maxTc, ckt3MW, ckt2MW, nkt33MW, oil33MW, totalMW] = tuple;
+  const hh = String(hourIndex).padStart(2, '0');
+  const hhNext = String((Number(hourIndex) + 1) % 24).padStart(2, '0');
+  const phase =
+    phCode === 'A'
+      ? 'Phase A'
+      : phCode === 'B'
+        ? 'Phase B'
+        : phCode === 'C'
+          ? 'Phase C'
+          : 'Submarine (CH 3)';
+  return {
+    sectionId: secId,
+    date,
+    phase,
+    hourIndex: Number(hourIndex),
+    hourPeriod: `${hh}:00-${hhNext}:00`,
+    peakTime: peakTime || `${hh}:00`,
+    maxFiberTempC: Number(maxTf),
+    meanFiberTempC: Number(maxTf),
+    maxConductorTempC: Number(maxTc),
+    meanConductorTempC: Number(maxTc),
+    ckt3MW: Number(ckt3MW),
+    ckt2MW: Number(ckt2MW),
+    nkt33MW: Number(nkt33MW),
+    oil33MW: Number(oil33MW),
+    totalMW: Number(totalMW),
+  };
+}
+
+function hydrateServerCachesFromStaticDataBundle() {
+  try {
+    // 1. Seed PUBLIC_DEFAULT_DB_FILE and gzipped response cache if not already present
+    const staticDefaultGz = path.join(STATIC_PUBLIC_DATA_DIR, 'public-default-databases.json.gz');
+    if (!fs.existsSync(PUBLIC_DEFAULT_DB_FILE) && fs.existsSync(staticDefaultGz)) {
+      const compressed = fs.readFileSync(staticDefaultGz);
+      const rawJson = zlib.gunzipSync(compressed).toString('utf-8');
+      fs.writeFileSync(PUBLIC_DEFAULT_DB_FILE, rawJson, 'utf-8');
+      cachedPublicDefaultDbResponseJson = `{"success":true,"data":${rawJson}}`;
+      cachedPublicDefaultDbResponseGzip = zlib.gzipSync(Buffer.from(cachedPublicDefaultDbResponseJson, 'utf-8'));
+    } else if (fs.existsSync(PUBLIC_DEFAULT_DB_FILE) && !cachedPublicDefaultDbResponseJson) {
+      const rawJson = fs.readFileSync(PUBLIC_DEFAULT_DB_FILE, 'utf-8');
+      cachedPublicDefaultDbResponseJson = `{"success":true,"data":${rawJson}}`;
+      cachedPublicDefaultDbResponseGzip = zlib.gzipSync(Buffer.from(cachedPublicDefaultDbResponseJson, 'utf-8'));
+    }
+
+    // 2. Load compact 481-date section profiles into memory for <1ms date queries
+    const staticProfilesGz = path.join(STATIC_PUBLIC_DATA_DIR, 'section_profiles_compact.json.gz');
+    if (fs.existsSync(staticProfilesGz)) {
+      const rawProfiles = zlib.gunzipSync(fs.readFileSync(staticProfilesGz)).toString('utf-8');
+      const parsedProfiles = JSON.parse(rawProfiles);
+      if (Array.isArray(parsedProfiles?.allDates)) {
+        compactSectionProfileAllDates = parsedProfiles.allDates;
+      }
+      if (parsedProfiles?.compactByDate && typeof parsedProfiles.compactByDate === 'object') {
+        compactSectionProfilesByDate = parsedProfiles.compactByDate;
+      }
+      if (!fs.existsSync(SECTION_PROFILES_DIR)) {
+        fs.mkdirSync(SECTION_PROFILES_DIR, { recursive: true });
+      }
+      const allDatesPath = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
+      if (!fs.existsSync(allDatesPath) && compactSectionProfileAllDates.length > 0) {
+        fs.writeFileSync(allDatesPath, JSON.stringify(compactSectionProfileAllDates), 'utf-8');
+      }
+    }
+
+    // 3. Load per-date Panel 1 DOFs into memory for <1ms Heat Map historical date queries
+    const staticP1DofsGz = path.join(STATIC_PUBLIC_DATA_DIR, 'panel1_dofs_by_date.json.gz');
+    if (fs.existsSync(staticP1DofsGz)) {
+      const rawDofs = zlib.gunzipSync(fs.readFileSync(staticP1DofsGz)).toString('utf-8');
+      panel1DofsByDateMap = JSON.parse(rawDofs) || {};
+    }
+  } catch (err) {
+    console.warn('Static data bundle pre-warm warning:', err);
+  }
+}
+
+hydrateServerCachesFromStaticDataBundle();
 
 const DEFAULT_PUBLIC_THREE_PANEL_LINKS = {
   panel1Url: 'https://drive.google.com/drive/folders/1CMSH2f5hAl0N6F3PHhpr9mwStcX29kgS?usp=sharing',
@@ -1533,25 +1619,17 @@ function parsePanel1WorkbookFast(
         const cellVal = vals[dc.cIdx];
         if (!cellVal) continue;
         const k2 = dc.dof.toFixed(2);
-        const k1 = dc.dof.toFixed(1);
-        const k0 = String(Math.round(dc.dof));
         if (dc.type === 'time') {
           dofTimeMax[k2] = cellVal;
-          dofTimeMax[k1] = cellVal;
-          dofTimeMax[k0] = cellVal;
         } else {
           const v = parseFloat(cellVal);
           if (!isNaN(v) && v > 0) {
             const num = Number(v.toFixed(2));
             if (dc.type === 'tf') {
               dofTfMax[k2] = num;
-              dofTfMax[k1] = num;
-              dofTfMax[k0] = num;
               dofTfList.push(num);
             } else {
               dofTcMax[k2] = num;
-              dofTcMax[k1] = num;
-              dofTcMax[k0] = num;
               dofTcList.push(num);
             }
           }
@@ -1559,9 +1637,8 @@ function parsePanel1WorkbookFast(
       }
 
       const rawMaxTf = idxMaxTf >= 0 ? parseFloat(vals[idxMaxTf] || '0') : 0;
-      const tfMax = Number(
-        (rawMaxTf > 0 ? rawMaxTf : dofTfList.length > 0 ? Math.max(...dofTfList) : 0).toFixed(2)
-      );
+      const maxDofTf = dofTfList.length > 0 ? Math.max(...dofTfList) : 0;
+      const tfMax = Number(Math.max(rawMaxTf > 0 ? rawMaxTf : 0, maxDofTf).toFixed(2));
       const rawMinTf = idxMinTf >= 0 ? parseFloat(vals[idxMinTf] || '0') : 0;
       const tfMin = Number(
         (rawMinTf > 0 ? rawMinTf : dofTfList.length > 0 ? Math.min(...dofTfList) : tfMax).toFixed(2)
@@ -1569,9 +1646,8 @@ function parsePanel1WorkbookFast(
       const rawMeanTf = idxMeanTf >= 0 ? parseFloat(vals[idxMeanTf] || '0') : 0;
       const tfMean = Number((rawMeanTf > 0 ? rawMeanTf : tfMax).toFixed(2));
       const rawMaxTc = idxMaxTc >= 0 ? parseFloat(vals[idxMaxTc] || '0') : 0;
-      const tcMax = Number(
-        (rawMaxTc > 0 ? rawMaxTc : dofTcList.length > 0 ? Math.max(...dofTcList) : tfMax).toFixed(2)
-      );
+      const maxDofTc = dofTcList.length > 0 ? Math.max(...dofTcList) : 0;
+      const tcMax = Number((Math.max(rawMaxTc > 0 ? rawMaxTc : 0, maxDofTc) || tfMax).toFixed(2));
       const rawMinTc = idxMinTc >= 0 ? parseFloat(vals[idxMinTc] || '0') : 0;
       const tcMin = Number((rawMinTc > 0 ? rawMinTc : tfMin).toFixed(2));
 
@@ -1581,6 +1657,13 @@ function parsePanel1WorkbookFast(
       const pOil = Number((idxPOil >= 0 ? parseFloat(vals[idxPOil] || '0') || 0 : 0).toFixed(2));
       const rawTotal = idxPTotal >= 0 ? parseFloat(vals[idxPTotal] || '0') || 0 : 0;
       const pTotal = Number((rawTotal > 0 ? rawTotal : pCkt3 + pCkt2 + pNkt + pOil).toFixed(2));
+
+      if (!panel1DofsByDateMap[date]) panel1DofsByDateMap[date] = {};
+      panel1DofsByDateMap[date][`${secId}_${normPhase}`] = {
+        dofTfMax,
+        dofTcMax,
+        ...(Object.keys(dofTimeMax).length > 0 ? { dofTimeMax } : {}),
+      };
 
       p1Records.push({
         sectionId: secId,
@@ -1607,6 +1690,14 @@ function parsePanel1WorkbookFast(
   }
 
   const sortedDates = Array.from(p1DatesSet).sort();
+  const recentDatesSet = new Set(sortedDates.slice(-5));
+  for (const r of p1Records) {
+    if (!recentDatesSet.has(r.date)) {
+      delete r.dofTfMax;
+      delete r.dofTcMax;
+      delete r.dofTimeMax;
+    }
+  }
   const sortedYears = Array.from(new Set(sortedDates.map((d) => d.slice(0, 4)))).sort();
   const config = {
     hasDatabase: p1Records.length > 0,
@@ -1965,17 +2056,21 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
         scanSharedDriveFolderMetadata(panel3Url, 'xlsx', authHeader),
       ]);
 
-      // Also verify that section_profiles_by_date/all_dates.json is populated and matches panel3
-      let allDatesPopulated = false;
-      const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
-      if (fs.existsSync(allDatesFile)) {
-        try {
-          const ad = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
-          if (Array.isArray(ad) && ad.length > 0 && ad.length === (currentDb?.panel3?.info?.totalDates || 0)) {
-            allDatesPopulated = true;
+      // Also verify that section_profiles_by_date/all_dates.json or compactSectionProfileAllDates is populated and matches panel3
+      let allDatesPopulated =
+        compactSectionProfileAllDates.length > 0 &&
+        compactSectionProfileAllDates.length === (currentDb?.panel3?.info?.totalDates || 0);
+      if (!allDatesPopulated) {
+        const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
+        if (fs.existsSync(allDatesFile)) {
+          try {
+            const ad = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
+            if (Array.isArray(ad) && ad.length > 0 && ad.length === (currentDb?.panel3?.info?.totalDates || 0)) {
+              allDatesPopulated = true;
+            }
+          } catch {
+            allDatesPopulated = false;
           }
-        } catch {
-          allDatesPopulated = false;
         }
       }
 
@@ -2204,11 +2299,31 @@ app.post('/api/public-default-databases', (req, res) => {
   }
 });
 
+// Fast retrieval of Panel 1 DOF temperatures for any specific date (used by Panel 2.1 Heat Map when selecting historical dates)
+app.get('/api/panel1-date-dofs', (req, res) => {
+  try {
+    const dateQuery = String(req.query.date || '').trim();
+    if (!dateQuery) {
+      return res.status(400).json({ error: 'Missing date parameter' });
+    }
+    const dofsForDate = panel1DofsByDateMap[dateQuery];
+    if (dofsForDate) {
+      return res.json({ success: true, date: dateQuery, dofsBySectionPhase: dofsForDate });
+    }
+    return res.json({ success: false, date: dateQuery, dofsBySectionPhase: null });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to get Panel 1 date DOFs' });
+  }
+});
+
 // Fast retrieval of Section Daily Profiles per Date or Date-List
 app.get('/api/section-daily-profile', (req, res) => {
   try {
     const dateQuery = String(req.query.date || '').trim();
     if (req.query.allDates === '1' || req.query.dates === 'list') {
+      if (compactSectionProfileAllDates.length > 0) {
+        return res.json({ success: true, dates: compactSectionProfileAllDates });
+      }
       const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
       if (fs.existsSync(allDatesFile)) {
         const dates = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
@@ -2233,6 +2348,17 @@ app.get('/api/section-daily-profile', (req, res) => {
     }
 
     const secId = String(req.query.sectionId || '').trim();
+
+    // 1. Check in-memory compactSectionProfilesByDate first (<1ms)
+    const compactTuples = compactSectionProfilesByDate[dateQuery];
+    if (Array.isArray(compactTuples) && compactTuples.length > 0) {
+      const expanded = compactTuples
+        .filter((t) => !secId || t[0] === secId)
+        .map((t) => expandCompactProfileRow(dateQuery, t));
+      return res.json({ success: true, date: dateQuery, records: expanded });
+    }
+
+    // 2. Check SECTION_PROFILES_DIR per-date JSON file
     const dateFile = path.join(SECTION_PROFILES_DIR, `${dateQuery}.json`);
     if (fs.existsSync(dateFile)) {
       const records = JSON.parse(fs.readFileSync(dateFile, 'utf-8'));
@@ -2243,6 +2369,7 @@ app.get('/api/section-daily-profile', (req, res) => {
       return res.json({ success: true, date: dateQuery, records });
     }
 
+    // 3. Check PUBLIC_DEFAULT_DB_FILE fallback
     if (fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
       try {
         const parsed = JSON.parse(fs.readFileSync(PUBLIC_DEFAULT_DB_FILE, 'utf-8'));
@@ -2273,18 +2400,25 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
       return res.json(cachedSectionProfilesFastResponse);
     }
 
-    const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
-    let allDates: string[] = [];
-    if (fs.existsSync(allDatesFile)) {
-      try {
-        allDates = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
-      } catch {}
+    let allDates: string[] = [...compactSectionProfileAllDates];
+    if (allDates.length === 0) {
+      const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
+      if (fs.existsSync(allDatesFile)) {
+        try {
+          allDates = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
+        } catch {}
+      }
     }
 
-    // Return the latest 7 dates of records for instant in-memory rendering; any other date is fetched on demand in <10ms
-    const recentDates = allDates.slice(-7);
+    // Return the latest 5 dates of records for instant in-memory rendering; any other date is fetched on demand in <5ms
+    const recentDates = allDates.slice(-5);
     let recentRecords: any[] = [];
     for (const rd of recentDates) {
+      const tuples = compactSectionProfilesByDate[rd];
+      if (Array.isArray(tuples) && tuples.length > 0) {
+        recentRecords.push(...tuples.map((t) => expandCompactProfileRow(rd, t)));
+        continue;
+      }
       const p = path.join(SECTION_PROFILES_DIR, `${rd}.json`);
       if (fs.existsSync(p)) {
         try {

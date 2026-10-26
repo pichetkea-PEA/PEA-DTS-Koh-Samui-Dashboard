@@ -26,6 +26,7 @@ import {
 import {
   OrgDatabaseConfig,
   getOrgSectionDailyProfileDates,
+  fetchSectionDailyProfileForDate,
   subscribeOrgDatabase,
 } from '../services/orgDatabaseStorage';
 import { ParsedTeprFile } from '../services/teprParser';
@@ -172,9 +173,11 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
       setSelectedDate(latest);
       setGatheredDate(latest);
       setHasGathered(true);
+      void fetchSectionDailyProfileForDate(latest);
     } else if (selectedDate) {
       setGatheredDate(selectedDate);
       setHasGathered(true);
+      void fetchSectionDailyProfileForDate(selectedDate);
     }
   }, [availableDates, selectedDate]);
 
@@ -191,6 +194,8 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
     setGatherProgress(0);
     setGatherTeprCount(0);
     setGatherCsvIntervals(0);
+
+    await fetchSectionDailyProfileForDate(selectedDate);
 
     const sections = CIRCUIT_3_SECTIONS;
     const total = sections.length;
