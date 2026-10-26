@@ -300,7 +300,7 @@ async function fetchSharedServerDefaultDatabases(forceRefresh = false): Promise<
       const res = await fetch('/api/public-default-databases');
       if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
         const json = await res.json();
-        if (json?.success && json?.data) {
+        if (json?.success && json?.data && (json.data.panel1 || json.data.panel2 || json.data.panel3)) {
           return json.data;
         }
       }
@@ -318,6 +318,7 @@ async function fetchSharedServerDefaultDatabases(forceRefresh = false): Promise<
     } catch {
       // ignore static fallback error
     }
+    sharedPublicDefaultDbPromise = null;
     return null;
   })();
   return sharedPublicDefaultDbPromise;
@@ -351,57 +352,35 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
 
   if (p1 && Array.isArray(p1.records) && p1.records.length > 0 && p1.config) {
     savedDefaultPanel1 = p1;
-    const isP1Updated =
-      !memoryPanel1Info ||
-      memoryPanel1Info.sourceType === 'default' ||
-      !memoryRecords ||
-      memoryRecords.length !== p1.records.length ||
-      (p1.info?.versionSignature && p1.info.versionSignature !== memoryPanel1Info.versionSignature) ||
-      (p1.info?.name && p1.info.name !== memoryPanel1Info.name) ||
-      p1.config.totalDates !== memoryConfig?.totalDates ||
-      p1.config.dateRange?.latestDate !== memoryConfig?.dateRange?.latestDate;
-
-    if (isP1Updated) {
-      memoryConfig = p1.config;
-      memoryRecords = p1.records;
-      memoryPanel1Info = p1.info || memoryPanel1Info;
-      try {
-        localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
-        if (memoryPanel1Info) {
-          localStorage.setItem(STORAGE_KEY_PANEL1_INFO, JSON.stringify(memoryPanel1Info));
-        }
-      } catch {}
-      void idbSet('panel1', p1);
-      didUpdate = true;
-    }
+    memoryConfig = p1.config;
+    memoryRecords = p1.records;
+    memoryPanel1Info = p1.info || memoryPanel1Info;
+    try {
+      localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
+      if (memoryPanel1Info) {
+        localStorage.setItem(STORAGE_KEY_PANEL1_INFO, JSON.stringify(memoryPanel1Info));
+      }
+    } catch {}
+    void idbSet('panel1', p1);
+    didUpdate = true;
   }
 
   if (p2 && Array.isArray(p2.peaks) && p2.peaks.length > 0) {
     savedDefaultPanel2 = p2;
-    const isP2Updated =
-      !memoryPanel2Info ||
-      memoryPanel2Info.sourceType === 'default' ||
-      memoryPowerPeaksOnly.size !== p2.peaks.length ||
-      (p2.info?.versionSignature && p2.info.versionSignature !== memoryPanel2Info.versionSignature) ||
-      (p2.info?.name && p2.info.name !== memoryPanel2Info.name) ||
-      p2.info?.dateRange?.latestDate !== memoryPanel2Info.dateRange?.latestDate;
-
-    if (isP2Updated) {
-      memoryPowerPeaksOnly.clear();
-      p2.peaks.forEach((pk: CircuitDailyPeakPower) => {
-        memoryPowerPeaksOnly.set(pk.date, pk);
-        memoryCircuitPeaksByDate.set(pk.date, pk);
-      });
-      memoryPanel2Info = p2.info || memoryPanel2Info;
-      try {
-        if (memoryPanel2Info) {
-          localStorage.setItem(STORAGE_KEY_PANEL2_INFO, JSON.stringify(memoryPanel2Info));
-        }
-        localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2.peaks));
-      } catch {}
-      void idbSet('panel2', p2);
-      didUpdate = true;
-    }
+    memoryPowerPeaksOnly.clear();
+    p2.peaks.forEach((pk: CircuitDailyPeakPower) => {
+      memoryPowerPeaksOnly.set(pk.date, pk);
+      memoryCircuitPeaksByDate.set(pk.date, pk);
+    });
+    memoryPanel2Info = p2.info || memoryPanel2Info;
+    try {
+      if (memoryPanel2Info) {
+        localStorage.setItem(STORAGE_KEY_PANEL2_INFO, JSON.stringify(memoryPanel2Info));
+      }
+      localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2.peaks));
+    } catch {}
+    void idbSet('panel2', p2);
+    didUpdate = true;
   }
 
   if (didUpdate) {
@@ -616,8 +595,12 @@ function initFromStorage() {
     const rawCfg = localStorage.getItem(STORAGE_KEY_CONFIG);
     if (rawCfg) {
       const parsedCfg = JSON.parse(rawCfg);
-      // Discard legacy synthetic seed if present
-      if (parsedCfg?.databaseFileName === 'Samui_Submarine_Daily_Max_Temp_2024-2026.xlsx') {
+      // Discard legacy synthetic seed or empty config if present
+      if (
+        parsedCfg?.databaseFileName === 'Samui_Submarine_Daily_Max_Temp_2024-2026.xlsx' ||
+        !parsedCfg?.hasDatabase ||
+        !parsedCfg?.totalRecords
+      ) {
         localStorage.removeItem(STORAGE_KEY_CONFIG);
         localStorage.removeItem(STORAGE_KEY_DATA);
       } else {
@@ -2875,14 +2858,18 @@ export async function syncAllPublicSharedTargetFolders(
   onProgress?.(4, 'Connecting to Telemetry Cache & Scanning 3 Shared Google Drive Folders...');
   await new Promise((r) => setTimeout(r, 10));
 
-  // Reuse already-started default database fetch so we don't download & parse the payload twice
+  // 0. Immediately hydrate from the pre-seeded server/static default database first (<100ms)
   let cachedServerDb = await fetchSharedServerDefaultDatabases(false);
 
+  // Also check if any shared Google Drive folder has a newly uploaded file (with 3.5s max timeout so UI never blocks)
   let scanResult: any = null;
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
     const scanRes = await fetch('/api/scan-and-sync-public-folders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
       body: JSON.stringify({
         panel1Url: links.panel1Url,
         panel2Url: links.panel2Url,
@@ -2890,6 +2877,7 @@ export async function syncAllPublicSharedTargetFolders(
         token: accessToken,
       }),
     });
+    clearTimeout(timeoutId);
     if (scanRes.ok && (scanRes.headers.get('content-type') || '').includes('application/json')) {
       scanResult = await scanRes.json();
       if (scanResult?.changesDetected || scanResult?.anyUpdated) {

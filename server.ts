@@ -1342,31 +1342,37 @@ async function scanSharedDriveFolderMetadata(
   let fileSize = 0;
   let lastModifiedHeader = '';
 
-  // Perform fast HEAD check on download URL to get exact Content-Length & Content-Disposition filename
-  try {
-    const headRes = await fetch(downloadUrl, {
-      method: 'HEAD',
-      redirect: 'follow',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      },
-    });
-    if (headRes.ok) {
-      const cl = parseInt(headRes.headers.get('content-length') || '0', 10);
-      if (cl > 0) fileSize = cl;
-      lastModifiedHeader = headRes.headers.get('last-modified') || '';
-      const disp = headRes.headers.get('content-disposition') || '';
-      const fnMatch = disp.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
-      if (fnMatch && fnMatch[1]) {
-        try {
-          targetFileName = decodeURIComponent(fnMatch[1]);
-        } catch {
-          targetFileName = fnMatch[1];
+  // Only perform HEAD check if we don't already have the actual filename from folder listing (avoids 29s delay on 59MB files)
+  if (!folderId || !targetFileName || /^Shared_Drive_Database|^Google_Sheets_Database/i.test(targetFileName)) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1800);
+      const headRes = await fetch(downloadUrl, {
+        method: 'HEAD',
+        redirect: 'follow',
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      });
+      clearTimeout(timeoutId);
+      if (headRes.ok) {
+        const cl = parseInt(headRes.headers.get('content-length') || '0', 10);
+        if (cl > 0) fileSize = cl;
+        lastModifiedHeader = headRes.headers.get('last-modified') || '';
+        const disp = headRes.headers.get('content-disposition') || '';
+        const fnMatch = disp.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+        if (fnMatch && fnMatch[1]) {
+          try {
+            targetFileName = decodeURIComponent(fnMatch[1]);
+          } catch {
+            targetFileName = fnMatch[1];
+          }
         }
       }
+    } catch {
+      // ignore HEAD error or timeout
     }
-  } catch {
-    // ignore HEAD error
   }
 
   const versionSignature = `${targetFileId}|${targetFileName}|${fileSize}`;
@@ -2240,20 +2246,14 @@ app.post('/api/scan-and-sync-public-folders', async (req, res) => {
   }
 });
 
-app.get('/api/public-default-databases', (req, res) => {
+app.get('/api/public-default-databases', (_req, res) => {
   try {
     if (!cachedPublicDefaultDbResponseJson && fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
       const raw = fs.readFileSync(PUBLIC_DEFAULT_DB_FILE, 'utf-8');
       cachedPublicDefaultDbResponseJson = `{"success":true,"data":${raw}}`;
-      cachedPublicDefaultDbResponseGzip = zlib.gzipSync(Buffer.from(cachedPublicDefaultDbResponseJson, 'utf-8'));
     }
     if (cachedPublicDefaultDbResponseJson) {
-      res.setHeader('Content-Type', 'application/json');
-      const acceptEncoding = String(req.headers['accept-encoding'] || '');
-      if (acceptEncoding.includes('gzip') && cachedPublicDefaultDbResponseGzip) {
-        res.setHeader('Content-Encoding', 'gzip');
-        return res.send(cachedPublicDefaultDbResponseGzip);
-      }
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
       return res.send(cachedPublicDefaultDbResponseJson);
     }
     return res.json({ success: true, data: null });
