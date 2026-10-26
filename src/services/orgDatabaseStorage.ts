@@ -2378,7 +2378,7 @@ export function resetPanel1ToSample(): void {
 
   hasStartedAsyncHydration = false;
   void hydrateFromPublicDefaultDatabases();
-  void syncAllPublicSharedTargetFolders(true);
+  void syncAllPublicSharedTargetFolders();
 }
 
 /**
@@ -2404,7 +2404,7 @@ export function resetPanel2ToSample(): void {
 
   hasStartedAsyncHydration = false;
   void hydrateFromPublicDefaultDatabases();
-  void syncAllPublicSharedTargetFolders(true);
+  void syncAllPublicSharedTargetFolders();
 }
 
 /**
@@ -2431,7 +2431,7 @@ export function resetPanel3ToSample(): void {
 
   hasStartedAsyncHydration = false;
   void hydrateFromPublicDefaultDatabases();
-  void syncAllPublicSharedTargetFolders(true);
+  void syncAllPublicSharedTargetFolders();
 }
 
 /**

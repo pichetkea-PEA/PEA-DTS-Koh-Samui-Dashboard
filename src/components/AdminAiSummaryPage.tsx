@@ -1073,22 +1073,22 @@ export const AdminAiSummaryPage: React.FC<AdminAiSummaryPageProps> = ({
       };
     }
 
-    if (scadaSummary && scadaSummary.intervals && scadaSummary.intervals.length > 0) {
+    if (scadaSummary && scadaSummary.dataPoints && scadaSummary.dataPoints.length > 0) {
       const byHour = new Map<
         number,
         { ckt3: number; ckt2: number; nkt33: number; oil33: number; total: number }
       >();
-      scadaSummary.intervals.forEach((iv) => {
-        const hMatch = String(iv.timeStr || '').match(/^(\d{1,2})/);
+      scadaSummary.dataPoints.forEach((iv) => {
+        const hMatch = String(iv.time || '').match(/^(\d{1,2})/);
         const h = hMatch ? Math.min(23, Math.max(0, parseInt(hMatch[1], 10))) : 0;
         const cur = byHour.get(h);
-        if (!cur || iv.totalMW > cur.total) {
+        if (!cur || iv.totalPower > cur.total) {
           byHour.set(h, {
-            ckt3: iv.ckt3_115kV_MW,
-            ckt2: iv.ckt2_115kV_MW,
-            nkt33: iv.ckt33kV_NKT_MW,
-            oil33: iv.ckt33kV_Oil_MW,
-            total: iv.totalMW,
+            ckt3: iv.kmbCircuit3,
+            ckt2: iv.kmaCircuit2,
+            nkt33: iv.knaNkt,
+            oil33: iv.knaOilFilled,
+            total: iv.totalPower,
           });
         }
       });
@@ -1395,7 +1395,7 @@ export const AdminAiSummaryPage: React.FC<AdminAiSummaryPageProps> = ({
   const handleSyncThreeSharedFolders = async () => {
     setIsSyncingFolders(true);
     try {
-      const res = await syncAllPublicSharedTargetFolders(true);
+      const res = await syncAllPublicSharedTargetFolders();
       setPeakDayProfileTick((t) => t + 1);
       if (res.success) {
         showNotification?.('success', res.message || 'Synchronized latest data from 3 Shared Google Drive Folders!');
