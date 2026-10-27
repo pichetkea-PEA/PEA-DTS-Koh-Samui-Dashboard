@@ -429,10 +429,10 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
               </div>
             </div>
             <div className="text-sm font-bold text-white mb-1">
-              24-Hour Section Daily Profile
+              24-Hour Section Daily Profile &amp; Statistics Counter
             </div>
             <div className="text-xs text-slate-400 font-mono tabular-nums mb-3">
-              {p3Info.totalDates} Dates · 24-Hr Curve &amp; Ckt #3 MW · Feeds [2.2] &amp; [2.3]
+              {p3Info.totalDates} Dates · 24-Hr Curve &amp; 4-Ckt MW · Feeds [2.2], [2.3], [2.5] &amp; [2.6]
             </div>
             <svg className="h-1.5 w-full rounded-full overflow-hidden bg-slate-800" viewBox="0 0 100 6" preserveAspectRatio="none">
               <rect x="0" y="0" width={folder3Pct} height="6" className="fill-purple-400 transition-all duration-150" />

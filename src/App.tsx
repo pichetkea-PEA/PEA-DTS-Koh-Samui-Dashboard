@@ -73,6 +73,8 @@ import { PublicHeatMapPage } from './components/PublicHeatMapPage';
 import { PublicDailyCurvePage } from './components/PublicDailyCurvePage';
 import { Public3DPowerTempPage } from './components/Public3DPowerTempPage';
 import { PublicYearlyComparisonPage } from './components/PublicYearlyComparisonPage';
+import { PublicTempStatisticsPage } from './components/PublicTempStatisticsPage';
+import { PublicPowerStatisticsPage } from './components/PublicPowerStatisticsPage';
 import { PublicDataSettingPage } from './components/PublicDataSettingPage';
 import { DataSettingPasswordModal } from './components/DataSettingPasswordModal';
 import {
@@ -2737,6 +2739,10 @@ export default function App() {
                 }}
                 powerSummariesByDate={new Map()}
               />
+            ) : publicTab === 'tempstats' ? (
+              <PublicTempStatisticsPage dbConfig={dbConfig} />
+            ) : publicTab === 'powerstats' ? (
+              <PublicPowerStatisticsPage dbConfig={dbConfig} />
             ) : (
               <PublicDataSettingPage
                 dbConfig={dbConfig}

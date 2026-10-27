@@ -1062,14 +1062,174 @@ let cachedSectionProfilesFastResponse: any = null;
 const SECTION_PROFILES_DIR = path.join(RUNTIME_CACHE_ROOT, 'section_profiles_by_date');
 const DRIVE_DOWNLOADS_CACHE_DIR = path.join(RUNTIME_CACHE_ROOT, 'drive_downloads');
 const STATIC_PUBLIC_DATA_DIR = path.join(process.cwd(), 'public', 'data');
+const PANEL3_STATS_FILE = path.join(RUNTIME_CACHE_ROOT, 'panel3_stats.json');
 
 // In-memory fast lookup maps seeded from /public/data/*.json.gz for 0ms cold-start response
 let compactSectionProfileAllDates: string[] = [];
-let compactSectionProfilesByDate: Record<string, any[][]> = {};
+let compactSectionProfilesByDate: Record<string, any[]> = {};
+let cachedPanel3StatsSummary: any = null;
 let panel1DofsByDateMap: Record<string, Record<string, { dofTfMax?: Record<string, number>; dofTcMax?: Record<string, number>; dofTimeMax?: Record<string, string> }>> = {};
 
-function expandCompactProfileRow(date: string, tuple: any[]) {
-  const [secId, phCode, hourIndex, peakTime, maxTf, maxTc, ckt3MW, ckt2MW, nkt33MW, oil33MW, totalMW] = tuple;
+const PANEL3_SECTION_PHASE_ORDER = [
+  '1.1_A', '1.1_B', '1.1_C',
+  '1.2_A', '1.2_B', '1.2_C',
+  '1.3_A', '1.3_B', '1.3_C',
+  '1.4_A', '1.4_B', '1.4_C',
+  '1.5_A', '1.5_B', '1.5_C',
+  '1.6_A', '1.6_B', '1.6_C',
+  '2.1_SM', '2.2_SM', '2.3_SM', '2.4_SM', '2.5_SM',
+  '2.6_SM', '2.7_SM', '2.8_SM', '2.9_SM', '2.10_SM',
+  '2.11_SM', '2.12_SM', '2.13_SM',
+];
+const PANEL3_SECTION_PHASE_INDEX = new Map(PANEL3_SECTION_PHASE_ORDER.map((k, idx) => [k, idx]));
+
+function classifyTempZoneIndex(t: number): number {
+  if (t > 70) return 5;
+  if (t >= 60) return 4;
+  if (t >= 55) return 3;
+  if (t >= 45) return 2;
+  if (t >= 35) return 1;
+  return 0;
+}
+
+function classifyCkt3RangeIndex(mw: number): number {
+  if (mw > 80.13) return 3;
+  if (mw >= 68.11) return 2;
+  if (mw >= 64.1) return 1;
+  return 0;
+}
+
+function classifyCkt2RangeIndex(mw: number): number {
+  if (mw > 63.10) return 3;
+  if (mw >= 56.79) return 2;
+  if (mw >= 53.64) return 1;
+  return 0;
+}
+
+function classifyNkt33RangeIndex(mw: number): number {
+  if (mw > 15.64) return 3;
+  if (mw >= 14.08) return 2;
+  if (mw >= 13.29) return 1;
+  return 0;
+}
+
+function classifyOil33RangeIndex(mw: number): number {
+  if (mw > 15.18) return 3;
+  if (mw >= 13.66) return 2;
+  if (mw >= 12.90) return 1;
+  return 0;
+}
+
+function normalizePhaseShortCode(rawPhase: string, secId: string): string {
+  if (secId.startsWith('2.')) return 'SM';
+  if (rawPhase === 'A' || /Phase\s*A/i.test(rawPhase)) return 'A';
+  if (rawPhase === 'B' || /Phase\s*B/i.test(rawPhase)) return 'B';
+  if (rawPhase === 'C' || /Phase\s*C/i.test(rawPhase)) return 'C';
+  return 'A';
+}
+
+function buildPanel3StatsSummaryFromDates(allDates: string[], byDateMap: Record<string, any[]>) {
+  const byDateStats: Record<string, {
+    tf: number[][];
+    tc: number[][];
+    pwrAll: number[][];
+    pwrHr: number[][];
+  }> = {};
+
+  for (const d of allDates) {
+    const rows = byDateMap[d] || [];
+    if (rows.length === 0) continue;
+    const tf = Array.from({ length: PANEL3_SECTION_PHASE_ORDER.length }, () => [0, 0, 0, 0, 0, 0]);
+    const tc = Array.from({ length: PANEL3_SECTION_PHASE_ORDER.length }, () => [0, 0, 0, 0, 0, 0]);
+    const pwrAll = [
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ];
+    const pwrHr = [
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ];
+    const byHr = new Map<number, [number, number, number, number]>();
+
+    for (const r of rows) {
+      let secId = '';
+      let phCode = '';
+      let hr = 0;
+      let maxTf = 0;
+      let maxTc = 0;
+      let c3 = 0;
+      let c2 = 0;
+      let nk = 0;
+      let oi = 0;
+
+      if (Array.isArray(r)) {
+        secId = String(r[0] || '');
+        phCode = normalizePhaseShortCode(String(r[1] || ''), secId);
+        hr = Number(r[2] || 0);
+        maxTf = Number(r[4] || 0);
+        maxTc = Number(r[5] || 0);
+        c3 = Number(r[6] || 0);
+        c2 = Number(r[7] || 0);
+        nk = Number(r[8] || 0);
+        oi = Number(r[9] || 0);
+      } else if (r && typeof r === 'object') {
+        secId = String(r.sectionId || '');
+        phCode = normalizePhaseShortCode(String(r.phase || ''), secId);
+        hr = Number(r.hourIndex || 0);
+        maxTf = Number(r.maxFiberTempC || 0);
+        maxTc = Number(r.maxConductorTempC || 0);
+        c3 = Number(r.ckt3MW || 0);
+        c2 = Number(r.ckt2MW || 0);
+        nk = Number(r.nkt33MW || 0);
+        oi = Number(r.oil33MW || 0);
+      }
+
+      const keyIdx = PANEL3_SECTION_PHASE_INDEX.get(`${secId}_${phCode}`);
+      if (keyIdx !== undefined && maxTf > 0) {
+        tf[keyIdx][classifyTempZoneIndex(maxTf)]++;
+        tc[keyIdx][classifyTempZoneIndex(maxTc > 0 ? maxTc : maxTf)]++;
+      }
+
+      pwrAll[0][classifyCkt3RangeIndex(c3)]++;
+      pwrAll[1][classifyCkt2RangeIndex(c2)]++;
+      pwrAll[2][classifyNkt33RangeIndex(nk)]++;
+      pwrAll[3][classifyOil33RangeIndex(oi)]++;
+
+      const prev = byHr.get(hr) || [0, 0, 0, 0];
+      if (c3 > prev[0]) prev[0] = c3;
+      if (c2 > prev[1]) prev[1] = c2;
+      if (nk > prev[2]) prev[2] = nk;
+      if (oi > prev[3]) prev[3] = oi;
+      byHr.set(hr, prev);
+    }
+
+    for (const [, [c3, c2, nk, oi]] of byHr.entries()) {
+      pwrHr[0][classifyCkt3RangeIndex(c3)]++;
+      pwrHr[1][classifyCkt2RangeIndex(c2)]++;
+      pwrHr[2][classifyNkt33RangeIndex(nk)]++;
+      pwrHr[3][classifyOil33RangeIndex(oi)]++;
+    }
+
+    byDateStats[d] = { tf, tc, pwrAll, pwrHr };
+  }
+
+  return {
+    keys: PANEL3_SECTION_PHASE_ORDER,
+    dates: allDates,
+    byDate: byDateStats,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function expandCompactProfileRow(date: string, tupleOrObj: any) {
+  if (!Array.isArray(tupleOrObj) && tupleOrObj && typeof tupleOrObj === 'object') {
+    return tupleOrObj;
+  }
+  const [secId, phCode, hourIndex, peakTime, maxTf, maxTc, ckt3MW, ckt2MW, nkt33MW, oil33MW, totalMW] = tupleOrObj;
   const hh = String(hourIndex).padStart(2, '0');
   const hhNext = String((Number(hourIndex) + 1) % 24).padStart(2, '0');
   const phase =
@@ -1115,7 +1275,7 @@ function hydrateServerCachesFromStaticDataBundle() {
       cachedPublicDefaultDbResponseGzip = zlib.gzipSync(Buffer.from(cachedPublicDefaultDbResponseJson, 'utf-8'));
     }
 
-    // 2. Load compact 481-date section profiles into memory for <1ms date queries
+    // 2. Load compact 484-date section profiles into memory for <1ms date queries
     const staticProfilesGz = path.join(STATIC_PUBLIC_DATA_DIR, 'section_profiles_compact.json.gz');
     if (fs.existsSync(staticProfilesGz)) {
       const rawProfiles = zlib.gunzipSync(fs.readFileSync(staticProfilesGz)).toString('utf-8');
@@ -1123,8 +1283,9 @@ function hydrateServerCachesFromStaticDataBundle() {
       if (Array.isArray(parsedProfiles?.allDates)) {
         compactSectionProfileAllDates = parsedProfiles.allDates;
       }
-      if (parsedProfiles?.compactByDate && typeof parsedProfiles.compactByDate === 'object') {
-        compactSectionProfilesByDate = parsedProfiles.compactByDate;
+      const mapObj = parsedProfiles?.compactByDate || parsedProfiles?.byDate;
+      if (mapObj && typeof mapObj === 'object') {
+        compactSectionProfilesByDate = mapObj;
       }
       if (!fs.existsSync(SECTION_PROFILES_DIR)) {
         fs.mkdirSync(SECTION_PROFILES_DIR, { recursive: true });
@@ -1133,6 +1294,40 @@ function hydrateServerCachesFromStaticDataBundle() {
       if (!fs.existsSync(allDatesPath) && compactSectionProfileAllDates.length > 0) {
         fs.writeFileSync(allDatesPath, JSON.stringify(compactSectionProfileAllDates), 'utf-8');
       }
+    }
+
+    // 2b. Load or pre-compute Panel 3 Daily Statistics Summary for Page 2.5 & Page 2.6
+    const staticStatsGz = path.join(STATIC_PUBLIC_DATA_DIR, 'panel3_stats.json.gz');
+    if (fs.existsSync(PANEL3_STATS_FILE)) {
+      try {
+        cachedPanel3StatsSummary = JSON.parse(fs.readFileSync(PANEL3_STATS_FILE, 'utf-8'));
+      } catch {}
+    } else if (fs.existsSync(staticStatsGz)) {
+      try {
+        const rawStats = zlib.gunzipSync(fs.readFileSync(staticStatsGz)).toString('utf-8');
+        cachedPanel3StatsSummary = JSON.parse(rawStats);
+        fs.writeFileSync(PANEL3_STATS_FILE, rawStats, 'utf-8');
+      } catch {}
+    }
+    if (
+      (!cachedPanel3StatsSummary || !cachedPanel3StatsSummary.dates?.length) &&
+      compactSectionProfileAllDates.length > 0
+    ) {
+      cachedPanel3StatsSummary = buildPanel3StatsSummaryFromDates(
+        compactSectionProfileAllDates,
+        compactSectionProfilesByDate
+      );
+      try {
+        const rawStats = JSON.stringify(cachedPanel3StatsSummary);
+        fs.writeFileSync(PANEL3_STATS_FILE, rawStats, 'utf-8');
+        if (fs.existsSync(STATIC_PUBLIC_DATA_DIR)) {
+          fs.writeFileSync(path.join(STATIC_PUBLIC_DATA_DIR, 'panel3_stats.json'), rawStats, 'utf-8');
+          fs.writeFileSync(
+            path.join(STATIC_PUBLIC_DATA_DIR, 'panel3_stats.json.gz'),
+            zlib.gzipSync(Buffer.from(rawStats, 'utf-8'))
+          );
+        }
+      } catch {}
     }
 
     // 3. Load per-date Panel 1 DOFs into memory for <1ms Heat Map historical date queries
@@ -1889,7 +2084,7 @@ function parsePanel3WorkbookFast(
   buf: Buffer,
   meta: ScannedDriveFileMetadata,
   remoteUrl: string
-): { records: any[]; allDates: string[]; info: any } {
+): { records: any[]; allDates: string[]; info: any; stats?: any } {
   const nowIso = new Date().toISOString();
   if (!fs.existsSync(SECTION_PROFILES_DIR)) {
     fs.mkdirSync(SECTION_PROFILES_DIR, { recursive: true });
@@ -1897,6 +2092,7 @@ function parsePanel3WorkbookFast(
   const zip = openXlsxZipBuffer(buf);
   const sharedStrings = parseXlsxSharedStrings(zip);
   const byDate = new Map<string, any[]>();
+  const compactByDateOut: Record<string, any[][]> = {};
 
   for (let s = 1; s <= 25; s++) {
     const xml = zip.readEntryText(`xl/worksheets/sheet${s}.xml`);
@@ -1944,6 +2140,9 @@ function parsePanel3WorkbookFast(
       const oil33MW = Number((idxOil >= 0 ? parseFloat(vals[idxOil] || '0') || 0 : 0).toFixed(2));
       const rawTot = idxTotal >= 0 ? parseFloat(vals[idxTotal] || '0') || 0 : 0;
       const totalMW = Number((rawTot > 0 ? rawTot : ckt3MW + ckt2MW + nkt33MW + oil33MW).toFixed(2));
+      const peakTime = (idxPeakTime >= 0 ? vals[idxPeakTime] : '') || `${hh}:00`;
+      const tfVal = Number(maxTf.toFixed(2));
+      const tcVal = Number(maxTc.toFixed(2));
 
       const rec = {
         sectionId: secId,
@@ -1951,11 +2150,11 @@ function parsePanel3WorkbookFast(
         phase: normPhase,
         hourIndex,
         hourPeriod: `${hh}:00-${hhNext}:00`,
-        peakTime: (idxPeakTime >= 0 ? vals[idxPeakTime] : '') || `${hh}:00`,
-        maxFiberTempC: Number(maxTf.toFixed(2)),
-        meanFiberTempC: Number(maxTf.toFixed(2)),
-        maxConductorTempC: Number(maxTc.toFixed(2)),
-        meanConductorTempC: Number(maxTc.toFixed(2)),
+        peakTime,
+        maxFiberTempC: tfVal,
+        meanFiberTempC: tfVal,
+        maxConductorTempC: tcVal,
+        meanConductorTempC: tcVal,
         ckt3MW,
         ckt2MW,
         nkt33MW,
@@ -1968,6 +2167,22 @@ function parsePanel3WorkbookFast(
         byDate.set(date, list);
       }
       list.push(rec);
+
+      const phCode = normalizePhaseShortCode(normPhase, secId);
+      if (!compactByDateOut[date]) compactByDateOut[date] = [];
+      compactByDateOut[date].push([
+        secId,
+        phCode,
+        hourIndex,
+        peakTime,
+        tfVal,
+        tcVal,
+        ckt3MW,
+        ckt2MW,
+        nkt33MW,
+        oil33MW,
+        totalMW,
+      ]);
     }
   }
 
@@ -1975,11 +2190,27 @@ function parsePanel3WorkbookFast(
   let totalRecordCount = 0;
   for (const [d, list] of byDate.entries()) {
     totalRecordCount += list.length;
-    compactSectionProfilesByDate[d] = list;
+    compactSectionProfilesByDate[d] = compactByDateOut[d] || list;
     fs.writeFileSync(path.join(SECTION_PROFILES_DIR, `${d}.json`), JSON.stringify(list));
   }
   compactSectionProfileAllDates = allDates;
   fs.writeFileSync(path.join(SECTION_PROFILES_DIR, 'all_dates.json'), JSON.stringify(allDates));
+
+  // Pre-calculate daily statistics for Page 2.5 (Temperature 6-Range) and Page 2.6 (Power 4-Range)
+  cachedPanel3StatsSummary = buildPanel3StatsSummaryFromDates(allDates, compactSectionProfilesByDate);
+  try {
+    const rawStats = JSON.stringify(cachedPanel3StatsSummary);
+    fs.writeFileSync(PANEL3_STATS_FILE, rawStats, 'utf-8');
+    if (fs.existsSync(STATIC_PUBLIC_DATA_DIR)) {
+      fs.writeFileSync(path.join(STATIC_PUBLIC_DATA_DIR, 'panel3_stats.json'), rawStats, 'utf-8');
+      fs.writeFileSync(
+        path.join(STATIC_PUBLIC_DATA_DIR, 'panel3_stats.json.gz'),
+        zlib.gzipSync(Buffer.from(rawStats, 'utf-8'))
+      );
+    }
+  } catch (e) {
+    console.warn('Panel 3 stats persistence warning:', e);
+  }
 
   const recentDates = allDates.slice(-10);
   const recentRecords: any[] = [];
@@ -2004,7 +2235,7 @@ function parsePanel3WorkbookFast(
     recordCount: totalRecordCount,
   };
 
-  return { records: recentRecords, allDates, info };
+  return { records: recentRecords, allDates, info, stats: cachedPanel3StatsSummary };
 }
 
 async function downloadDriveFileWithCache(
@@ -2571,6 +2802,7 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
       versionSignature,
       allDates,
       records: recentRecords,
+      stats: cachedPanel3StatsSummary,
       totalDates: allDates.length,
       dateRange: {
         firstDate: allDates[0] || '2025-07-01',
@@ -2586,6 +2818,24 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
     return res.json(responsePayload);
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to fetch section profile database' });
+  }
+});
+
+// Dedicated ultra-fast endpoint for Page 2.5 & Page 2.6 pre-calculated Panel 3 statistics summary
+app.get('/api/panel3-statistics-summary', (_req, res) => {
+  try {
+    if (!cachedPanel3StatsSummary && compactSectionProfileAllDates.length > 0) {
+      cachedPanel3StatsSummary = buildPanel3StatsSummaryFromDates(
+        compactSectionProfileAllDates,
+        compactSectionProfilesByDate
+      );
+    }
+    if (cachedPanel3StatsSummary) {
+      return res.json({ success: true, stats: cachedPanel3StatsSummary });
+    }
+    return res.json({ success: false, stats: null });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to get Panel 3 stats summary' });
   }
 });
 

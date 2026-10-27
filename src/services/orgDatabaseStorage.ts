@@ -175,7 +175,378 @@ let savedDefaultPanel3: {
   records: OrgSectionHourlyRecord[];
   allDates?: string[];
   info: DataPanelSourceInfo;
+  stats?: Panel3StatisticsSummary;
 } | null = null;
+
+export interface Panel3DailyStatsEntry {
+  tf: number[][]; // 31 section-phases x 6 thermal zones
+  tc: number[][]; // 31 section-phases x 6 thermal zones
+  pwrAll: number[][]; // 4 circuits [ckt3, ckt2, nkt33, oil33] x 4 operating ranges (all section-hour records)
+  pwrHr: number[][]; // 4 circuits [ckt3, ckt2, nkt33, oil33] x 4 operating ranges (unique hourly intervals)
+}
+
+export interface Panel3StatisticsSummary {
+  keys: string[];
+  dates: string[];
+  byDate: Record<string, Panel3DailyStatsEntry>;
+  updatedAt?: string;
+}
+
+export interface SectionPhaseSlotMeta {
+  key: string; // e.g. '1.1_A', '2.1_SM'
+  index: number;
+  sectionId: string;
+  sectionName: string;
+  category: 'land' | 'submarine';
+  phaseCode: 'A' | 'B' | 'C' | 'SM';
+  phaseLabel: string;
+  shortLabel: string; // e.g. '1.1 (A)' or '2.1'
+  axisSubLabel: string; // e.g. 'LS1·A' or 'SM1'
+}
+
+export const PANEL3_SECTION_PHASE_ORDER_KEYS: string[] = [
+  '1.1_A', '1.1_B', '1.1_C',
+  '1.2_A', '1.2_B', '1.2_C',
+  '1.3_A', '1.3_B', '1.3_C',
+  '1.4_A', '1.4_B', '1.4_C',
+  '1.5_A', '1.5_B', '1.5_C',
+  '1.6_A', '1.6_B', '1.6_C',
+  '2.1_SM', '2.2_SM', '2.3_SM', '2.4_SM', '2.5_SM',
+  '2.6_SM', '2.7_SM', '2.8_SM', '2.9_SM', '2.10_SM',
+  '2.11_SM', '2.12_SM', '2.13_SM',
+];
+
+export const PANEL3_SECTION_PHASE_SLOTS: SectionPhaseSlotMeta[] = PANEL3_SECTION_PHASE_ORDER_KEYS.map((key, index) => {
+  const [sectionId, ph] = key.split('_');
+  const secInfo = CIRCUIT_3_SECTIONS.find((s) => s.sectionId === sectionId);
+  const category = sectionId.startsWith('1.') ? 'land' : 'submarine';
+  const phaseCode = (ph as 'A' | 'B' | 'C' | 'SM') || (category === 'land' ? 'A' : 'SM');
+  const phaseLabel = category === 'land' ? `Phase ${phaseCode}` : 'Submarine (CH 3)';
+  const shortLabel = category === 'land' ? `${sectionId}-${phaseCode}` : sectionId;
+  return {
+    key,
+    index,
+    sectionId,
+    sectionName: secInfo?.name || `Section ${sectionId}`,
+    category,
+    phaseCode,
+    phaseLabel,
+    shortLabel,
+    axisSubLabel: category === 'land' ? `Ph ${phaseCode}` : 'Subsea',
+  };
+});
+
+export type PowerOperateConditionKey = 'normal' | 'emergency' | 'critical' | 'overload';
+export type PowerCircuitKey = 'ckt3' | 'ckt2' | 'nkt33' | 'oil33';
+
+export interface PowerCircuitMeta {
+  key: PowerCircuitKey;
+  index: number;
+  label: string;
+  shortLabel: string;
+  substation: string;
+  thresholds: {
+    normalMax: number;
+    emergencyMax: number;
+    criticalMax: number;
+  };
+  rangeLabels: Record<PowerOperateConditionKey, string>;
+}
+
+export const POWER_CIRCUITS_META: PowerCircuitMeta[] = [
+  {
+    key: 'ckt3',
+    index: 0,
+    label: '115kV Ckt#3',
+    shortLabel: '115kV Ckt#3',
+    substation: 'Khanom – Samui 3 (KMB)',
+    thresholds: { normalMax: 64.1, emergencyMax: 68.11, criticalMax: 80.13 },
+    rangeLabels: {
+      normal: '< 64.1 MW',
+      emergency: '64.1 – 68.11 MW',
+      critical: '68.11 – 80.13 MW',
+      overload: '> 80.13 MW',
+    },
+  },
+  {
+    key: 'ckt2',
+    index: 1,
+    label: '115kV Ckt#2',
+    shortLabel: '115kV Ckt#2',
+    substation: 'Khanom – Samui 2 (KMA)',
+    thresholds: { normalMax: 53.64, emergencyMax: 56.79, criticalMax: 63.10 },
+    rangeLabels: {
+      normal: '< 53.64 MW',
+      emergency: '53.64 – 56.79 MW',
+      critical: '56.79 – 63.10 MW',
+      overload: '> 63.10 MW',
+    },
+  },
+  {
+    key: 'nkt33',
+    index: 2,
+    label: '33kV NKT',
+    shortLabel: '33kV NKT',
+    substation: 'Khanom – Samui 1 (KNA)',
+    thresholds: { normalMax: 13.29, emergencyMax: 14.08, criticalMax: 15.64 },
+    rangeLabels: {
+      normal: '< 13.29 MW',
+      emergency: '13.29 – 14.08 MW',
+      critical: '14.08 – 15.64 MW',
+      overload: '> 15.64 MW',
+    },
+  },
+  {
+    key: 'oil33',
+    index: 3,
+    label: '33kV Oil',
+    shortLabel: '33kV Oil',
+    substation: 'Khanom – Samui Oil-Filled (KNA)',
+    thresholds: { normalMax: 12.90, emergencyMax: 13.66, criticalMax: 15.18 },
+    rangeLabels: {
+      normal: '< 12.90 MW',
+      emergency: '12.90 – 13.66 MW',
+      critical: '13.66 – 15.18 MW',
+      overload: '> 15.18 MW',
+    },
+  },
+];
+
+export interface PowerOperateRangeMeta {
+  key: PowerOperateConditionKey;
+  index: number;
+  label: string;
+  shortLabel: string;
+  subtitle: string;
+  hexColor: string;
+  glowColor: string;
+  badgeBgClass: string;
+  badgeTextClass: string;
+  badgeBorderClass: string;
+}
+
+export const POWER_OPERATING_RANGES_4: PowerOperateRangeMeta[] = [
+  {
+    key: 'normal',
+    index: 0,
+    label: 'Normal Condition',
+    shortLabel: 'Normal',
+    subtitle: 'Low to moderate power demand',
+    hexColor: '#3b82f6', // Blue
+    glowColor: 'rgba(59, 130, 246, 0.55)',
+    badgeBgClass: 'bg-blue-500/15',
+    badgeTextClass: 'text-blue-300',
+    badgeBorderClass: 'border-blue-400/40',
+  },
+  {
+    key: 'emergency',
+    index: 1,
+    label: 'Emergency Condition',
+    shortLabel: 'Emergency',
+    subtitle: 'High power demand',
+    hexColor: '#eab308', // Yellow
+    glowColor: 'rgba(234, 179, 8, 0.55)',
+    badgeBgClass: 'bg-yellow-500/15',
+    badgeTextClass: 'text-yellow-300',
+    badgeBorderClass: 'border-yellow-400/50',
+  },
+  {
+    key: 'critical',
+    index: 2,
+    label: 'Critical Condition',
+    shortLabel: 'Critical',
+    subtitle: 'Very High power demand',
+    hexColor: '#ef4444', // Red
+    glowColor: 'rgba(239, 68, 68, 0.55)',
+    badgeBgClass: 'bg-red-500/15',
+    badgeTextClass: 'text-red-300',
+    badgeBorderClass: 'border-red-400/50',
+  },
+  {
+    key: 'overload',
+    index: 3,
+    label: 'Overload Condition',
+    shortLabel: 'Overload',
+    subtitle: 'Insufficient power supply (Short-circuit risk)',
+    hexColor: '#991b1b', // Dark Red
+    glowColor: 'rgba(185, 28, 28, 0.65)',
+    badgeBgClass: 'bg-rose-950/50',
+    badgeTextClass: 'text-rose-200',
+    badgeBorderClass: 'border-rose-700/70',
+  },
+];
+
+let memoryPanel3StatsSummary: Panel3StatisticsSummary | null = null;
+let fetchingPanel3StatsPromise: Promise<Panel3StatisticsSummary | null> | null = null;
+
+function classifyClientTempZone(t: number): number {
+  if (t > 70) return 5;
+  if (t >= 60) return 4;
+  if (t >= 55) return 3;
+  if (t >= 45) return 2;
+  if (t >= 35) return 1;
+  return 0;
+}
+
+function classifyClientCircuitRange(circuitIdx: number, mw: number): number {
+  const meta = POWER_CIRCUITS_META[circuitIdx];
+  if (!meta) return 0;
+  if (mw > meta.thresholds.criticalMax) return 3;
+  if (mw >= meta.thresholds.emergencyMax) return 2;
+  if (mw >= meta.thresholds.normalMax) return 1;
+  return 0;
+}
+
+export function buildPanel3StatsFromHourlyRecords(records: OrgSectionHourlyRecord[]): Panel3StatisticsSummary {
+  const byDateRecords = new Map<string, OrgSectionHourlyRecord[]>();
+  for (const r of records) {
+    if (!r.date) continue;
+    let list = byDateRecords.get(r.date);
+    if (!list) {
+      list = [];
+      byDateRecords.set(r.date, list);
+    }
+    list.push(r);
+  }
+  const dates = Array.from(byDateRecords.keys()).sort();
+  const keyToIndex = new Map(PANEL3_SECTION_PHASE_ORDER_KEYS.map((k, idx) => [k, idx]));
+  const byDate: Record<string, Panel3DailyStatsEntry> = {};
+
+  for (const d of dates) {
+    const rows = byDateRecords.get(d) || [];
+    const tf = Array.from({ length: PANEL3_SECTION_PHASE_ORDER_KEYS.length }, () => [0, 0, 0, 0, 0, 0]);
+    const tc = Array.from({ length: PANEL3_SECTION_PHASE_ORDER_KEYS.length }, () => [0, 0, 0, 0, 0, 0]);
+    const pwrAll = [
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ];
+    const pwrHr = [
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ];
+    const byHr = new Map<number, [number, number, number, number]>();
+
+    for (const r of rows) {
+      const phCode = r.sectionId.startsWith('2.')
+        ? 'SM'
+        : /Phase\s*B|^B$/i.test(r.phase)
+          ? 'B'
+          : /Phase\s*C|^C$/i.test(r.phase)
+            ? 'C'
+            : 'A';
+      const idx = keyToIndex.get(`${r.sectionId}_${phCode}`);
+      if (idx !== undefined && r.maxFiberTempC > 0) {
+        tf[idx][classifyClientTempZone(r.maxFiberTempC)]++;
+        tc[idx][classifyClientTempZone(r.maxConductorTempC > 0 ? r.maxConductorTempC : r.maxFiberTempC)]++;
+      }
+
+      const c3 = r.ckt3MW || 0;
+      const c2 = r.ckt2MW || 0;
+      const nk = r.nkt33MW || 0;
+      const oi = r.oil33MW || 0;
+      pwrAll[0][classifyClientCircuitRange(0, c3)]++;
+      pwrAll[1][classifyClientCircuitRange(1, c2)]++;
+      pwrAll[2][classifyClientCircuitRange(2, nk)]++;
+      pwrAll[3][classifyClientCircuitRange(3, oi)]++;
+
+      const prev = byHr.get(r.hourIndex) || [0, 0, 0, 0];
+      if (c3 > prev[0]) prev[0] = c3;
+      if (c2 > prev[1]) prev[1] = c2;
+      if (nk > prev[2]) prev[2] = nk;
+      if (oi > prev[3]) prev[3] = oi;
+      byHr.set(r.hourIndex, prev);
+    }
+
+    for (const [, [c3, c2, nk, oi]] of byHr.entries()) {
+      pwrHr[0][classifyClientCircuitRange(0, c3)]++;
+      pwrHr[1][classifyClientCircuitRange(1, c2)]++;
+      pwrHr[2][classifyClientCircuitRange(2, nk)]++;
+      pwrHr[3][classifyClientCircuitRange(3, oi)]++;
+    }
+
+    byDate[d] = { tf, tc, pwrAll, pwrHr };
+  }
+
+  return {
+    keys: PANEL3_SECTION_PHASE_ORDER_KEYS,
+    dates,
+    byDate,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function ensurePanel3StatisticsSummaryLoaded(forceRefresh = false): Promise<Panel3StatisticsSummary | null> {
+  if (!forceRefresh && memoryPanel3StatsSummary && memoryPanel3StatsSummary.dates?.length > 0) {
+    return memoryPanel3StatsSummary;
+  }
+  if (!forceRefresh && fetchingPanel3StatsPromise) {
+    return fetchingPanel3StatsPromise;
+  }
+
+  fetchingPanel3StatsPromise = (async () => {
+    try {
+      const cacheBust = forceRefresh ? `?t=${Date.now()}` : '';
+      const res = await fetch(`/api/panel3-statistics-summary${cacheBust}`, forceRefresh ? { cache: 'no-store' } : {});
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const json = await res.json();
+        if (json?.success && json?.stats && Array.isArray(json.stats.dates) && json.stats.dates.length > 0) {
+          memoryPanel3StatsSummary = json.stats;
+          void idbSet('panel3_stats', json.stats);
+          notifyListeners();
+          return memoryPanel3StatsSummary;
+        }
+      }
+    } catch {}
+
+    try {
+      const staticRes = await fetch('/data/panel3_stats.json');
+      if (staticRes.ok && (staticRes.headers.get('content-type') || '').includes('application/json')) {
+        const stats = await staticRes.json();
+        if (stats && Array.isArray(stats.dates) && stats.dates.length > 0) {
+          memoryPanel3StatsSummary = stats;
+          void idbSet('panel3_stats', stats);
+          notifyListeners();
+          return memoryPanel3StatsSummary;
+        }
+      }
+    } catch {}
+
+    try {
+      const idbStats = await idbGet<Panel3StatisticsSummary>('panel3_stats');
+      if (idbStats && Array.isArray(idbStats.dates) && idbStats.dates.length > 0) {
+        memoryPanel3StatsSummary = idbStats;
+        notifyListeners();
+        return memoryPanel3StatsSummary;
+      }
+    } catch {}
+
+    if (memorySectionProfileRecords.length > 0) {
+      memoryPanel3StatsSummary = buildPanel3StatsFromHourlyRecords(memorySectionProfileRecords);
+      notifyListeners();
+      return memoryPanel3StatsSummary;
+    }
+
+    return null;
+  })();
+
+  try {
+    return await fetchingPanel3StatsPromise;
+  } finally {
+    fetchingPanel3StatsPromise = null;
+  }
+}
+
+export function getPanel3StatisticsSummary(): Panel3StatisticsSummary | null {
+  initFromStorage();
+  if (!memoryPanel3StatsSummary) {
+    void ensurePanel3StatisticsSummaryLoaded(false);
+  }
+  return memoryPanel3StatsSummary;
+}
 let hasStartedAsyncHydration = false;
 
 const IDB_NAME = 'dts_public_default_db_idb_v1';
@@ -437,6 +808,11 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
     if (Array.isArray(p3.records) && p3.records.length > 0) {
       memorySectionProfileRecords = p3.records;
       rebuildSectionProfileIndexes();
+    }
+    if ((p3 as any).stats && Array.isArray((p3 as any).stats.dates) && (p3 as any).stats.dates.length > 0) {
+      memoryPanel3StatsSummary = (p3 as any).stats;
+    } else {
+      void ensurePanel3StatisticsSummaryLoaded(false);
     }
     memoryPanel3Info = p3.info || memoryPanel3Info;
     try {
@@ -2079,6 +2455,8 @@ export async function saveUploadedSectionDailyProfileDatabase(
       },
       recordCount: records.length,
     };
+    memoryPanel3StatsSummary = buildPanel3StatsFromHourlyRecords(records);
+    void idbSet('panel3_stats', memoryPanel3StatsSummary);
     void syncLatestThreeFilesToDefaultStore({
       panel3: { records, info: defaultP3Info },
     });
@@ -3256,7 +3634,16 @@ export async function syncAllPublicSharedTargetFolders(
         }
         rebuildSectionProfileIndexes();
 
-        onProgress?.(93, 'Synchronizing Daily Curve (2.2) & 3D Thermal Surface (2.3)...');
+        onProgress?.(91, 'Synchronizing Daily Curve (2.2) & 3D Thermal Surface (2.3)...');
+
+        // Also pre-load or compute the full 484-date Panel 3 Statistics Summary for Page 2.5 & Page 2.6
+        onProgress?.(94, 'Pre-calculating Temperature (2.5) & Power Operating Condition (2.6) Statistics...');
+        if (p3Cached?.stats && Array.isArray(p3Cached.stats.dates) && p3Cached.stats.dates.length > 0) {
+          memoryPanel3StatsSummary = p3Cached.stats;
+          void idbSet('panel3_stats', p3Cached.stats);
+        } else {
+          await ensurePanel3StatisticsSummaryLoaded(true);
+        }
 
         const totalDatesCount =
           allDatesToUse.length ||
@@ -3285,6 +3672,7 @@ export async function syncAllPublicSharedTargetFolders(
           records: memorySectionProfileRecords,
           allDates: memorySectionProfileDates,
           info: defaultP3Info,
+          stats: memoryPanel3StatsSummary || undefined,
         };
         memoryPanel3Info = defaultP3Info;
         try {
@@ -3308,7 +3696,7 @@ export async function syncAllPublicSharedTargetFolders(
   onProgress?.(97, 'Shared Folder 3 Synchronized (100%)');
 
   // 4. Finalization & listener notification: (98% - 100%)
-  onProgress?.(99, 'Finalizing Public Dashboard Views [2.1, 2.2, 2.3, 2.4]...');
+  onProgress?.(99, 'Finalizing Public Dashboard Views [2.1, 2.2, 2.3, 2.4, 2.5, 2.6]...');
   notifyListeners();
   await new Promise((r) => setTimeout(r, 30));
 

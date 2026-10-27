@@ -9,11 +9,19 @@ import {
   Database,
   AlertCircle,
   CheckCircle2,
-  Info,
+  BarChart3,
+  Zap,
 } from 'lucide-react';
 import { OrgDatabaseConfig } from '../services/orgDatabaseStorage';
 
-export type PublicDashboardTab = 'heatmap' | 'dailycurve' | 'powertemp3d' | 'yearly' | 'datasetting';
+export type PublicDashboardTab =
+  | 'heatmap'
+  | 'dailycurve'
+  | 'powertemp3d'
+  | 'yearly'
+  | 'tempstats'
+  | 'powerstats'
+  | 'datasetting';
 
 interface PublicSidebarProps {
   activeTab: PublicDashboardTab;
@@ -76,10 +84,32 @@ export const PublicSidebar: React.FC<PublicSidebarProps> = ({
       activeIndicator: 'bg-emerald-400',
     },
     {
+      id: 'tempstats' as PublicDashboardTab,
+      num: '2.5',
+      title: 'Statistics Records of Temp',
+      subtitle: '6-Range Tf & Tc Hourly Threshold Counter',
+      shortTitle: 'Temp Stats',
+      icon: BarChart3,
+      accentColor: 'text-sky-400',
+      activeBg: 'bg-sky-950/40 text-sky-300 border-sky-500/40',
+      activeIndicator: 'bg-sky-400',
+    },
+    {
+      id: 'powerstats' as PublicDashboardTab,
+      num: '2.6',
+      title: 'Statistics Records of Power',
+      subtitle: '4-Circuit Operating Condition Range Counter',
+      shortTitle: 'Power Stats',
+      icon: Zap,
+      accentColor: 'text-amber-400',
+      activeBg: 'bg-amber-950/40 text-amber-300 border-amber-500/40',
+      activeIndicator: 'bg-amber-400',
+    },
+    {
       id: 'datasetting' as PublicDashboardTab,
       num: 'DATA',
       title: 'Data Setting',
-      subtitle: '4-Sector Shared Drive Panels (2.1 - 2.4)',
+      subtitle: 'Shared Drive Panels (2.1 - 2.6)',
       shortTitle: 'Data Setting',
       icon: Database,
       accentColor: 'text-violet-400',
