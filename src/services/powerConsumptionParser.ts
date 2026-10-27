@@ -1597,5 +1597,163 @@ export function isSyntheticPowerSummary(summary?: DailyPowerSummary | null): boo
   return false;
 }
 
+/**
+ * 16-Column (Columns A to P) CSV Header for Daily Maximum Power Consumption Database:
+ * - Col A: Date (YYYY-MM-DD)
+ * - Col B to E: Power value (MW) of each circuit at the time of daily combined peak (Col G)
+ * - Col F: Total Island Max (MW) — 15-min interval simultaneous peak (Col B + Col C + Col D + Col E)
+ * - Col G: Time of peak (HH:mm of the day for Col F)
+ * - Col H: Reference for Col G (source filename)
+ * - Col I to L: Daily peak power value (MW) of each circuit (time-independent worst-case scenario)
+ * - Col M to P: Time of peak (HH:mm) for each circuit's individual daily peak
+ */
+export const POWER_DATABASE_CSV_HEADER =
+  'Date,Ckt3_At_Peak_MW,Ckt2_At_Peak_MW,33kV_NKT_At_Peak_MW,33kV_Oil_At_Peak_MW,Total_Island_Max_MW,Peak_Time,File_Source,Ckt3_Daily_Peak_MW,Ckt2_Daily_Peak_MW,33kV_NKT_Daily_Peak_MW,33kV_Oil_Daily_Peak_MW,Ckt3_Peak_Time,Ckt2_Peak_Time,33kV_NKT_Peak_Time,33kV_Oil_Peak_Time';
 
+export interface DailyPowerDatabaseRecord {
+  // Columns B to E: Power value at the time of daily combined peak (Column G)
+  ckt3: number;
+  ckt2: number;
+  nkt: number;
+  oil: number;
+  // Column F: Total Island Max (15-min interval combined peak = sum of B to E)
+  total: number;
+  // Column G: Time of peak (Time of the day when the 4-circuit sum peaked)
+  peakTime: string;
+  // Column H: Reference for Column G
+  fileSource: string;
+  // Columns I to L: Daily peak power value of each circuit (time-independent worst-case)
+  ckt3DailyPeak: number;
+  ckt2DailyPeak: number;
+  nktDailyPeak: number;
+  oilDailyPeak: number;
+  // Columns M to P: Time of peak for each circuit's individual daily peak
+  ckt3PeakTime: string;
+  ckt2PeakTime: string;
+  nktPeakTime: string;
+  oilPeakTime: string;
+}
 
+/**
+ * Extracts a 16-column (A–P) DailyPowerDatabaseRecord from a DailyPowerSummary:
+ * - Columns B–G use the 15-minute interval peak finding (summation of all 4 circuits).
+ * - Column H stores the reference source filename for Column G.
+ * - Columns I–P store the time-independent individual daily peak of each circuit and its timestamp.
+ */
+export function extractDailyPowerDatabaseRecord(
+  summary?: DailyPowerSummary | null
+): DailyPowerDatabaseRecord {
+  if (!summary || isSyntheticPowerSummary(summary)) {
+    return {
+      ckt3: 0,
+      ckt2: 0,
+      nkt: 0,
+      oil: 0,
+      total: 0,
+      peakTime: '00:00',
+      fileSource: 'none',
+      ckt3DailyPeak: 0,
+      ckt2DailyPeak: 0,
+      nktDailyPeak: 0,
+      oilDailyPeak: 0,
+      ckt3PeakTime: '00:00',
+      ckt2PeakTime: '00:00',
+      nktPeakTime: '00:00',
+      oilPeakTime: '00:00',
+    };
+  }
+
+  const m = summary.metrics;
+  const fName = (summary.filesLoaded?.[0]?.fileName || 'scanned').replace(/,/g, ';');
+
+  // Find the 15-minute interval point where the simultaneous sum of all 4 circuits reaches its daily maximum
+  let peakPoint: DailyPowerDataPoint | undefined;
+  if (summary.dataPoints && summary.dataPoints.length > 0) {
+    peakPoint = summary.dataPoints.reduce(
+      (best, cur) => (cur.totalPower > best.totalPower ? cur : best),
+      summary.dataPoints[0]
+    );
+  }
+
+  const ckt3AtPeak = Number((peakPoint ? peakPoint.kmbCircuit3 : 0).toFixed(2));
+  const ckt2AtPeak = Number((peakPoint ? peakPoint.kmaCircuit2 : 0).toFixed(2));
+  const nktAtPeak = Number((peakPoint ? peakPoint.knaNkt : 0).toFixed(2));
+  const oilAtPeak = Number((peakPoint ? peakPoint.knaOilFilled : 0).toFixed(2));
+  const totalIslandMax = Number((ckt3AtPeak + ckt2AtPeak + nktAtPeak + oilAtPeak).toFixed(2));
+  const peakTime = peakPoint?.time || m.total.peakTime || '00:00';
+
+  // Individual circuit daily peaks (time-independent worst-case scenario, Columns I to P)
+  const ckt3DailyPeak = Number(m.circuit_115kv_3.peakMW.toFixed(2));
+  const ckt2DailyPeak = Number(m.circuit_115kv_2.peakMW.toFixed(2));
+  const nktDailyPeak = Number(m.circuit_33kv_nkt.peakMW.toFixed(2));
+  const oilDailyPeak = Number(m.circuit_33kv_oil.peakMW.toFixed(2));
+
+  const ckt3PeakTime = m.circuit_115kv_3.peakTime || '00:00';
+  const ckt2PeakTime = m.circuit_115kv_2.peakTime || '00:00';
+  const nktPeakTime = m.circuit_33kv_nkt.peakTime || '00:00';
+  const oilPeakTime = m.circuit_33kv_oil.peakTime || '00:00';
+
+  return {
+    ckt3: ckt3AtPeak,
+    ckt2: ckt2AtPeak,
+    nkt: nktAtPeak,
+    oil: oilAtPeak,
+    total: totalIslandMax > 0 ? totalIslandMax : Number(m.total.peakMW.toFixed(2)),
+    peakTime,
+    fileSource: fName,
+    ckt3DailyPeak,
+    ckt2DailyPeak,
+    nktDailyPeak,
+    oilDailyPeak,
+    ckt3PeakTime,
+    ckt2PeakTime,
+    nktPeakTime,
+    oilPeakTime,
+  };
+}
+
+/**
+ * Formats a DailyPowerDatabaseRecord into a 16-column (Columns A to P) CSV row string.
+ */
+export function formatDailyPowerDatabaseCsvRow(
+  dateKey: string,
+  r: DailyPowerDatabaseRecord
+): string {
+  const c3AtPeak = Number((r.ckt3 ?? 0).toFixed(2));
+  const c2AtPeak = Number((r.ckt2 ?? 0).toFixed(2));
+  const nktAtPeak = Number((r.nkt ?? 0).toFixed(2));
+  const oilAtPeak = Number((r.oil ?? 0).toFixed(2));
+  const sumAtPeak = Number((c3AtPeak + c2AtPeak + nktAtPeak + oilAtPeak).toFixed(2));
+  const totalOut = Number((r.total > 0 ? r.total : sumAtPeak).toFixed(2));
+  const peakTimeOut = (r.peakTime || '00:00').trim();
+  const fileSourceOut = (r.fileSource || 'scanned').replace(/,/g, ';').trim();
+
+  const c3Peak = Number(((r.ckt3DailyPeak ?? 0) > 0 ? r.ckt3DailyPeak : c3AtPeak).toFixed(2));
+  const c2Peak = Number(((r.ckt2DailyPeak ?? 0) > 0 ? r.ckt2DailyPeak : c2AtPeak).toFixed(2));
+  const nktPeak = Number(((r.nktDailyPeak ?? 0) > 0 ? r.nktDailyPeak : nktAtPeak).toFixed(2));
+  const oilPeak = Number(((r.oilDailyPeak ?? 0) > 0 ? r.oilDailyPeak : oilAtPeak).toFixed(2));
+
+  const c3Time = (r.ckt3PeakTime || peakTimeOut).trim();
+  const c2Time = (r.ckt2PeakTime || peakTimeOut).trim();
+  const nktTime = (r.nktPeakTime || peakTimeOut).trim();
+  const oilTime = (r.oilPeakTime || peakTimeOut).trim();
+
+  return [
+    dateKey,
+    c3AtPeak.toFixed(2),
+    c2AtPeak.toFixed(2),
+    nktAtPeak.toFixed(2),
+    oilAtPeak.toFixed(2),
+    totalOut.toFixed(2),
+    peakTimeOut,
+    fileSourceOut,
+    c3Peak.toFixed(2),
+    c2Peak.toFixed(2),
+    nktPeak.toFixed(2),
+    oilPeak.toFixed(2),
+    c3Time,
+    c2Time,
+    nktTime,
+    oilTime,
+  ].join(',');
+}

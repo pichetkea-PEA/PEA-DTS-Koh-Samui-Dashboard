@@ -1750,12 +1750,24 @@ function parsePanel2CsvFast(
   const delimiter = (lines[0] || '').includes(';') ? ';' : ',';
   const header = (lines[0] || '').split(delimiter).map((c) => c.replace(/^["']|["']$/g, '').trim().toLowerCase());
 
-  let dateIdx = header.findIndex((c) => c.includes('date') || c.includes('day') || c.includes('time'));
-  let ckt3Idx = header.findIndex((c) => c.includes('ckt3') || c.includes('circuit #3') || c.includes('circuit 3') || c.includes('03yb01'));
-  let ckt2Idx = header.findIndex((c) => c.includes('ckt2') || c.includes('circuit #2') || c.includes('circuit 2') || c.includes('04yb01'));
-  let nktIdx = header.findIndex((c) => c.includes('nkt') || c.includes('07wb01'));
-  let oilIdx = header.findIndex((c) => c.includes('oil') || c.includes('10wb01'));
+  let dateIdx = header.findIndex((c) => c.includes('date') || c.includes('day'));
+  let ckt3Idx = header.findIndex((c) => (c.includes('ckt3') || c.includes('circuit #3') || c.includes('circuit 3') || c.includes('03yb01')) && !c.includes('daily_peak') && !c.includes('peak_time'));
+  let ckt2Idx = header.findIndex((c) => (c.includes('ckt2') || c.includes('circuit #2') || c.includes('circuit 2') || c.includes('04yb01')) && !c.includes('daily_peak') && !c.includes('peak_time'));
+  let nktIdx = header.findIndex((c) => (c.includes('nkt') || c.includes('07wb01')) && !c.includes('daily_peak') && !c.includes('peak_time'));
+  let oilIdx = header.findIndex((c) => (c.includes('oil') || c.includes('10wb01')) && !c.includes('daily_peak') && !c.includes('peak_time'));
   let totalIdx = header.findIndex((c) => c.includes('total') || c.includes('island'));
+  let peakTimeIdx = header.findIndex((c) => (c === 'peak_time' || c.includes('peak_time') || c.includes('time')) && !c.includes('ckt') && !c.includes('nkt') && !c.includes('oil'));
+  let fileSrcIdx = header.findIndex((c) => c.includes('source') || c.includes('file'));
+
+  // Columns I to P (indices 8 to 15)
+  let ckt3DailyIdx = header.findIndex((c) => c.includes('ckt3_daily_peak'));
+  let ckt2DailyIdx = header.findIndex((c) => c.includes('ckt2_daily_peak'));
+  let nktDailyIdx = header.findIndex((c) => c.includes('nkt_daily_peak'));
+  let oilDailyIdx = header.findIndex((c) => c.includes('oil_daily_peak'));
+  let ckt3TimeIdx = header.findIndex((c) => c.includes('ckt3_peak_time'));
+  let ckt2TimeIdx = header.findIndex((c) => c.includes('ckt2_peak_time'));
+  let nktTimeIdx = header.findIndex((c) => c.includes('nkt_peak_time'));
+  let oilTimeIdx = header.findIndex((c) => c.includes('oil_peak_time'));
 
   if (dateIdx === -1) dateIdx = 0;
   if (ckt3Idx === -1) ckt3Idx = 1;
@@ -1763,10 +1775,22 @@ function parsePanel2CsvFast(
   if (nktIdx === -1) nktIdx = 3;
   if (oilIdx === -1) oilIdx = 4;
   if (totalIdx === -1 && header.length > 5) totalIdx = 5;
+  if (peakTimeIdx === -1 && header.length > 6) peakTimeIdx = 6;
+  if (fileSrcIdx === -1 && header.length > 7) fileSrcIdx = 7;
+  if (ckt3DailyIdx === -1) ckt3DailyIdx = 8;
+  if (ckt2DailyIdx === -1) ckt2DailyIdx = 9;
+  if (nktDailyIdx === -1) nktDailyIdx = 10;
+  if (oilDailyIdx === -1) oilDailyIdx = 11;
+  if (ckt3TimeIdx === -1) ckt3TimeIdx = 12;
+  if (ckt2TimeIdx === -1) ckt2TimeIdx = 13;
+  if (nktTimeIdx === -1) nktTimeIdx = 14;
+  if (oilTimeIdx === -1) oilTimeIdx = 15;
 
   const peaksByDate = new Map<string, any>();
-  for (const ep of existingPeaks) {
-    if (ep && ep.date) peaksByDate.set(ep.date, ep);
+  if (lines.length <= 30) {
+    for (const ep of existingPeaks) {
+      if (ep && ep.date) peaksByDate.set(ep.date, ep);
+    }
   }
 
   for (let i = 1; i < lines.length; i++) {
@@ -1775,23 +1799,68 @@ function parsePanel2CsvFast(
     const dateStr = normalizeServerDateStr(parts[dateIdx]);
     if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
 
-    const ckt3 = Number((parseFloat(parts[ckt3Idx] || '0') || 0).toFixed(2));
-    const ckt2 = Number((parseFloat(parts[ckt2Idx] || '0') || 0).toFixed(2));
-    const nkt = Number((parseFloat(parts[nktIdx] || '0') || 0).toFixed(2));
-    const oil = Number((parseFloat(parts[oilIdx] || '0') || 0).toFixed(2));
-    let total = totalIdx >= 0 ? parseFloat(parts[totalIdx] || '0') || 0 : 0;
-    if (total <= 0) total = ckt3 + ckt2 + nkt + oil;
+    const hasExtendedCols = parts.length >= 12;
+    const ckt3AtPeak = Number((parseFloat(parts[ckt3Idx] || '0') || 0).toFixed(2));
+    const ckt2AtPeak = Number((parseFloat(parts[ckt2Idx] || '0') || 0).toFixed(2));
+    const nktAtPeak = Number((parseFloat(parts[nktIdx] || '0') || 0).toFixed(2));
+    const oilAtPeak = Number((parseFloat(parts[oilIdx] || '0') || 0).toFixed(2));
+    const sumAtPeak = Number((ckt3AtPeak + ckt2AtPeak + nktAtPeak + oilAtPeak).toFixed(2));
+    const rawTotal = totalIdx >= 0 ? parseFloat(parts[totalIdx] || '0') || 0 : 0;
+
+    // Column F: Total Island Max (coincident 15-min interval peak)
+    const total = hasExtendedCols
+      ? sumAtPeak > 0
+        ? sumAtPeak
+        : Number(rawTotal.toFixed(2))
+      : rawTotal > 0
+      ? Number(rawTotal.toFixed(2))
+      : sumAtPeak;
+
+    const peakTime = (peakTimeIdx >= 0 && parts[peakTimeIdx]) || '00:00';
+    const fileSource = (fileSrcIdx >= 0 && parts[fileSrcIdx]) || meta.fileName;
+
+    const ckt3Daily = hasExtendedCols
+      ? Number(((parseFloat(parts[ckt3DailyIdx] || '0') || 0) || ckt3AtPeak).toFixed(2))
+      : ckt3AtPeak;
+    const ckt2Daily = hasExtendedCols
+      ? Number(((parseFloat(parts[ckt2DailyIdx] || '0') || 0) || ckt2AtPeak).toFixed(2))
+      : ckt2AtPeak;
+    const nktDaily = hasExtendedCols
+      ? Number(((parseFloat(parts[nktDailyIdx] || '0') || 0) || nktAtPeak).toFixed(2))
+      : nktAtPeak;
+    const oilDaily = hasExtendedCols
+      ? Number(((parseFloat(parts[oilDailyIdx] || '0') || 0) || oilAtPeak).toFixed(2))
+      : oilAtPeak;
+
+    const ckt3PeakTime = (hasExtendedCols && parts[ckt3TimeIdx]) || peakTime;
+    const ckt2PeakTime = (hasExtendedCols && parts[ckt2TimeIdx]) || peakTime;
+    const nktPeakTime = (hasExtendedCols && parts[nktTimeIdx]) || peakTime;
+    const oilPeakTime = (hasExtendedCols && parts[oilTimeIdx]) || peakTime;
 
     peaksByDate.set(dateStr, {
       date: dateStr,
       year: dateStr.slice(0, 4),
       monthDay: dateStr.slice(5),
-      ckt3MaxMW: ckt3,
-      ckt2MaxMW: ckt2,
-      nkt33MaxMW: nkt,
-      oil33MaxMW: oil,
-      totalIslandMaxMW: Number(total.toFixed(2)),
+      ckt3MaxMW: ckt3Daily,
+      ckt2MaxMW: ckt2Daily,
+      nkt33MaxMW: nktDaily,
+      oil33MaxMW: oilDaily,
+      totalIslandMaxMW: total,
       fiberMaxTempC: 0,
+      peakTime,
+      fileSource,
+      ckt3AtPeakMW: ckt3AtPeak,
+      ckt2AtPeakMW: ckt2AtPeak,
+      nkt33AtPeakMW: nktAtPeak,
+      oil33AtPeakMW: oilAtPeak,
+      ckt3DailyPeakMW: ckt3Daily,
+      ckt2DailyPeakMW: ckt2Daily,
+      nkt33DailyPeakMW: nktDaily,
+      oil33DailyPeakMW: oilDaily,
+      ckt3PeakTime,
+      ckt2PeakTime,
+      nkt33PeakTime: nktPeakTime,
+      oil33PeakTime: oilPeakTime,
     });
   }
 
@@ -2098,6 +2167,7 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
       const p2Changed =
         forceDl ||
         !currentDb?.panel2?.peaks?.length ||
+        currentDb?.panel2?.peaks?.[0]?.ckt3AtPeakMW === undefined ||
         hasPanelDatabaseChanged(scan2, currentDb?.panel2?.info);
 
       const p3Changed =

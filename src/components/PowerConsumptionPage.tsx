@@ -51,6 +51,10 @@ import {
   generateSamplePowerDataset,
   buildFallbackDailyPowerSummary,
   isSyntheticPowerSummary,
+  POWER_DATABASE_CSV_HEADER,
+  DailyPowerDatabaseRecord,
+  extractDailyPowerDatabaseRecord,
+  formatDailyPowerDatabaseCsvRow,
 } from '../services/powerConsumptionParser';
 import { DailyPeakLoadChart } from './DailyPeakLoadChart';
 import { PowerSubstationFoldersConfig } from './FolderSelector';
@@ -158,7 +162,7 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
   const [dbExportProgressMessage, setDbExportProgressMessage] = useState<string>('');
   const [dbExportCurrentStep, setDbExportCurrentStep] = useState(0);
   const [dbExportTotalSteps, setDbExportTotalSteps] = useState(0);
-  const [uploadedOldDbRecords, setUploadedOldDbRecords] = useState<Map<string, { ckt3: number; ckt2: number; nkt: number; oil: number; total: number; peakTime: string; fileSource: string }> | null>(null);
+  const [uploadedOldDbRecords, setUploadedOldDbRecords] = useState<Map<string, DailyPowerDatabaseRecord> | null>(null);
   const [uploadedOldDbFileName, setUploadedOldDbFileName] = useState<string | null>(null);
   const [uploadedOldDbUploadStatus, setUploadedOldDbUploadStatus] = useState<{
     isUploading: boolean;
@@ -387,10 +391,7 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
 
     try {
       const isXlsx = file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls');
-      const newMap = new Map<
-        string,
-        { ckt3: number; ckt2: number; nkt: number; oil: number; total: number; peakTime: string; fileSource: string }
-      >();
+      const newMap = new Map<string, DailyPowerDatabaseRecord>();
 
       const extractRowIntoMap = (row: Record<string, any>) => {
         const keys = Object.keys(row);
@@ -410,31 +411,103 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
         }
         if (!isoDate) return;
 
-        const findNum = (matchers: string[], fallbackIdx: number): number => {
-          const matchedKey = keys.find((k) => {
-            const lk = k.toLowerCase();
-            return matchers.some((m) => lk.includes(m));
-          });
-          const rawVal = matchedKey !== undefined ? row[matchedKey] : row[keys[fallbackIdx]];
+        const parseVal = (rawVal: any): number => {
           if (typeof rawVal === 'number') return isFinite(rawVal) ? rawVal : 0;
           const cleaned = String(rawVal ?? '').replace(/,/g, '').trim();
           const parsed = parseFloat(cleaned);
           return isFinite(parsed) ? parsed : 0;
         };
 
-        const ckt3 = findNum(['ckt3', 'ckt 3', 'ckt #3', '115kv_3', '115kv ckt 3', 'kmb'], 1);
-        const ckt2 = findNum(['ckt2', 'ckt 2', 'ckt #2', '115kv_2', '115kv ckt 2', 'kma'], 2);
-        const nkt = findNum(['nkt', '07wb01', '33kv_nkt'], 3);
-        const oil = findNum(['oil', '10wb01', '33kv_oil'], 4);
-        let total = findNum(['total', 'island', 'sum'], 5);
-        if (total <= 0) total = ckt3 + ckt2 + nkt + oil;
+        const findNum = (matchers: string[], fallbackIdx: number, excludeMatchers: string[] = []): number => {
+          const matchedKey = keys.find((k) => {
+            const lk = k.toLowerCase();
+            if (excludeMatchers.some((ex) => lk.includes(ex))) return false;
+            return matchers.some((m) => lk.includes(m));
+          });
+          const rawVal = matchedKey !== undefined ? row[matchedKey] : row[keys[fallbackIdx]];
+          return parseVal(rawVal);
+        };
 
-        const timeKey = keys.find((k) => k.toLowerCase().includes('time') || k.toLowerCase().includes('hour'));
+        const ckt3 = Number(findNum(['ckt3_at_peak', 'ckt3_max', 'ckt3', 'ckt 3', 'ckt #3', '115kv_3', 'kmb'], 1, ['daily_peak', 'peak_time']).toFixed(2));
+        const ckt2 = Number(findNum(['ckt2_at_peak', 'ckt2_max', 'ckt2', 'ckt 2', 'ckt #2', '115kv_2', 'kma'], 2, ['daily_peak', 'peak_time']).toFixed(2));
+        const nkt = Number(findNum(['nkt_at_peak', 'nkt_max', 'nkt', '07wb01', '33kv_nkt'], 3, ['daily_peak', 'peak_time']).toFixed(2));
+        const oil = Number(findNum(['oil_at_peak', 'oil_max', 'oil', '10wb01', '33kv_oil'], 4, ['daily_peak', 'peak_time']).toFixed(2));
+        const sumFourCircuits = Number((ckt3 + ckt2 + nkt + oil).toFixed(2));
+        const rawTotal = Number(findNum(['total_island', 'total', 'island'], 5).toFixed(2));
+
+        const timeKey = keys.find((k) => {
+          const lk = k.toLowerCase();
+          return (lk === 'peak_time' || lk.includes('peak_time') || lk.includes('time')) && !lk.includes('ckt') && !lk.includes('nkt') && !lk.includes('oil');
+        });
         const srcKey = keys.find((k) => k.toLowerCase().includes('source') || k.toLowerCase().includes('file'));
         const peakTime = String((timeKey ? row[timeKey] : row[keys[6]]) || '00:00').trim() || '00:00';
         const fileSource = String((srcKey ? row[srcKey] : row[keys[7]]) || file.name).trim() || file.name;
 
-        newMap.set(isoDate, { ckt3, ckt2, nkt, oil, total, peakTime, fileSource });
+        // Columns I to L (indices 8 to 11): Individual circuit daily peaks
+        const hasExtendedCols = keys.length >= 12;
+        const ckt3DailyPeak = Number(
+          (hasExtendedCols
+            ? findNum(['ckt3_daily_peak'], 8) || ckt3
+            : ckt3).toFixed(2)
+        );
+        const ckt2DailyPeak = Number(
+          (hasExtendedCols
+            ? findNum(['ckt2_daily_peak'], 9) || ckt2
+            : ckt2).toFixed(2)
+        );
+        const nktDailyPeak = Number(
+          (hasExtendedCols
+            ? findNum(['nkt_daily_peak'], 10) || nkt
+            : nkt).toFixed(2)
+        );
+        const oilDailyPeak = Number(
+          (hasExtendedCols
+            ? findNum(['oil_daily_peak'], 11) || oil
+            : oil).toFixed(2)
+        );
+
+        // Columns M to P (indices 12 to 15): Individual circuit peak times
+        const findStr = (matchers: string[], fallbackIdx: number, defaultStr: string): string => {
+          const matchedKey = keys.find((k) => {
+            const lk = k.toLowerCase();
+            return matchers.some((m) => lk.includes(m));
+          });
+          const rawVal = matchedKey !== undefined ? row[matchedKey] : row[keys[fallbackIdx]];
+          return String(rawVal || defaultStr).trim() || defaultStr;
+        };
+
+        const ckt3PeakTime = keys.length >= 16 ? findStr(['ckt3_peak_time'], 12, peakTime) : peakTime;
+        const ckt2PeakTime = keys.length >= 16 ? findStr(['ckt2_peak_time'], 13, peakTime) : peakTime;
+        const nktPeakTime = keys.length >= 16 ? findStr(['nkt_peak_time'], 14, peakTime) : peakTime;
+        const oilPeakTime = keys.length >= 16 ? findStr(['oil_peak_time'], 15, peakTime) : peakTime;
+
+        // If 16-column file: Cols B–E are coincident at-peak values summing to Col F.
+        // If legacy 8-column file: Col F is coincident peak (rawTotal) and Cols B–E were individual circuit peaks.
+        const total = hasExtendedCols
+          ? sumFourCircuits > 0
+            ? sumFourCircuits
+            : rawTotal
+          : rawTotal > 0
+          ? rawTotal
+          : sumFourCircuits;
+
+        newMap.set(isoDate, {
+          ckt3,
+          ckt2,
+          nkt,
+          oil,
+          total,
+          peakTime,
+          fileSource,
+          ckt3DailyPeak,
+          ckt2DailyPeak,
+          nktDailyPeak,
+          oilDailyPeak,
+          ckt3PeakTime,
+          ckt2PeakTime,
+          nktPeakTime,
+          oilPeakTime,
+        });
       };
 
       setUploadedOldDbUploadStatus({
@@ -494,12 +567,12 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
         let dateIdx = headers.findIndex((h) => h.includes('date') || h.includes('day'));
         if (dateIdx === -1) dateIdx = 0;
 
-        let ckt3Idx = headers.findIndex((h) => h.includes('ckt3') || h.includes('ckt 3') || h.includes('ckt #3') || h.includes('115kv_3') || h.includes('kmb'));
-        let ckt2Idx = headers.findIndex((h) => h.includes('ckt2') || h.includes('ckt 2') || h.includes('ckt #2') || h.includes('115kv_2') || h.includes('kma'));
-        let nktIdx = headers.findIndex((h) => h.includes('nkt') || h.includes('07wb01'));
-        let oilIdx = headers.findIndex((h) => h.includes('oil') || h.includes('10wb01'));
+        let ckt3Idx = headers.findIndex((h) => (h.includes('ckt3') || h.includes('ckt 3') || h.includes('ckt #3') || h.includes('115kv_3') || h.includes('kmb')) && !h.includes('daily_peak') && !h.includes('peak_time'));
+        let ckt2Idx = headers.findIndex((h) => (h.includes('ckt2') || h.includes('ckt 2') || h.includes('ckt #2') || h.includes('115kv_2') || h.includes('kma')) && !h.includes('daily_peak') && !h.includes('peak_time'));
+        let nktIdx = headers.findIndex((h) => (h.includes('nkt') || h.includes('07wb01')) && !h.includes('daily_peak') && !h.includes('peak_time'));
+        let oilIdx = headers.findIndex((h) => (h.includes('oil') || h.includes('10wb01')) && !h.includes('daily_peak') && !h.includes('peak_time'));
         let totalIdx = headers.findIndex((h) => h.includes('total') || h.includes('island'));
-        let timeIdx = headers.findIndex((h) => h.includes('time') || h.includes('peak_time'));
+        let timeIdx = headers.findIndex((h) => (h === 'peak_time' || h.includes('peak_time') || h.includes('time')) && !h.includes('ckt') && !h.includes('nkt') && !h.includes('oil'));
         let srcIdx = headers.findIndex((h) => h.includes('source') || h.includes('file'));
 
         if (ckt3Idx === -1) ckt3Idx = 1;
@@ -509,6 +582,25 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
         if (totalIdx === -1) totalIdx = 5;
         if (timeIdx === -1) timeIdx = 6;
         if (srcIdx === -1) srcIdx = 7;
+
+        // Columns I to P (indices 8 to 15)
+        let ckt3DailyIdx = headers.findIndex((h) => h.includes('ckt3_daily_peak'));
+        let ckt2DailyIdx = headers.findIndex((h) => h.includes('ckt2_daily_peak'));
+        let nktDailyIdx = headers.findIndex((h) => h.includes('nkt_daily_peak'));
+        let oilDailyIdx = headers.findIndex((h) => h.includes('oil_daily_peak'));
+        let ckt3TimeIdx = headers.findIndex((h) => h.includes('ckt3_peak_time'));
+        let ckt2TimeIdx = headers.findIndex((h) => h.includes('ckt2_peak_time'));
+        let nktTimeIdx = headers.findIndex((h) => h.includes('nkt_peak_time'));
+        let oilTimeIdx = headers.findIndex((h) => h.includes('oil_peak_time'));
+
+        if (ckt3DailyIdx === -1) ckt3DailyIdx = 8;
+        if (ckt2DailyIdx === -1) ckt2DailyIdx = 9;
+        if (nktDailyIdx === -1) nktDailyIdx = 10;
+        if (oilDailyIdx === -1) oilDailyIdx = 11;
+        if (ckt3TimeIdx === -1) ckt3TimeIdx = 12;
+        if (ckt2TimeIdx === -1) ckt2TimeIdx = 13;
+        if (nktTimeIdx === -1) nktTimeIdx = 14;
+        if (oilTimeIdx === -1) oilTimeIdx = 15;
 
         const parseNumToken = (token?: string): number => {
           if (!token) return 0;
@@ -530,16 +622,58 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
           }
           if (!isoDate) continue;
 
-          const ckt3 = parseNumToken(rawParts[ckt3Idx]);
-          const ckt2 = parseNumToken(rawParts[ckt2Idx]);
-          const nkt = parseNumToken(rawParts[nktIdx]);
-          const oil = parseNumToken(rawParts[oilIdx]);
-          let total = parseNumToken(rawParts[totalIdx]);
-          if (total <= 0) total = ckt3 + ckt2 + nkt + oil;
+          const hasExtendedCols = rawParts.length >= 12;
+          const ckt3 = Number(parseNumToken(rawParts[ckt3Idx]).toFixed(2));
+          const ckt2 = Number(parseNumToken(rawParts[ckt2Idx]).toFixed(2));
+          const nkt = Number(parseNumToken(rawParts[nktIdx]).toFixed(2));
+          const oil = Number(parseNumToken(rawParts[oilIdx]).toFixed(2));
+          const sumFourCircuits = Number((ckt3 + ckt2 + nkt + oil).toFixed(2));
+          const rawTotal = Number(parseNumToken(rawParts[totalIdx]).toFixed(2));
+          const total = hasExtendedCols
+            ? sumFourCircuits > 0
+              ? sumFourCircuits
+              : rawTotal
+            : rawTotal > 0
+            ? rawTotal
+            : sumFourCircuits;
           const peakTime = rawParts[timeIdx] || '00:00';
           const fileSource = rawParts[srcIdx] || file.name;
 
-          newMap.set(isoDate, { ckt3, ckt2, nkt, oil, total, peakTime, fileSource });
+          const ckt3DailyPeak = hasExtendedCols
+            ? Number((parseNumToken(rawParts[ckt3DailyIdx]) || ckt3).toFixed(2))
+            : ckt3;
+          const ckt2DailyPeak = hasExtendedCols
+            ? Number((parseNumToken(rawParts[ckt2DailyIdx]) || ckt2).toFixed(2))
+            : ckt2;
+          const nktDailyPeak = hasExtendedCols
+            ? Number((parseNumToken(rawParts[nktDailyIdx]) || nkt).toFixed(2))
+            : nkt;
+          const oilDailyPeak = hasExtendedCols
+            ? Number((parseNumToken(rawParts[oilDailyIdx]) || oil).toFixed(2))
+            : oil;
+
+          const ckt3PeakTime = rawParts[ckt3TimeIdx] || peakTime;
+          const ckt2PeakTime = rawParts[ckt2TimeIdx] || peakTime;
+          const nktPeakTime = rawParts[nktTimeIdx] || peakTime;
+          const oilPeakTime = rawParts[oilTimeIdx] || peakTime;
+
+          newMap.set(isoDate, {
+            ckt3,
+            ckt2,
+            nkt,
+            oil,
+            total,
+            peakTime,
+            fileSource,
+            ckt3DailyPeak,
+            ckt2DailyPeak,
+            nktDailyPeak,
+            oilDailyPeak,
+            ckt3PeakTime,
+            ckt2PeakTime,
+            nktPeakTime,
+            oilPeakTime,
+          });
         }
 
         // Secondary fallback via XLSX parser if custom delimiter split yielded 0 rows
@@ -662,9 +796,7 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
 
       setDbExportTotalSteps(sortedDates.length);
 
-      let csvRows = [
-        'Date,Ckt3_Max_MW,Ckt2_Max_MW,33kV_NKT_Max_MW,33kV_Oil_Max_MW,Total_Island_Max_MW,Peak_Time,File_Source',
-      ];
+      const csvRows = [POWER_DATABASE_CSV_HEADER];
 
       let idx = 0;
       for (const d of sortedDates) {
@@ -672,47 +804,26 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
         setDbExportCurrentStep(idx);
         setDbExportProgressMessage(`Processing date ${d} (${idx} of ${sortedDates.length})`);
 
-        let recordToUse: { ckt3: number; ckt2: number; nkt: number; oil: number; total: number; peakTime: string; fileSource: string } | null = null;
+        let recordToUse: DailyPowerDatabaseRecord | null = null;
 
-        // If uploaded old DB has this date, preserve it unless Target Folder 2 has re-scanned newer data, but keeping old DB record is standard for continuous update unless missing
-        if (uploadedOldDbRecords && uploadedOldDbRecords.has(d)) {
-          recordToUse = uploadedOldDbRecords.get(d)!;
-        } else {
-          let summary = externalSummaries?.get(d) || allLoadedSummaries.get(d);
-          if (summary && isSyntheticPowerSummary(summary)) {
-            summary = undefined;
-          }
-          if (!summary && ensurePowerSummaryForDate) {
-            summary = (await ensurePowerSummaryForDate(d, true)) || undefined;
-          }
-          if (summary && !isSyntheticPowerSummary(summary)) {
-            const m = summary.metrics;
-            const fName = summary.filesLoaded?.[0]?.fileName || 'scanned';
-            recordToUse = {
-              ckt3: m.circuit_115kv_3.peakMW,
-              ckt2: m.circuit_115kv_2.peakMW,
-              nkt: m.circuit_33kv_nkt.peakMW,
-              oil: m.circuit_33kv_oil.peakMW,
-              total: m.total.peakMW,
-              peakTime: m.total.peakTime,
-              fileSource: fName,
-            };
-          } else {
-            recordToUse = {
-              ckt3: 0,
-              ckt2: 0,
-              nkt: 0,
-              oil: 0,
-              total: 0,
-              peakTime: '00:00',
-              fileSource: 'none',
-            };
-          }
+        // Prefer freshly scanned / loaded daily summary so all 16 columns (A-P) have exact 15-min interval & circuit peaks
+        let summary = externalSummaries?.get(d) || allLoadedSummaries.get(d);
+        if (summary && isSyntheticPowerSummary(summary)) {
+          summary = undefined;
+        }
+        if (!summary && (!uploadedOldDbRecords || !uploadedOldDbRecords.has(d)) && ensurePowerSummaryForDate) {
+          summary = (await ensurePowerSummaryForDate(d, true)) || undefined;
         }
 
-        csvRows.push(
-          `${d},${recordToUse.ckt3.toFixed(2)},${recordToUse.ckt2.toFixed(2)},${recordToUse.nkt.toFixed(2)},${recordToUse.oil.toFixed(2)},${recordToUse.total.toFixed(2)},${recordToUse.peakTime},${recordToUse.fileSource}`
-        );
+        if (summary && !isSyntheticPowerSummary(summary)) {
+          recordToUse = extractDailyPowerDatabaseRecord(summary);
+        } else if (uploadedOldDbRecords && uploadedOldDbRecords.has(d)) {
+          recordToUse = uploadedOldDbRecords.get(d)!;
+        } else {
+          recordToUse = extractDailyPowerDatabaseRecord(null);
+        }
+
+        csvRows.push(formatDailyPowerDatabaseCsvRow(d, recordToUse));
 
         // Small yield for smooth UI animation update
         await new Promise((r) => setTimeout(r, 5));
@@ -779,6 +890,14 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
     try {
       const mergedMap = new Map(uploadedOldDbRecords);
 
+      // Enrich any existing dates in mergedMap if their full 15-min interval summary is already loaded in memory
+      mergedMap.forEach((existingRec, dKey) => {
+        const memSummary = externalSummaries?.get(dKey) || allLoadedSummaries.get(dKey);
+        if (memSummary && !isSyntheticPowerSummary(memSummary)) {
+          mergedMap.set(dKey, extractDailyPowerDatabaseRecord(memSummary));
+        }
+      });
+
       let idx = 0;
       for (const d of datesToFetch) {
         idx++;
@@ -793,31 +912,7 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
           summary = (await ensurePowerSummaryForDate(d, true)) || undefined;
         }
 
-        let record: { ckt3: number; ckt2: number; nkt: number; oil: number; total: number; peakTime: string; fileSource: string };
-        if (summary && !isSyntheticPowerSummary(summary)) {
-          const m = summary.metrics;
-          const fName = summary.filesLoaded?.[0]?.fileName || 'scanned';
-          record = {
-            ckt3: m.circuit_115kv_3.peakMW,
-            ckt2: m.circuit_115kv_2.peakMW,
-            nkt: m.circuit_33kv_nkt.peakMW,
-            oil: m.circuit_33kv_oil.peakMW,
-            total: m.total.peakMW,
-            peakTime: m.total.peakTime,
-            fileSource: fName,
-          };
-        } else {
-          record = {
-            ckt3: 0,
-            ckt2: 0,
-            nkt: 0,
-            oil: 0,
-            total: 0,
-            peakTime: '00:00',
-            fileSource: 'none',
-          };
-        }
-
+        const record = extractDailyPowerDatabaseRecord(summary);
         mergedMap.set(d, record);
         await new Promise((r) => setTimeout(r, 5));
       }
@@ -825,15 +920,11 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
       setDbExportProgressMessage('Generating updated CSV database file...');
       const allSortedDates = Array.from(mergedMap.keys()).sort();
 
-      let csvRows = [
-        'Date,Ckt3_Max_MW,Ckt2_Max_MW,33kV_NKT_Max_MW,33kV_Oil_Max_MW,Total_Island_Max_MW,Peak_Time,File_Source',
-      ];
+      const csvRows = [POWER_DATABASE_CSV_HEADER];
 
       for (const d of allSortedDates) {
         const r = mergedMap.get(d)!;
-        csvRows.push(
-          `${d},${r.ckt3.toFixed(2)},${r.ckt2.toFixed(2)},${r.nkt.toFixed(2)},${r.oil.toFixed(2)},${r.total.toFixed(2)},${r.peakTime},${r.fileSource}`
-        );
+        csvRows.push(formatDailyPowerDatabaseCsvRow(d, r));
       }
 
       const csvContent = csvRows.join('\n');
@@ -2155,6 +2246,40 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
           >
             Option 2: Updating Existing CSV database
           </button>
+        </div>
+
+        {/* 16-Column (A to P) Schema Specification Banner */}
+        <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/80 text-[11px] text-slate-600 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-bold text-slate-800">
+              16-Column Database Structure (Columns A to P) — 15-Min Interval Coincident Peak &amp; Worst-Case Individual Circuit Peaks:
+            </span>
+            <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-blue-100 text-blue-800 font-bold">
+              Col F = Col B + Col C + Col D + Col E (Simultaneous 15-Min Peak)
+            </span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
+            <div className="bg-white rounded-xl p-2.5 border border-slate-200/70">
+              <div className="font-bold text-blue-700 mb-1">
+                Columns A–H: Actual Coincident 15-Min Daily Island Peak
+              </div>
+              <ul className="space-y-0.5 text-slate-600 font-mono text-[10px]">
+                <li>• <strong>Col A:</strong> Date (YYYY-MM-DD)</li>
+                <li>• <strong>Col B–E:</strong> Power value at time of daily peak for each circuit (Ckt3, Ckt2, 33kV NKT, 33kV Oil)</li>
+                <li>• <strong>Col F:</strong> Total Island Max MW (Summation of Col B to E at 15-min peak)</li>
+                <li>• <strong>Col G–H:</strong> Time of peak (Col G) &amp; File Source reference (Col H)</li>
+              </ul>
+            </div>
+            <div className="bg-white rounded-xl p-2.5 border border-slate-200/70">
+              <div className="font-bold text-amber-700 mb-1">
+                Columns I–P: Time-Independent Individual Circuit Daily Peaks (Worst-Case)
+              </div>
+              <ul className="space-y-0.5 text-slate-600 font-mono text-[10px]">
+                <li>• <strong>Col I–L:</strong> Daily peak power value of each circuit (Ckt3, Ckt2, 33kV NKT, 33kV Oil)</li>
+                <li>• <strong>Col M–P:</strong> Time of peak for each individual circuit daily peak</li>
+              </ul>
+            </div>
+          </div>
         </div>
 
         {dbBuildMode === 'new' ? (

@@ -76,6 +76,21 @@ export interface CircuitDailyPeakPower {
   oil33MaxMW: number;
   totalIslandMaxMW: number;
   fiberMaxTempC: number;
+  // Extended 16-column (Columns A to P) fields
+  peakTime?: string;
+  fileSource?: string;
+  ckt3AtPeakMW?: number;
+  ckt2AtPeakMW?: number;
+  nkt33AtPeakMW?: number;
+  oil33AtPeakMW?: number;
+  ckt3DailyPeakMW?: number;
+  ckt2DailyPeakMW?: number;
+  nkt33DailyPeakMW?: number;
+  oil33DailyPeakMW?: number;
+  ckt3PeakTime?: string;
+  ckt2PeakTime?: string;
+  nkt33PeakTime?: string;
+  oil33PeakTime?: string;
 }
 
 export interface OrgSectionHourlyRecord {
@@ -371,8 +386,29 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
     savedDefaultPanel2 = p2;
     memoryPowerPeaksOnly.clear();
     p2.peaks.forEach((pk: CircuitDailyPeakPower) => {
-      memoryPowerPeaksOnly.set(pk.date, pk);
-      memoryCircuitPeaksByDate.set(pk.date, pk);
+      const c3 = Number((pk.ckt3MaxMW ?? 0).toFixed(2));
+      const c2 = Number((pk.ckt2MaxMW ?? 0).toFixed(2));
+      const nk = Number((pk.nkt33MaxMW ?? 0).toFixed(2));
+      const oi = Number((pk.oil33MaxMW ?? 0).toFixed(2));
+      const sumAtPeak = Number(
+        (
+          (pk.ckt3AtPeakMW ?? c3) +
+          (pk.ckt2AtPeakMW ?? c2) +
+          (pk.nkt33AtPeakMW ?? nk) +
+          (pk.oil33AtPeakMW ?? oi)
+        ).toFixed(2)
+      );
+      const rawTot = Number((pk.totalIslandMaxMW || 0).toFixed(2));
+      const normalizedPk: CircuitDailyPeakPower = {
+        ...pk,
+        ckt3MaxMW: c3,
+        ckt2MaxMW: c2,
+        nkt33MaxMW: nk,
+        oil33MaxMW: oi,
+        totalIslandMaxMW: rawTot > 0 ? rawTot : sumAtPeak,
+      };
+      memoryPowerPeaksOnly.set(pk.date, normalizedPk);
+      memoryCircuitPeaksByDate.set(pk.date, normalizedPk);
     });
     memoryPanel2Info = p2.info || memoryPanel2Info;
     try {
@@ -621,10 +657,16 @@ function initFromStorage() {
       } else {
         try {
           const parsedPower: CircuitDailyPeakPower[] = JSON.parse(rawPower);
-          parsedPower.forEach((p) => {
-            memoryPowerPeaksOnly.set(p.date, p);
-            memoryCircuitPeaksByDate.set(p.date, p);
-          });
+          if (parsedPower.length > 0 && parsedPower[0].ckt3AtPeakMW === undefined) {
+            localStorage.removeItem(STORAGE_KEY_POWER_PEAKS);
+            localStorage.removeItem(STORAGE_KEY_PANEL2_INFO);
+            memoryPanel2Info = null;
+          } else {
+            parsedPower.forEach((p) => {
+              memoryPowerPeaksOnly.set(p.date, p);
+              memoryCircuitPeaksByDate.set(p.date, p);
+            });
+          }
         } catch (e) {}
       }
     }
@@ -946,34 +988,62 @@ function rebuildIndexes() {
   }
 
   dateMap.forEach((v, date) => {
-    const totalCalc = v.total > 0 ? v.total : (v.ckt3 + v.ckt2 + v.nkt33 + v.oil33);
+    const c3 = Number(v.ckt3.toFixed(2));
+    const c2 = Number(v.ckt2.toFixed(2));
+    const nk = Number(v.nkt33.toFixed(2));
+    const oi = Number(v.oil33.toFixed(2));
+    const sum4 = Number((c3 + c2 + nk + oi).toFixed(2));
+    const totalCalc = v.total > 0 ? v.total : sum4;
     memoryCircuitPeaksByDate.set(date, {
       date,
       year: date.slice(0, 4),
       monthDay: date.slice(5),
-      ckt3MaxMW: Number(v.ckt3.toFixed(2)),
-      ckt2MaxMW: Number(v.ckt2.toFixed(2)),
-      nkt33MaxMW: Number(v.nkt33.toFixed(2)),
-      oil33MaxMW: Number(v.oil33.toFixed(2)),
+      ckt3MaxMW: c3,
+      ckt2MaxMW: c2,
+      nkt33MaxMW: nk,
+      oil33MaxMW: oi,
       totalIslandMaxMW: Number(totalCalc.toFixed(2)),
       fiberMaxTempC: Number(v.tfMax.toFixed(2)),
     });
   });
 
-  // Re-apply power peak records from Target Folder 4 scanning
+  // Re-apply power peak records from Target Folder 2 / Panel 2 scanning
   memoryPowerPeaksOnly.forEach((p, d) => {
     const existing = memoryCircuitPeaksByDate.get(d);
+    const c3 = Number((p.ckt3MaxMW !== undefined ? p.ckt3MaxMW : existing?.ckt3MaxMW || 0).toFixed(2));
+    const c2 = Number((p.ckt2MaxMW !== undefined ? p.ckt2MaxMW : existing?.ckt2MaxMW || 0).toFixed(2));
+    const nk = Number((p.nkt33MaxMW !== undefined ? p.nkt33MaxMW : existing?.nkt33MaxMW || 0).toFixed(2));
+    const oi = Number((p.oil33MaxMW !== undefined ? p.oil33MaxMW : existing?.oil33MaxMW || 0).toFixed(2));
+    const sumAtPeak = Number(
+      (
+        (p.ckt3AtPeakMW ?? c3) +
+        (p.ckt2AtPeakMW ?? c2) +
+        (p.nkt33AtPeakMW ?? nk) +
+        (p.oil33AtPeakMW ?? oi)
+      ).toFixed(2)
+    );
+    const rawTot = Number((p.totalIslandMaxMW || existing?.totalIslandMaxMW || 0).toFixed(2));
+    const tot = rawTot > 0 ? rawTot : sumAtPeak;
     if (existing) {
       memoryCircuitPeaksByDate.set(d, {
         ...existing,
-        ckt3MaxMW: p.ckt3MaxMW || existing.ckt3MaxMW,
-        ckt2MaxMW: p.ckt2MaxMW || existing.ckt2MaxMW,
-        nkt33MaxMW: p.nkt33MaxMW || existing.nkt33MaxMW,
-        oil33MaxMW: p.oil33MaxMW || existing.oil33MaxMW,
-        totalIslandMaxMW: p.totalIslandMaxMW || existing.totalIslandMaxMW,
+        ...p,
+        ckt3MaxMW: c3,
+        ckt2MaxMW: c2,
+        nkt33MaxMW: nk,
+        oil33MaxMW: oi,
+        totalIslandMaxMW: tot,
+        fiberMaxTempC: existing.fiberMaxTempC,
       });
     } else {
-      memoryCircuitPeaksByDate.set(d, p);
+      memoryCircuitPeaksByDate.set(d, {
+        ...p,
+        ckt3MaxMW: c3,
+        ckt2MaxMW: c2,
+        nkt33MaxMW: nk,
+        oil33MaxMW: oi,
+        totalIslandMaxMW: tot,
+      });
     }
   });
 }
@@ -1547,7 +1617,7 @@ export async function saveUploadedPowerDatabase(
 
     const delimiter = lines[0].includes(';') ? ';' : ',';
     const header = lines[0].split(delimiter).map((c) => c.replace(/^["']|["']$/g, '').trim().toLowerCase());
-    let dateIdx = header.findIndex((c) => c.includes('date') || c.includes('time') || c.includes('day') || c.includes('timestamp') || c.includes('period'));
+    let dateIdx = header.findIndex((c) => c === 'date' || c.includes('date') || c.includes('day'));
     if (dateIdx === -1) {
       // Auto-detect date column by inspecting sample rows
       for (let r = 1; r < Math.min(lines.length, 5); r++) {
@@ -1563,11 +1633,23 @@ export async function saveUploadedPowerDatabase(
       if (dateIdx === -1) dateIdx = 0;
     }
 
-    let ckt3Idx = header.findIndex((c) => c.includes('ckt3') || c.includes('circuit #3') || c.includes('circuit 3') || c.includes('03yb01'));
-    let ckt2Idx = header.findIndex((c) => c.includes('ckt2') || c.includes('circuit #2') || c.includes('circuit 2') || c.includes('04yb01'));
-    let nktIdx = header.findIndex((c) => c.includes('nkt') || c.includes('07wb01'));
-    let oilIdx = header.findIndex((c) => c.includes('oil') || c.includes('10wb01'));
+    let ckt3Idx = header.findIndex((c) => (c.includes('ckt3') || c.includes('circuit #3') || c.includes('circuit 3') || c.includes('03yb01')) && !c.includes('daily_peak') && !c.includes('peak_time'));
+    let ckt2Idx = header.findIndex((c) => (c.includes('ckt2') || c.includes('circuit #2') || c.includes('circuit 2') || c.includes('04yb01')) && !c.includes('daily_peak') && !c.includes('peak_time'));
+    let nktIdx = header.findIndex((c) => (c.includes('nkt') || c.includes('07wb01')) && !c.includes('daily_peak') && !c.includes('peak_time'));
+    let oilIdx = header.findIndex((c) => (c.includes('oil') || c.includes('10wb01')) && !c.includes('daily_peak') && !c.includes('peak_time'));
     let totalIdx = header.findIndex((c) => c.includes('total') || c.includes('island'));
+    let peakTimeIdx = header.findIndex((c) => (c === 'peak_time' || c.includes('peak_time') || c.includes('time')) && !c.includes('ckt') && !c.includes('nkt') && !c.includes('oil'));
+    let fileSrcIdx = header.findIndex((c) => c.includes('source') || c.includes('file'));
+
+    // Columns I to P (indices 8 to 15) for 16-column format
+    let ckt3DailyIdx = header.findIndex((c) => c.includes('ckt3_daily_peak'));
+    let ckt2DailyIdx = header.findIndex((c) => c.includes('ckt2_daily_peak'));
+    let nktDailyIdx = header.findIndex((c) => c.includes('nkt_daily_peak'));
+    let oilDailyIdx = header.findIndex((c) => c.includes('oil_daily_peak'));
+    let ckt3TimeIdx = header.findIndex((c) => c.includes('ckt3_peak_time'));
+    let ckt2TimeIdx = header.findIndex((c) => c.includes('ckt2_peak_time'));
+    let nktTimeIdx = header.findIndex((c) => c.includes('nkt_peak_time'));
+    let oilTimeIdx = header.findIndex((c) => c.includes('oil_peak_time'));
 
     if (dateIdx === -1) dateIdx = 0;
     if (ckt3Idx === -1) ckt3Idx = 1;
@@ -1575,6 +1657,16 @@ export async function saveUploadedPowerDatabase(
     if (nktIdx === -1) nktIdx = 3;
     if (oilIdx === -1) oilIdx = 4;
     if (totalIdx === -1 && header.length > 5) totalIdx = 5;
+    if (peakTimeIdx === -1 && header.length > 6) peakTimeIdx = 6;
+    if (fileSrcIdx === -1 && header.length > 7) fileSrcIdx = 7;
+    if (ckt3DailyIdx === -1) ckt3DailyIdx = 8;
+    if (ckt2DailyIdx === -1) ckt2DailyIdx = 9;
+    if (nktDailyIdx === -1) nktDailyIdx = 10;
+    if (oilDailyIdx === -1) oilDailyIdx = 11;
+    if (ckt3TimeIdx === -1) ckt3TimeIdx = 12;
+    if (ckt2TimeIdx === -1) ckt2TimeIdx = 13;
+    if (nktTimeIdx === -1) nktTimeIdx = 14;
+    if (oilTimeIdx === -1) oilTimeIdx = 15;
 
     const parsedPeaks: CircuitDailyPeakPower[] = [];
     const datesSet = new Set<string>();
@@ -1592,23 +1684,69 @@ export async function saveUploadedPowerDatabase(
       if (!formattedDate) continue;
       datesSet.add(formattedDate);
 
-      const ckt3 = ckt3Idx >= 0 && parts[ckt3Idx] ? parseFloat(parts[ckt3Idx]) || 0 : 0;
-      const ckt2 = ckt2Idx >= 0 && parts[ckt2Idx] ? parseFloat(parts[ckt2Idx]) || 0 : 0;
-      const nkt = nktIdx >= 0 && parts[nktIdx] ? parseFloat(parts[nktIdx]) || 0 : 0;
-      const oil = oilIdx >= 0 && parts[oilIdx] ? parseFloat(parts[oilIdx]) || 0 : 0;
-      let total = totalIdx >= 0 && parts[totalIdx] ? parseFloat(parts[totalIdx]) || 0 : 0;
-      if (total <= 0) total = ckt3 + ckt2 + nkt + oil;
+      const hasExtendedCols = parts.length >= 12;
+      const ckt3AtPeak = Number((ckt3Idx >= 0 && parts[ckt3Idx] ? parseFloat(parts[ckt3Idx]) || 0 : 0).toFixed(2));
+      const ckt2AtPeak = Number((ckt2Idx >= 0 && parts[ckt2Idx] ? parseFloat(parts[ckt2Idx]) || 0 : 0).toFixed(2));
+      const nktAtPeak = Number((nktIdx >= 0 && parts[nktIdx] ? parseFloat(parts[nktIdx]) || 0 : 0).toFixed(2));
+      const oilAtPeak = Number((oilIdx >= 0 && parts[oilIdx] ? parseFloat(parts[oilIdx]) || 0 : 0).toFixed(2));
+      const sumAtPeak = Number((ckt3AtPeak + ckt2AtPeak + nktAtPeak + oilAtPeak).toFixed(2));
+      const rawTotal = totalIdx >= 0 && parts[totalIdx] ? parseFloat(parts[totalIdx]) || 0 : 0;
+
+      // Column F: Total Island Max (coincident 15-min interval peak)
+      const total = hasExtendedCols
+        ? sumAtPeak > 0
+          ? sumAtPeak
+          : Number(rawTotal.toFixed(2))
+        : rawTotal > 0
+        ? Number(rawTotal.toFixed(2))
+        : sumAtPeak;
+
+      const peakTime = (peakTimeIdx >= 0 && parts[peakTimeIdx]) || '00:00';
+      const fileSource = (fileSrcIdx >= 0 && parts[fileSrcIdx]) || fileName;
+
+      // Columns I to L: Individual circuit daily peaks
+      const ckt3Daily = hasExtendedCols
+        ? Number(((parts[ckt3DailyIdx] ? parseFloat(parts[ckt3DailyIdx]) : 0) || ckt3AtPeak).toFixed(2))
+        : ckt3AtPeak;
+      const ckt2Daily = hasExtendedCols
+        ? Number(((parts[ckt2DailyIdx] ? parseFloat(parts[ckt2DailyIdx]) : 0) || ckt2AtPeak).toFixed(2))
+        : ckt2AtPeak;
+      const nktDaily = hasExtendedCols
+        ? Number(((parts[nktDailyIdx] ? parseFloat(parts[nktDailyIdx]) : 0) || nktAtPeak).toFixed(2))
+        : nktAtPeak;
+      const oilDaily = hasExtendedCols
+        ? Number(((parts[oilDailyIdx] ? parseFloat(parts[oilDailyIdx]) : 0) || oilAtPeak).toFixed(2))
+        : oilAtPeak;
+
+      const ckt3PeakTime = (hasExtendedCols && parts[ckt3TimeIdx]) || peakTime;
+      const ckt2PeakTime = (hasExtendedCols && parts[ckt2TimeIdx]) || peakTime;
+      const nktPeakTime = (hasExtendedCols && parts[nktTimeIdx]) || peakTime;
+      const oilPeakTime = (hasExtendedCols && parts[oilTimeIdx]) || peakTime;
 
       const peak: CircuitDailyPeakPower = {
         date: formattedDate,
         year: formattedDate.slice(0, 4),
         monthDay: formattedDate.slice(5),
-        ckt3MaxMW: Number(ckt3.toFixed(2)),
-        ckt2MaxMW: Number(ckt2.toFixed(2)),
-        nkt33MaxMW: Number(nkt.toFixed(2)),
-        oil33MaxMW: Number(oil.toFixed(2)),
-        totalIslandMaxMW: Number(total.toFixed(2)),
+        ckt3MaxMW: ckt3Daily,
+        ckt2MaxMW: ckt2Daily,
+        nkt33MaxMW: nktDaily,
+        oil33MaxMW: oilDaily,
+        totalIslandMaxMW: total,
         fiberMaxTempC: 0,
+        peakTime,
+        fileSource,
+        ckt3AtPeakMW: ckt3AtPeak,
+        ckt2AtPeakMW: ckt2AtPeak,
+        nkt33AtPeakMW: nktAtPeak,
+        oil33AtPeakMW: oilAtPeak,
+        ckt3DailyPeakMW: ckt3Daily,
+        ckt2DailyPeakMW: ckt2Daily,
+        nkt33DailyPeakMW: nktDaily,
+        oil33DailyPeakMW: oilDaily,
+        ckt3PeakTime,
+        ckt2PeakTime,
+        nkt33PeakTime: nktPeakTime,
+        oil33PeakTime: oilPeakTime,
       };
 
       parsedPeaks.push(peak);
@@ -1652,22 +1790,23 @@ export async function saveUploadedPowerDatabase(
 
         // Find numbers in row parts
         const nums = parts.map((p) => parseFloat(p)).filter((n) => !isNaN(n));
-        const ckt3 = nums[0] !== undefined ? nums[0] : 35;
-        const ckt2 = nums[1] !== undefined ? nums[1] : 30;
-        const nkt = nums[2] !== undefined ? nums[2] : 12;
-        const oil = nums[3] !== undefined ? nums[3] : 10;
-        let total = nums[4] !== undefined ? nums[4] : (ckt3 + ckt2 + nkt + oil);
-        if (total <= 0) total = ckt3 + ckt2 + nkt + oil;
+        const ckt3 = Number((nums[0] !== undefined ? nums[0] : 35).toFixed(2));
+        const ckt2 = Number((nums[1] !== undefined ? nums[1] : 30).toFixed(2));
+        const nkt = Number((nums[2] !== undefined ? nums[2] : 12).toFixed(2));
+        const oil = Number((nums[3] !== undefined ? nums[3] : 10).toFixed(2));
+        const sumFour = Number((ckt3 + ckt2 + nkt + oil).toFixed(2));
+        const rawTotal = nums[4] !== undefined ? nums[4] : sumFour;
+        const total = sumFour > 0 ? sumFour : Number(rawTotal.toFixed(2));
 
         const peak: CircuitDailyPeakPower = {
           date: formattedDate,
           year: yr,
           monthDay: `${mo}-${da}`,
-          ckt3MaxMW: Number(ckt3.toFixed(2)),
-          ckt2MaxMW: Number(ckt2.toFixed(2)),
-          nkt33MaxMW: Number(nkt.toFixed(2)),
-          oil33MaxMW: Number(oil.toFixed(2)),
-          totalIslandMaxMW: Number(total.toFixed(2)),
+          ckt3MaxMW: ckt3,
+          ckt2MaxMW: ckt2,
+          nkt33MaxMW: nkt,
+          oil33MaxMW: oil,
+          totalIslandMaxMW: total,
           fiberMaxTempC: 0,
         };
 
@@ -2302,10 +2441,10 @@ export async function syncPanel2FromFastEndpoint(url: string): Promise<{
       const sortedDates = p2.peaks.map((p: CircuitDailyPeakPower) => p.date).sort();
       const fileName =
         p2.info?.name ||
-        'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-18_to_2026-10-23.csv';
+        'Daily_Maximum_Power_Consumption_Database_Updated_2025-07-31_to_2026-10-26.csv';
       const dateRange = p2.info?.dateRange || {
-        firstDate: sortedDates[0] || '2025-07-01',
-        latestDate: sortedDates[sortedDates.length - 1] || '2026-10-23',
+        firstDate: sortedDates[0] || '2021-11-28',
+        latestDate: sortedDates[sortedDates.length - 1] || '2026-10-26',
       };
       const info: DataPanelSourceInfo = {
         ...(p2.info || {}),
@@ -2558,20 +2697,20 @@ export const KNOWN_DEFAULT_GOOGLE_DRIVE_FILES: Record<
 > = {
   // Folder 1: Daily Peak Temp
   '1CMSH2f5hAl0N6F3PHhpr9mwStcX29kgS': {
-    fileId: '1awYIr-GJNqlG5clQa6C12_XMJ_mQRbce',
-    fileName: 'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
+    fileId: '1GQUwUGgFliauqXJd2reNsUT9ArifUDen',
+    fileName: 'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-10-26.xlsx',
     format: 'xlsx',
   },
   // Folder 2: 4-Circuit Power Record
   '1jqS95Z-nF1SivlJFuka8CcIKiyFBMrZ6': {
-    fileId: '1RkqwwAwFjw4lF8YAA30hxLW1reYoqSE6',
-    fileName: 'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-18_to_2026-10-23.csv',
+    fileId: '1H2JhkJ1y_ZsZDksIko6AMKwM40zIfhyD',
+    fileName: 'Daily_Maximum_Power_Consumption_Database_Updated_2025-07-31_to_2026-10-26.csv',
     format: 'csv',
   },
   // Folder 3: 24-Hour Section Profile
   '15rgLYl3V7sqPDNPY8zOLEz9eDBtZLj2_': {
-    fileId: '1ThUhJl74Ly_7HpHgsAxEfW2qc9RJYaK0',
-    fileName: 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
+    fileId: '1jhWEfxnurZ32G-ck9Tw8Ob_S7EJ7mKay',
+    fileName: 'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-10-26.xlsx',
     format: 'xlsx',
   },
 };
@@ -2993,8 +3132,29 @@ export async function syncAllPublicSharedTargetFolders(
         );
         memoryPowerPeaksOnly.clear();
         p2Cached.peaks.forEach((pk: CircuitDailyPeakPower) => {
-          memoryPowerPeaksOnly.set(pk.date, pk);
-          memoryCircuitPeaksByDate.set(pk.date, pk);
+          const c3 = Number((pk.ckt3MaxMW ?? 0).toFixed(2));
+          const c2 = Number((pk.ckt2MaxMW ?? 0).toFixed(2));
+          const nk = Number((pk.nkt33MaxMW ?? 0).toFixed(2));
+          const oi = Number((pk.oil33MaxMW ?? 0).toFixed(2));
+          const sumAtPeak = Number(
+            (
+              (pk.ckt3AtPeakMW ?? c3) +
+              (pk.ckt2AtPeakMW ?? c2) +
+              (pk.nkt33AtPeakMW ?? nk) +
+              (pk.oil33AtPeakMW ?? oi)
+            ).toFixed(2)
+          );
+          const rawTot = Number((pk.totalIslandMaxMW || 0).toFixed(2));
+          const normalizedPk: CircuitDailyPeakPower = {
+            ...pk,
+            ckt3MaxMW: c3,
+            ckt2MaxMW: c2,
+            nkt33MaxMW: nk,
+            oil33MaxMW: oi,
+            totalIslandMaxMW: rawTot > 0 ? rawTot : sumAtPeak,
+          };
+          memoryPowerPeaksOnly.set(pk.date, normalizedPk);
+          memoryCircuitPeaksByDate.set(pk.date, normalizedPk);
         });
         savedDefaultPanel2 = p2Cached;
         needsIndexRebuild = true;
@@ -3010,12 +3170,12 @@ export async function syncAllPublicSharedTargetFolders(
           sourceType: 'googledrive',
           name:
             p2Cached.info?.name ||
-            'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-23_to_2026-10-26.csv',
+            'Daily_Maximum_Power_Consumption_Database_Updated_2025-07-31_to_2026-10-26.csv',
           remoteUrl: links.panel2Url,
           updatedAt: p2Cached.info?.updatedAt || new Date().toISOString(),
           totalDates: p2Cached.peaks.length,
           dateRange: p2Cached.info?.dateRange || {
-            firstDate: sortedP2Dates[0] || '2025-07-01',
+            firstDate: sortedP2Dates[0] || '2021-11-28',
             latestDate: sortedP2Dates[sortedP2Dates.length - 1] || '2026-10-26',
           },
           recordCount: p2Cached.peaks.length,

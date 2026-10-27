@@ -455,11 +455,24 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
           const targetDate = `${yr}-${mmdd}`;
           const p = powerPeakByDate.get(targetDate);
           if (p) {
-            row[`Total_${yr}`] = p.totalIslandMaxMW > 0 ? Number(p.totalIslandMaxMW.toFixed(1)) : null;
-            row[`Ckt3_${yr}`] = p.ckt3MaxMW > 0 ? Number(p.ckt3MaxMW.toFixed(1)) : null;
-            row[`Ckt2_${yr}`] = p.ckt2MaxMW > 0 ? Number(p.ckt2MaxMW.toFixed(1)) : null;
-            row[`Nkt_${yr}`] = p.nkt33MaxMW > 0 ? Number(p.nkt33MaxMW.toFixed(1)) : null;
-            row[`Oil_${yr}`] = p.oil33MaxMW > 0 ? Number(p.oil33MaxMW.toFixed(1)) : null;
+            row[`Total_${yr}`] = p.totalIslandMaxMW > 0 ? Number(p.totalIslandMaxMW.toFixed(2)) : null;
+            row[`Ckt3_${yr}`] = p.ckt3MaxMW > 0 ? Number(p.ckt3MaxMW.toFixed(2)) : null;
+            row[`Ckt2_${yr}`] = p.ckt2MaxMW > 0 ? Number(p.ckt2MaxMW.toFixed(2)) : null;
+            row[`Nkt_${yr}`] = p.nkt33MaxMW > 0 ? Number(p.nkt33MaxMW.toFixed(2)) : null;
+            row[`Oil_${yr}`] = p.oil33MaxMW > 0 ? Number(p.oil33MaxMW.toFixed(2)) : null;
+            row[`PeakTime_${yr}`] = p.peakTime || '';
+            row[`FileSource_${yr}`] = p.fileSource || '';
+            row[`Ckt3AtPeak_${yr}`] = p.ckt3AtPeakMW;
+            row[`Ckt2AtPeak_${yr}`] = p.ckt2AtPeakMW;
+            row[`NktAtPeak_${yr}`] = p.nkt33AtPeakMW;
+            row[`OilAtPeak_${yr}`] = p.oil33AtPeakMW;
+            row[`Ckt3Time_${yr}`] = p.ckt3PeakTime || '';
+            row[`Ckt2Time_${yr}`] = p.ckt2PeakTime || '';
+            row[`NktTime_${yr}`] = p.nkt33PeakTime || '';
+            row[`OilTime_${yr}`] = p.oil33PeakTime || '';
+            row[`WorstCaseSum_${yr}`] = Number(
+              (p.ckt3MaxMW + p.ckt2MaxMW + p.nkt33MaxMW + p.oil33MaxMW).toFixed(2)
+            );
           } else {
             row[`Total_${yr}`] = null;
             row[`Ckt3_${yr}`] = null;
@@ -484,11 +497,24 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
           const targetDate = `${yr}-${selectedMonth}-${day}`;
           const p = powerPeakByDate.get(targetDate);
           if (p) {
-            row[`Total_${yr}`] = p.totalIslandMaxMW > 0 ? Number(p.totalIslandMaxMW.toFixed(1)) : null;
-            row[`Ckt3_${yr}`] = p.ckt3MaxMW > 0 ? Number(p.ckt3MaxMW.toFixed(1)) : null;
-            row[`Ckt2_${yr}`] = p.ckt2MaxMW > 0 ? Number(p.ckt2MaxMW.toFixed(1)) : null;
-            row[`Nkt_${yr}`] = p.nkt33MaxMW > 0 ? Number(p.nkt33MaxMW.toFixed(1)) : null;
-            row[`Oil_${yr}`] = p.oil33MaxMW > 0 ? Number(p.oil33MaxMW.toFixed(1)) : null;
+            row[`Total_${yr}`] = p.totalIslandMaxMW > 0 ? Number(p.totalIslandMaxMW.toFixed(2)) : null;
+            row[`Ckt3_${yr}`] = p.ckt3MaxMW > 0 ? Number(p.ckt3MaxMW.toFixed(2)) : null;
+            row[`Ckt2_${yr}`] = p.ckt2MaxMW > 0 ? Number(p.ckt2MaxMW.toFixed(2)) : null;
+            row[`Nkt_${yr}`] = p.nkt33MaxMW > 0 ? Number(p.nkt33MaxMW.toFixed(2)) : null;
+            row[`Oil_${yr}`] = p.oil33MaxMW > 0 ? Number(p.oil33MaxMW.toFixed(2)) : null;
+            row[`PeakTime_${yr}`] = p.peakTime || '';
+            row[`FileSource_${yr}`] = p.fileSource || '';
+            row[`Ckt3AtPeak_${yr}`] = p.ckt3AtPeakMW;
+            row[`Ckt2AtPeak_${yr}`] = p.ckt2AtPeakMW;
+            row[`NktAtPeak_${yr}`] = p.nkt33AtPeakMW;
+            row[`OilAtPeak_${yr}`] = p.oil33AtPeakMW;
+            row[`Ckt3Time_${yr}`] = p.ckt3PeakTime || '';
+            row[`Ckt2Time_${yr}`] = p.ckt2PeakTime || '';
+            row[`NktTime_${yr}`] = p.nkt33PeakTime || '';
+            row[`OilTime_${yr}`] = p.oil33PeakTime || '';
+            row[`WorstCaseSum_${yr}`] = Number(
+              (p.ckt3MaxMW + p.ckt2MaxMW + p.nkt33MaxMW + p.oil33MaxMW).toFixed(2)
+            );
           } else {
             row[`Total_${yr}`] = null;
             row[`Ckt3_${yr}`] = null;
@@ -525,11 +551,11 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
           for (let i = yrIdx - 1; i >= 0; i--) {
             const prevP = powerPeakByDate.get(`${availableYears[i]}-${p.monthDay}`);
             if (prevP && prevP.totalIslandMaxMW > 0) {
-              prev_totalIslandMW = Number(prevP.totalIslandMaxMW.toFixed(1));
-              prev_ckt3MW = prevP.ckt3MaxMW > 0 ? Number(prevP.ckt3MaxMW.toFixed(1)) : null;
-              prev_ckt2MW = prevP.ckt2MaxMW > 0 ? Number(prevP.ckt2MaxMW.toFixed(1)) : null;
-              prev_nkt33MW = prevP.nkt33MaxMW > 0 ? Number(prevP.nkt33MaxMW.toFixed(1)) : null;
-              prev_oil33MW = prevP.oil33MaxMW > 0 ? Number(prevP.oil33MaxMW.toFixed(1)) : null;
+              prev_totalIslandMW = Number(prevP.totalIslandMaxMW.toFixed(2));
+              prev_ckt3MW = prevP.ckt3MaxMW > 0 ? Number(prevP.ckt3MaxMW.toFixed(2)) : null;
+              prev_ckt2MW = prevP.ckt2MaxMW > 0 ? Number(prevP.ckt2MaxMW.toFixed(2)) : null;
+              prev_nkt33MW = prevP.nkt33MaxMW > 0 ? Number(prevP.nkt33MaxMW.toFixed(2)) : null;
+              prev_oil33MW = prevP.oil33MaxMW > 0 ? Number(prevP.oil33MaxMW.toFixed(2)) : null;
               prevYear = availableYears[i];
               break;
             }
@@ -540,11 +566,24 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
           date: p.date,
           monthDay: p.monthDay,
           year: p.year,
-          totalIslandMW: p.totalIslandMaxMW,
-          ckt3MW: p.ckt3MaxMW,
-          ckt2MW: p.ckt2MaxMW,
-          nkt33MW: p.nkt33MaxMW,
-          oil33MW: p.oil33MaxMW,
+          totalIslandMW: Number(p.totalIslandMaxMW.toFixed(2)),
+          ckt3MW: Number(p.ckt3MaxMW.toFixed(2)),
+          ckt2MW: Number(p.ckt2MaxMW.toFixed(2)),
+          nkt33MW: Number(p.nkt33MaxMW.toFixed(2)),
+          oil33MW: Number(p.oil33MaxMW.toFixed(2)),
+          peakTime: p.peakTime || '',
+          fileSource: p.fileSource || '',
+          ckt3AtPeakMW: p.ckt3AtPeakMW,
+          ckt2AtPeakMW: p.ckt2AtPeakMW,
+          nkt33AtPeakMW: p.nkt33AtPeakMW,
+          oil33AtPeakMW: p.oil33AtPeakMW,
+          ckt3PeakTime: p.ckt3PeakTime || '',
+          ckt2PeakTime: p.ckt2PeakTime || '',
+          nkt33PeakTime: p.nkt33PeakTime || '',
+          oil33PeakTime: p.oil33PeakTime || '',
+          worstCaseSumMW: Number(
+            (p.ckt3MaxMW + p.ckt2MaxMW + p.nkt33MaxMW + p.oil33MaxMW).toFixed(2)
+          ),
           prev_totalIslandMW,
           prev_ckt3MW,
           prev_ckt2MW,
@@ -809,17 +848,18 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     if (prevVal === null) return null;
     const diff = val - prevVal;
     const sign = diff > 0 ? '+' : '';
+    const decimals = unit === 'MW' ? 2 : 1;
     if (diff > 0.05) {
       return (
         <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold whitespace-nowrap">
-          ▲ {sign}{diff.toFixed(1)} {unit} vs {prevYr}
+          ▲ {sign}{diff.toFixed(decimals)} {unit} vs {prevYr}
         </span>
       );
     }
     if (diff < -0.05) {
       return (
         <span className="ml-2 px-1.5 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-500/40 text-[10px] font-bold whitespace-nowrap">
-          ▼ {diff.toFixed(1)} {unit} vs {prevYr}
+          ▼ {diff.toFixed(decimals)} {unit} vs {prevYr}
         </span>
       );
     }
@@ -842,17 +882,18 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     if (typeof prevVal !== 'number' || Number.isNaN(prevVal) || !prevYr) return null;
     const diff = val - prevVal;
     const sign = diff > 0 ? '+' : '';
+    const decimals = unit === 'MW' ? 2 : 1;
     if (diff > 0.05) {
       return (
         <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold whitespace-nowrap">
-          ▲ {sign}{diff.toFixed(1)} {unit} vs {prevYr}
+          ▲ {sign}{diff.toFixed(decimals)} {unit} vs {prevYr}
         </span>
       );
     }
     if (diff < -0.05) {
       return (
         <span className="ml-2 px-1.5 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-500/40 text-[10px] font-bold whitespace-nowrap">
-          ▼ {diff.toFixed(1)} {unit} vs {prevYr}
+          ▼ {diff.toFixed(decimals)} {unit} vs {prevYr}
         </span>
       );
     }
@@ -872,6 +913,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
       color: string;
       dataKey: string;
       deltaBadge: React.ReactNode;
+      peakTime?: string;
+      subDetail?: string;
     }> = [];
 
     if (!rowObj) return items;
@@ -927,7 +970,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     return items;
   };
 
-  // Build hover-identical tooltip details for a Chart 2 (Power Records) row
+  // Build hover-identical tooltip details for a Chart 2 (Power Records) row (supports 16-column A-P schema)
   const buildChart2TooltipItems = (rowObj: Record<string, any>) => {
     const items: Array<{
       name: string;
@@ -936,6 +979,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
       color: string;
       dataKey: string;
       deltaBadge: React.ReactNode;
+      peakTime?: string;
+      subDetail?: string;
     }> = [];
 
     if (!rowObj) return items;
@@ -943,7 +988,20 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     if (!isChronologicalMode) {
       availableYears.forEach((yr, idx) => {
         const col = getYearColor(yr, idx);
-        const pushIfValid = (pfx: string, seriesName: string, seriesColor: string) => {
+        const islandPeakTime = rowObj[`PeakTime_${yr}`] || '';
+        const c3At = rowObj[`Ckt3AtPeak_${yr}`];
+        const c2At = rowObj[`Ckt2AtPeak_${yr}`];
+        const nktAt = rowObj[`NktAtPeak_${yr}`];
+        const oilAt = rowObj[`OilAtPeak_${yr}`];
+        const worstCase = rowObj[`WorstCaseSum_${yr}`];
+
+        const pushIfValid = (
+          pfx: string,
+          seriesName: string,
+          seriesColor: string,
+          peakTimeStr?: string,
+          subDetailStr?: string
+        ) => {
           const val = rowObj[`${pfx}_${yr}`];
           if (typeof val === 'number' && !Number.isNaN(val)) {
             items.push({
@@ -953,29 +1011,77 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
               color: seriesColor,
               dataKey: `${pfx}_${yr}`,
               deltaBadge: buildYoYDeltaBadge(rowObj, pfx, yr, val, 'MW'),
+              peakTime: peakTimeStr || undefined,
+              subDetail: subDetailStr || undefined,
             });
           }
         };
 
+        const totalSubDetail =
+          c3At !== undefined
+            ? `At ${islandPeakTime || 'Peak'}: Ckt3 ${Number(c3At).toFixed(2)} + Ckt2 ${Number(c2At || 0).toFixed(2)} + NKT ${Number(nktAt || 0).toFixed(2)} + Oil ${Number(oilAt || 0).toFixed(2)} MW${
+                worstCase ? ` | Worst-Case (Col I–L): ${Number(worstCase).toFixed(2)} MW` : ''
+              }`
+            : undefined;
+
         if (selectedPowerCircuit === 'combination') {
-          pushIfValid('Total', `Year ${yr} Combination Total (MW)`, col);
+          pushIfValid('Total', `Year ${yr} Combination Total (MW)`, col, islandPeakTime, totalSubDetail);
         } else if (selectedPowerCircuit === 'ckt3') {
-          pushIfValid('Ckt3', `Year ${yr} 115kV Ckt #3 (MW)`, col);
+          pushIfValid(
+            'Ckt3',
+            `Year ${yr} 115kV Ckt #3 (MW)`,
+            col,
+            rowObj[`Ckt3Time_${yr}`],
+            c3At !== undefined ? `At Island Peak (${islandPeakTime || 'Peak'}): ${Number(c3At).toFixed(2)} MW` : undefined
+          );
         } else if (selectedPowerCircuit === 'ckt2') {
-          pushIfValid('Ckt2', `Year ${yr} 115kV Ckt #2 (MW)`, col);
+          pushIfValid(
+            'Ckt2',
+            `Year ${yr} 115kV Ckt #2 (MW)`,
+            col,
+            rowObj[`Ckt2Time_${yr}`],
+            c2At !== undefined ? `At Island Peak (${islandPeakTime || 'Peak'}): ${Number(c2At).toFixed(2)} MW` : undefined
+          );
         } else if (selectedPowerCircuit === 'nkt33') {
-          pushIfValid('Nkt', `Year ${yr} 33kV NKT (MW)`, col);
+          pushIfValid(
+            'Nkt',
+            `Year ${yr} 33kV NKT (MW)`,
+            col,
+            rowObj[`NktTime_${yr}`],
+            nktAt !== undefined ? `At Island Peak (${islandPeakTime || 'Peak'}): ${Number(nktAt).toFixed(2)} MW` : undefined
+          );
         } else if (selectedPowerCircuit === 'oil33') {
-          pushIfValid('Oil', `Year ${yr} 33kV Oil (MW)`, col);
+          pushIfValid(
+            'Oil',
+            `Year ${yr} 33kV Oil (MW)`,
+            col,
+            rowObj[`OilTime_${yr}`],
+            oilAt !== undefined ? `At Island Peak (${islandPeakTime || 'Peak'}): ${Number(oilAt).toFixed(2)} MW` : undefined
+          );
         } else {
           // all_four
-          pushIfValid('Total', `Yr ${yr} Total MW`, col);
-          pushIfValid('Ckt3', `Yr ${yr} Ckt #3`, '#f59e0b');
-          pushIfValid('Ckt2', `Yr ${yr} Ckt #2`, '#38bdf8');
+          pushIfValid('Total', `Yr ${yr} Total MW`, col, islandPeakTime, totalSubDetail);
+          pushIfValid('Ckt3', `Yr ${yr} Ckt #3`, '#f59e0b', rowObj[`Ckt3Time_${yr}`]);
+          pushIfValid('Ckt2', `Yr ${yr} Ckt #2`, '#38bdf8', rowObj[`Ckt2Time_${yr}`]);
+          pushIfValid('Nkt', `Yr ${yr} 33kV NKT`, '#6366f1', rowObj[`NktTime_${yr}`]);
+          pushIfValid('Oil', `Yr ${yr} 33kV Oil`, '#eab308', rowObj[`OilTime_${yr}`]);
         }
       });
     } else {
-      const pushContIfValid = (key: string, seriesName: string, seriesColor: string) => {
+      const islandPeakTime = rowObj.peakTime || '';
+      const c3At = rowObj.ckt3AtPeakMW;
+      const c2At = rowObj.ckt2AtPeakMW;
+      const nktAt = rowObj.nkt33AtPeakMW;
+      const oilAt = rowObj.oil33AtPeakMW;
+      const worstCase = rowObj.worstCaseSumMW;
+
+      const pushContIfValid = (
+        key: string,
+        seriesName: string,
+        seriesColor: string,
+        peakTimeStr?: string,
+        subDetailStr?: string
+      ) => {
         const val = rowObj[key];
         if (typeof val === 'number' && !Number.isNaN(val) && val > 0) {
           items.push({
@@ -985,24 +1091,71 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
             color: seriesColor,
             dataKey: key,
             deltaBadge: buildChronologicalDeltaBadge(rowObj, key, val, 'MW'),
+            peakTime: peakTimeStr || undefined,
+            subDetail: subDetailStr || undefined,
           });
         }
       };
 
+      const totalSubDetail =
+        c3At !== undefined
+          ? `At ${islandPeakTime || 'Peak'}: Ckt3 ${Number(c3At).toFixed(2)} + Ckt2 ${Number(c2At || 0).toFixed(2)} + NKT ${Number(nktAt || 0).toFixed(2)} + Oil ${Number(oilAt || 0).toFixed(2)} MW${
+              worstCase ? ` | Worst-Case (Col I–L): ${Number(worstCase).toFixed(2)} MW` : ''
+            }`
+          : undefined;
+
       if (selectedPowerCircuit === 'combination' || selectedPowerCircuit === 'all_four') {
-        pushContIfValid('totalIslandMW', 'Combination of 4 Circuits (Total Island MW)', '#a855f7');
+        pushContIfValid(
+          'totalIslandMW',
+          'Combination of 4 Circuits (Total Island MW)',
+          '#a855f7',
+          islandPeakTime,
+          totalSubDetail
+        );
       }
       if (selectedPowerCircuit === 'ckt3' || selectedPowerCircuit === 'all_four') {
-        pushContIfValid('ckt3MW', '115kV Circuit #3 Peak (MW)', '#f59e0b');
+        pushContIfValid(
+          'ckt3MW',
+          '115kV Circuit #3 Peak (MW)',
+          '#f59e0b',
+          rowObj.ckt3PeakTime,
+          selectedPowerCircuit === 'ckt3' && c3At !== undefined
+            ? `At Island Peak (${islandPeakTime || 'Peak'}): ${Number(c3At).toFixed(2)} MW`
+            : undefined
+        );
       }
       if (selectedPowerCircuit === 'ckt2' || selectedPowerCircuit === 'all_four') {
-        pushContIfValid('ckt2MW', '115kV Circuit #2 Peak (MW)', '#38bdf8');
+        pushContIfValid(
+          'ckt2MW',
+          '115kV Circuit #2 Peak (MW)',
+          '#38bdf8',
+          rowObj.ckt2PeakTime,
+          selectedPowerCircuit === 'ckt2' && c2At !== undefined
+            ? `At Island Peak (${islandPeakTime || 'Peak'}): ${Number(c2At).toFixed(2)} MW`
+            : undefined
+        );
       }
       if (selectedPowerCircuit === 'nkt33' || selectedPowerCircuit === 'all_four') {
-        pushContIfValid('nkt33MW', '33kV NKT Submarine Peak (MW)', '#6366f1');
+        pushContIfValid(
+          'nkt33MW',
+          '33kV NKT Submarine Peak (MW)',
+          '#6366f1',
+          rowObj.nkt33PeakTime,
+          selectedPowerCircuit === 'nkt33' && nktAt !== undefined
+            ? `At Island Peak (${islandPeakTime || 'Peak'}): ${Number(nktAt).toFixed(2)} MW`
+            : undefined
+        );
       }
       if (selectedPowerCircuit === 'oil33' || selectedPowerCircuit === 'all_four') {
-        pushContIfValid('oil33MW', '33kV Oil-Filled Submarine Peak (MW)', '#eab308');
+        pushContIfValid(
+          'oil33MW',
+          '33kV Oil-Filled Submarine Peak (MW)',
+          '#eab308',
+          rowObj.oil33PeakTime,
+          selectedPowerCircuit === 'oil33' && oilAt !== undefined
+            ? `At Island Peak (${islandPeakTime || 'Peak'}): ${Number(oilAt).toFixed(2)} MW`
+            : undefined
+        );
       }
     }
 
@@ -1110,7 +1263,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
   const powerTopBandHeight = useMemo(() => {
     if (!chart2PeakPoint) return 24;
     if (!isPowerPeakCardOpen) return 44;
-    return Math.max(108, Math.min(168, 56 + chart2PeakPoint.items.length * 23));
+    const subDetailCount = chart2PeakPoint.items.filter((it) => Boolean(it.subDetail)).length;
+    return Math.max(116, Math.min(210, 58 + chart2PeakPoint.items.length * 23 + subDetailCount * 18));
   }, [chart2PeakPoint, isPowerPeakCardOpen]);
 
   // Built-in moveable Peak Callout Card renderer (positioned in non-overlapping top band by default, draggable anywhere)
@@ -1130,6 +1284,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
         color: string;
         dataKey: string;
         deltaBadge: React.ReactNode;
+        peakTime?: string;
+        subDetail?: string;
       }>;
     },
     isOpen: boolean,
@@ -1205,8 +1361,10 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
 
       // Default position is inside the dedicated non-overlapping top band (y = 4) directly above (cx, cy),
       // so the card NEVER overlays the plotted curves unless the user drags it elsewhere.
-      const cardWidth = 325;
-      const estCardHeight = Math.min(260, 52 + peak.items.length * 22);
+      const hasSubDetails = peak.items.some((it) => Boolean(it.subDetail));
+      const subDetailCount = peak.items.filter((it) => Boolean(it.subDetail)).length;
+      const cardWidth = hasSubDetails ? 390 : 335;
+      const estCardHeight = Math.min(290, 52 + peak.items.length * 22 + subDetailCount * 18);
       const baseCardX = Math.max(66, Math.min(cx - cardWidth / 2, 855 - cardWidth));
       const baseCardY = 4;
 
@@ -1381,21 +1539,33 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                       return (
                         <div
                           key={idx}
-                          className={`flex justify-between items-center gap-1.5 rounded px-1 py-0.5 ${
+                          className={`rounded px-1 py-0.5 ${
                             isMaxSeries ? 'bg-slate-900/90 ring-1 ring-white/15' : ''
                           }`}
                           style={{ color: it.color }}
                         >
-                          <span className="truncate" title={it.name}>
-                            {isMaxSeries ? '★ ' : ''}
-                            {it.name}:
-                          </span>
-                          <div className="flex items-center shrink-0">
-                            <span className="font-bold">
-                              {it.value} {it.unit}
+                          <div className="flex justify-between items-center gap-1.5">
+                            <span className="truncate" title={it.name}>
+                              {isMaxSeries ? '★ ' : ''}
+                              {it.name}:
                             </span>
-                            {it.deltaBadge}
+                            <div className="flex items-center shrink-0">
+                              <span className="font-bold">
+                                {it.unit === 'MW' ? Number(it.value).toFixed(2) : it.value} {it.unit}
+                              </span>
+                              {it.peakTime && (
+                                <span className="ml-1 px-1 py-0.2 rounded bg-slate-900 text-slate-300 border border-slate-700 text-[9px]">
+                                  @{it.peakTime}
+                                </span>
+                              )}
+                              {it.deltaBadge}
+                            </div>
                           </div>
+                          {it.subDetail && (
+                            <div className="text-[9px] text-slate-400 font-normal pl-2 pt-0.5 leading-tight">
+                              {it.subDetail}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -2129,32 +2299,35 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                         content={({ active, payload, label }) => {
                           if (!active || !payload || !payload.length) return null;
                           const rowObj = payload[0]?.payload || {};
+                          const hoverItems = buildChart2TooltipItems(rowObj);
                           return (
-                            <div className="bg-slate-950/95 border border-emerald-500/40 rounded-xl p-3 text-xs font-mono shadow-2xl space-y-1.5 min-w-[260px]">
+                            <div className="bg-slate-950/95 border border-emerald-500/40 rounded-xl p-3 text-xs font-mono shadow-2xl space-y-1.5 min-w-[290px]">
                               <div className="font-bold text-emerald-300 border-b border-slate-800 pb-1">
                                 Date / Day: {label}
                               </div>
-                              {payload.map((p, idx) => {
-                                const dataKey = String(p.dataKey || '');
-                                let deltaBadge: React.ReactNode = null;
-                                if (!isChronologicalMode && dataKey.includes('_') && typeof p.value === 'number') {
-                                  const [pfx, yr] = dataKey.split('_');
-                                  deltaBadge = buildYoYDeltaBadge(rowObj, pfx, yr, p.value, 'MW');
-                                } else if (isChronologicalMode && typeof p.value === 'number') {
-                                  deltaBadge = buildChronologicalDeltaBadge(rowObj, dataKey, p.value, 'MW');
-                                }
-                                return (
-                                  <div key={idx} className="flex justify-between items-center gap-2" style={{ color: p.color }}>
-                                    <span>{p.name}:</span>
+                              {hoverItems.map((it, idx) => (
+                                <div key={idx} className="space-y-0.5" style={{ color: it.color }}>
+                                  <div className="flex justify-between items-center gap-2">
+                                    <span>{it.name}:</span>
                                     <div className="flex items-center">
                                       <span className="font-bold">
-                                        {p.value !== null && p.value !== undefined ? `${p.value} MW` : 'N/A'}
+                                        {Number(it.value).toFixed(2)} {it.unit}
                                       </span>
-                                      {deltaBadge}
+                                      {it.peakTime && (
+                                        <span className="ml-1.5 px-1.5 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700 text-[10px]">
+                                          @{it.peakTime}
+                                        </span>
+                                      )}
+                                      {it.deltaBadge}
                                     </div>
                                   </div>
-                                );
-                              })}
+                                  {it.subDetail && (
+                                    <div className="text-[10px] text-slate-400 font-normal pl-2 leading-tight">
+                                      {it.subDetail}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
                             </div>
                           );
                         }}
@@ -2272,6 +2445,26 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                                 strokeWidth={1.6}
                                 strokeDasharray="3 3"
                                 dot={renderPowerComparisonMarker('Ckt2', idx, '#38bdf8')}
+                                connectNulls
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey={`Nkt_${yr}`}
+                                name={`Yr ${yr} 33kV NKT`}
+                                stroke="#6366f1"
+                                strokeWidth={1.5}
+                                strokeDasharray="2 2"
+                                dot={renderPowerComparisonMarker('Nkt', idx, '#6366f1')}
+                                connectNulls
+                              />
+                              <Line
+                                type="monotone"
+                                dataKey={`Oil_${yr}`}
+                                name={`Yr ${yr} 33kV Oil`}
+                                stroke="#eab308"
+                                strokeWidth={1.5}
+                                strokeDasharray="2 2"
+                                dot={renderPowerComparisonMarker('Oil', idx, '#eab308')}
                                 connectNulls
                               />
                             </React.Fragment>

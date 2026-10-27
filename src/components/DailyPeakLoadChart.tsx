@@ -450,21 +450,26 @@ export const DailyPeakLoadChart: React.FC<DailyPeakLoadChartProps> = ({
         }
       });
 
+      const ckt2MaxVal = Number(maxCkt2.toFixed(2));
+      const ckt3MaxVal = Number(maxCkt3.toFixed(2));
+      const nktMaxVal = Number(maxNkt.toFixed(2));
+      const oilMaxVal = Number(maxOil.toFixed(2));
+
       points.push({
         dateKey: d.dateKey,
         formattedDate: summary.formattedDate || d.formattedDate,
         day: summary.day || d.day,
         month: summary.month || d.month,
         year: summary.year || d.year,
-        peakCircuit2: maxCkt2,
+        peakCircuit2: ckt2MaxVal,
         timeCircuit2: timeCkt2,
-        peakCircuit3: maxCkt3,
+        peakCircuit3: ckt3MaxVal,
         timeCircuit3: timeCkt3,
-        peakKnaNkt: maxNkt,
+        peakKnaNkt: nktMaxVal,
         timeKnaNkt: timeNkt,
-        peakKnaOil: maxOil,
+        peakKnaOil: oilMaxVal,
         timeKnaOil: timeOil,
-        peakCombine: maxCombine,
+        peakCombine: Number(maxCombine.toFixed(2)),
         timeCombine: timeCombine,
         sampleCount: summary.dataPoints.length,
       });
