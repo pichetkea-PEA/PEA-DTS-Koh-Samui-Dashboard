@@ -56,7 +56,7 @@ export interface PublicYearlyComparisonPageProps {
   powerSummariesByDate?: Map<string, DailyPowerSummary>;
 }
 
-export type ComparisonMode = 'year_to_year' | 'same_month' | 'continuous';
+export type ComparisonMode = 'year_to_year' | 'same_month' | 'continuous' | 'custom_range';
 export type PowerCircuitFilter = 'combination' | 'ckt3' | 'ckt2' | 'nkt33' | 'oil33' | 'all_four';
 
 const MONTH_NAMES = [
@@ -133,6 +133,30 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     return Array.from(years).sort();
   }, [dbConfig, allRecords, circuitDailyPeaks]);
 
+  // Compute all available dates across both datasets for Custom Range bounds
+  const allAvailableDates = useMemo(() => {
+    const dateSet = new Set<string>();
+    allRecords.forEach((r) => {
+      if (r.date && r.date.length >= 10) dateSet.add(r.date.slice(0, 10));
+    });
+    circuitDailyPeaks.forEach((p) => {
+      if (p.date && p.date.length >= 10) dateSet.add(p.date.slice(0, 10));
+    });
+    return Array.from(dateSet).sort();
+  }, [allRecords, circuitDailyPeaks]);
+
+  const tempAvailableDates = useMemo(() => {
+    const dateSet = new Set<string>();
+    allRecords.forEach((r) => {
+      if (r.date && r.date.length >= 10) dateSet.add(r.date.slice(0, 10));
+    });
+    return Array.from(dateSet).sort();
+  }, [allRecords]);
+
+  const minAvailableDate = allAvailableDates.length > 0 ? allAvailableDates[0] : '';
+  const maxAvailableDate =
+    allAvailableDates.length > 0 ? allAvailableDates[allAvailableDates.length - 1] : '';
+
   const hasAnyDataSource =
     allRecords.length > 0 || (dbConfig.hasDatabase && dbConfig.totalRecords > 0) || circuitDailyPeaks.length > 0;
 
@@ -142,6 +166,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
   const [selectedSectionId, setSelectedSectionId] = useState<string>('2.3');
   const [selectedPhase, setSelectedPhase] = useState<string>(''); // For land cable sections
   const [selectedYear, setSelectedYear] = useState<string>('ALL'); // Default to ALL so full 400+ days timeline is visible immediately
+  const [customStartDate, setCustomStartDate] = useState<string>('');
+  const [customEndDate, setCustomEndDate] = useState<string>('');
   const [activeChartTab, setActiveChartTab] = useState<'both' | 'temp' | 'power'>('both');
   const [selectedPowerCircuit, setSelectedPowerCircuit] = useState<PowerCircuitFilter>('combination');
   const [isTempPeakCardOpen, setIsTempPeakCardOpen] = useState<boolean>(true);
@@ -149,14 +175,40 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
   const [tempCardOffset, setTempCardOffset] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
   const [powerCardOffset, setPowerCardOffset] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
 
+  // Initialize Custom Range Start & End dates automatically when dataset dates load
+  useEffect(() => {
+    const sourceDates = tempAvailableDates.length > 0 ? tempAvailableDates : allAvailableDates;
+    if (sourceDates.length === 0) return;
+    const latestDate = sourceDates[sourceDates.length - 1];
+    const defaultStartIdx = Math.max(0, sourceDates.length - 60);
+    const defaultStartDate = sourceDates[defaultStartIdx];
+
+    setCustomStartDate((prev) => (prev && prev >= minAvailableDate && prev <= maxAvailableDate ? prev : defaultStartDate));
+    setCustomEndDate((prev) => (prev && prev >= minAvailableDate && prev <= maxAvailableDate ? prev : latestDate));
+  }, [tempAvailableDates, allAvailableDates, minAvailableDate, maxAvailableDate]);
+
+  const effectiveStartDate = useMemo(() => {
+    const start = customStartDate || minAvailableDate;
+    const end = customEndDate || maxAvailableDate;
+    return start && end && start > end ? end : start;
+  }, [customStartDate, customEndDate, minAvailableDate, maxAvailableDate]);
+
+  const effectiveEndDate = useMemo(() => {
+    const start = customStartDate || minAvailableDate;
+    const end = customEndDate || maxAvailableDate;
+    return start && end && start > end ? start : end;
+  }, [customStartDate, customEndDate, minAvailableDate, maxAvailableDate]);
+
+  const isChronologicalMode = comparisonMode === 'continuous' || comparisonMode === 'custom_range';
+
   // Reset card offsets when range mode or filters change so card always starts in clean non-overlapping position
   useEffect(() => {
     setTempCardOffset({ dx: 0, dy: 0 });
-  }, [comparisonMode, selectedMonth, selectedYear, selectedSectionId, selectedPhase]);
+  }, [comparisonMode, selectedMonth, selectedYear, effectiveStartDate, effectiveEndDate, selectedSectionId, selectedPhase]);
 
   useEffect(() => {
     setPowerCardOffset({ dx: 0, dy: 0 });
-  }, [comparisonMode, selectedMonth, selectedYear, selectedPowerCircuit]);
+  }, [comparisonMode, selectedMonth, selectedYear, effectiveStartDate, effectiveEndDate, selectedPowerCircuit]);
 
   const activeSection = useMemo(() => {
     return (
@@ -186,6 +238,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
   // Mode 1: Year-to-Year (12-Month Window)
   // Mode 2: Same Month Across Different Years
   // Mode 3: Continuous Timeline
+  // Mode 4: Custom Range (Start Date to End Date)
   // -------------------------------------------------------------------------
 
   // Helper to extract strict Land Cable phase code ('A' | 'B' | 'C') without matching the 'a' inside the word "Phase"
@@ -310,21 +363,54 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
       });
     }
 
-    // Continuous timeline mode
+    // Continuous timeline OR Custom Range mode
     return Array.from(recordByDate.values())
-      .filter((r) => (selectedYear === 'ALL' ? true : r.date.startsWith(selectedYear)))
+      .filter((r) => {
+        if (comparisonMode === 'custom_range') {
+          if (effectiveStartDate && r.date < effectiveStartDate) return false;
+          if (effectiveEndDate && r.date > effectiveEndDate) return false;
+          return true;
+        }
+        return selectedYear === 'ALL' ? true : r.date.startsWith(selectedYear);
+      })
       .map((r) => {
         const tfVal = resolveRecordMaxFiberTemp(r);
         const tcVal = resolveRecordMaxConductorTemp(r);
         const zone = getThermalZoneInfo(tcVal > 0 ? tcVal : tfVal);
+        const currYr = r.date.slice(0, 4);
+        const mmdd = r.date.slice(5);
+        const yrIdx = availableYears.indexOf(currYr);
+
+        let prev_tfMax: number | null = null;
+        let prev_tcMax: number | null = null;
+        let prevYear = '';
+        if (yrIdx > 0) {
+          for (let i = yrIdx - 1; i >= 0; i--) {
+            const prevRec = recordByDate.get(`${availableYears[i]}-${mmdd}`);
+            if (prevRec) {
+              const pTf = resolveRecordMaxFiberTemp(prevRec);
+              const pTc = resolveRecordMaxConductorTemp(prevRec);
+              if (pTf > 0) {
+                prev_tfMax = Number(pTf.toFixed(2));
+                prev_tcMax = pTc > 0 ? Number(pTc.toFixed(2)) : null;
+                prevYear = availableYears[i];
+                break;
+              }
+            }
+          }
+        }
+
         return {
           date: r.date,
-          monthDay: r.date.slice(5),
-          year: r.date.slice(0, 4),
+          monthDay: mmdd,
+          year: currYr,
           tfMax: Number(tfVal.toFixed(2)),
           tfMin: r.tfMin,
           tfMean: r.tfMean,
           tcMax: Number(tcVal.toFixed(2)),
+          prev_tfMax,
+          prev_tcMax,
+          prevYear,
           zone: zone.shortLabel,
           zoneColor: zone.color,
           phase: r.phase,
@@ -335,6 +421,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     allRecords,
     selectedSectionId,
     selectedYear,
+    effectiveStartDate,
+    effectiveEndDate,
     isLand,
     selectedPhase,
     isPhaseSelectedIfRequired,
@@ -346,6 +434,11 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
   // 2. Chart 2: Circuit Peak MW Comparison Data
   const chart2PowerData = useMemo(() => {
     if (!isPhaseSelectedIfRequired) return [];
+
+    const powerPeakByDate = new Map<string, CircuitDailyPeakPower>();
+    circuitDailyPeaks.forEach((cp) => {
+      powerPeakByDate.set(cp.date, cp);
+    });
 
     if (comparisonMode === 'year_to_year') {
       const mmddSet = new Set<string>();
@@ -360,7 +453,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
         };
         availableYears.forEach((yr) => {
           const targetDate = `${yr}-${mmdd}`;
-          const p = circuitDailyPeaks.find((cp) => cp.date === targetDate);
+          const p = powerPeakByDate.get(targetDate);
           if (p) {
             row[`Total_${yr}`] = p.totalIslandMaxMW > 0 ? Number(p.totalIslandMaxMW.toFixed(1)) : null;
             row[`Ckt3_${yr}`] = p.ckt3MaxMW > 0 ? Number(p.ckt3MaxMW.toFixed(1)) : null;
@@ -389,7 +482,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
 
         availableYears.forEach((yr) => {
           const targetDate = `${yr}-${selectedMonth}-${day}`;
-          const p = circuitDailyPeaks.find((cp) => cp.date === targetDate);
+          const p = powerPeakByDate.get(targetDate);
           if (p) {
             row[`Total_${yr}`] = p.totalIslandMaxMW > 0 ? Number(p.totalIslandMaxMW.toFixed(1)) : null;
             row[`Ckt3_${yr}`] = p.ckt3MaxMW > 0 ? Number(p.ckt3MaxMW.toFixed(1)) : null;
@@ -409,24 +502,64 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
       });
     }
 
-    // Continuous timeline mode
+    // Continuous timeline OR Custom Range mode
     return circuitDailyPeaks
-      .filter((p) => (selectedYear === 'ALL' ? true : p.year === selectedYear))
-      .map((p) => ({
-        date: p.date,
-        monthDay: p.monthDay,
-        year: p.year,
-        totalIslandMW: p.totalIslandMaxMW,
-        ckt3MW: p.ckt3MaxMW,
-        ckt2MW: p.ckt2MaxMW,
-        nkt33MW: p.nkt33MaxMW,
-        oil33MW: p.oil33MaxMW,
-        fiberMaxTempC: p.fiberMaxTempC,
-      }))
+      .filter((p) => {
+        if (comparisonMode === 'custom_range') {
+          if (effectiveStartDate && p.date < effectiveStartDate) return false;
+          if (effectiveEndDate && p.date > effectiveEndDate) return false;
+          return true;
+        }
+        return selectedYear === 'ALL' ? true : p.year === selectedYear;
+      })
+      .map((p) => {
+        const yrIdx = availableYears.indexOf(p.year);
+        let prev_totalIslandMW: number | null = null;
+        let prev_ckt3MW: number | null = null;
+        let prev_ckt2MW: number | null = null;
+        let prev_nkt33MW: number | null = null;
+        let prev_oil33MW: number | null = null;
+        let prevYear = '';
+
+        if (yrIdx > 0) {
+          for (let i = yrIdx - 1; i >= 0; i--) {
+            const prevP = powerPeakByDate.get(`${availableYears[i]}-${p.monthDay}`);
+            if (prevP && prevP.totalIslandMaxMW > 0) {
+              prev_totalIslandMW = Number(prevP.totalIslandMaxMW.toFixed(1));
+              prev_ckt3MW = prevP.ckt3MaxMW > 0 ? Number(prevP.ckt3MaxMW.toFixed(1)) : null;
+              prev_ckt2MW = prevP.ckt2MaxMW > 0 ? Number(prevP.ckt2MaxMW.toFixed(1)) : null;
+              prev_nkt33MW = prevP.nkt33MaxMW > 0 ? Number(prevP.nkt33MaxMW.toFixed(1)) : null;
+              prev_oil33MW = prevP.oil33MaxMW > 0 ? Number(prevP.oil33MaxMW.toFixed(1)) : null;
+              prevYear = availableYears[i];
+              break;
+            }
+          }
+        }
+
+        return {
+          date: p.date,
+          monthDay: p.monthDay,
+          year: p.year,
+          totalIslandMW: p.totalIslandMaxMW,
+          ckt3MW: p.ckt3MaxMW,
+          ckt2MW: p.ckt2MaxMW,
+          nkt33MW: p.nkt33MaxMW,
+          oil33MW: p.oil33MaxMW,
+          prev_totalIslandMW,
+          prev_ckt3MW,
+          prev_ckt2MW,
+          prev_nkt33MW,
+          prev_oil33MW,
+          prevYear,
+          fiberMaxTempC: p.fiberMaxTempC,
+        };
+      })
       .sort((a, b) => a.date.localeCompare(b.date));
   }, [
     circuitDailyPeaks,
     selectedYear,
+    effectiveStartDate,
+    effectiveEndDate,
     isPhaseSelectedIfRequired,
     comparisonMode,
     selectedMonth,
@@ -437,7 +570,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
   const chart1YDomain = useMemo<[number, number]>(() => {
     const vals: number[] = [];
     chart1TempData.forEach((row: Record<string, any>) => {
-      if (comparisonMode === 'continuous') {
+      if (isChronologicalMode) {
         if (typeof row.tfMax === 'number' && row.tfMax > 0) vals.push(row.tfMax);
         if (typeof row.tcMax === 'number' && row.tcMax > 0) vals.push(row.tcMax);
       } else {
@@ -459,7 +592,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     const lower = Math.max(0, Math.floor((minVal - padBottom) / step) * step);
     const upper = Math.max(lower + step * 3, Math.ceil((maxVal + padTop) / step) * step);
     return [lower, upper];
-  }, [chart1TempData, comparisonMode, availableYears]);
+  }, [chart1TempData, isChronologicalMode, availableYears]);
 
   // Dynamic Y-Axis domain for Chart 2 (Power Record) — optimized to actual active circuit data magnitude
   const chart2YDomain = useMemo<[number, number]>(() => {
@@ -491,7 +624,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
         : ['totalIslandMW', 'ckt3MW', 'ckt2MW', 'nkt33MW', 'oil33MW'];
 
     chart2PowerData.forEach((row: Record<string, any>) => {
-      if (comparisonMode === 'continuous') {
+      if (isChronologicalMode) {
         contKeys.forEach((k) => {
           const v = row[k];
           if (typeof v === 'number' && v > 0) vals.push(v);
@@ -516,9 +649,9 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     const lower = Math.max(0, Math.floor((minVal - padBottom) / step) * step);
     const upper = Math.max(lower + step * 3, Math.ceil((maxVal + padTop) / step) * step);
     return [lower, upper];
-  }, [chart2PowerData, comparisonMode, availableYears, selectedPowerCircuit]);
+  }, [chart2PowerData, isChronologicalMode, availableYears, selectedPowerCircuit]);
 
-  // Render marker on Power Record chart to identify Increase (▲) or Decrease (▼) from previous year
+  // Render marker on multi-year charts to identify Increase (▲) or Decrease (▼) from previous year
   const renderPowerComparisonMarker = (prefix: string, yrIndex: number, strokeColor: string) => {
     const currYr = availableYears[yrIndex];
     return (props: any) => {
@@ -593,6 +726,66 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     };
   };
 
+  // Render YoY comparison marker (▲ / ▼ / ●) on Continuous & Custom Range chronological curves
+  const renderChronologicalComparisonMarker = (dataKey: string, strokeColor: string) => {
+    return (props: any) => {
+      const { cx, cy, payload } = props;
+      if (cx === undefined || cy === undefined || !payload) return null;
+      const currVal = payload[dataKey];
+      if (typeof currVal !== 'number' || Number.isNaN(currVal)) return null;
+
+      const prevVal = payload[`prev_${dataKey}`];
+      if (typeof prevVal !== 'number' || Number.isNaN(prevVal)) {
+        return (
+          <circle
+            key={`cdot-${dataKey}-${cx}-${cy}`}
+            cx={cx}
+            cy={cy}
+            r={2.8}
+            fill={strokeColor}
+            stroke="#0f172a"
+            strokeWidth={1.1}
+          />
+        );
+      }
+
+      const diff = currVal - prevVal;
+      if (diff > 0.05) {
+        return (
+          <polygon
+            key={`cinc-${dataKey}-${cx}-${cy}`}
+            points={`${cx},${cy - 5.5} ${cx - 4.8},${cy + 3.8} ${cx + 4.8},${cy + 3.8}`}
+            fill="#10b981"
+            stroke="#ffffff"
+            strokeWidth={1.2}
+          />
+        );
+      }
+      if (diff < -0.05) {
+        return (
+          <polygon
+            key={`cdec-${dataKey}-${cx}-${cy}`}
+            points={`${cx},${cy + 5.5} ${cx - 4.8},${cy - 3.8} ${cx + 4.8},${cy - 3.8}`}
+            fill="#f43f5e"
+            stroke="#ffffff"
+            strokeWidth={1.2}
+          />
+        );
+      }
+      return (
+        <circle
+          key={`ceq-${dataKey}-${cx}-${cy}`}
+          cx={cx}
+          cy={cy}
+          r={3}
+          fill="#94a3b8"
+          stroke="#ffffff"
+          strokeWidth={1.1}
+        />
+      );
+    };
+  };
+
   // Shared helper to compute YoY delta badge for a given row, prefix, year, value, and unit
   const buildYoYDeltaBadge = (
     rowObj: Record<string, any>,
@@ -601,7 +794,6 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     val: number,
     unit: '°C' | 'MW'
   ): React.ReactNode => {
-    if (comparisonMode === 'continuous') return null;
     const yrIdx = availableYears.indexOf(yr);
     if (yrIdx <= 0) return null;
     let prevVal: number | null = null;
@@ -638,6 +830,39 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     );
   };
 
+  // Shared helper to compute YoY delta badge on chronological (Continuous / Custom Range) rows
+  const buildChronologicalDeltaBadge = (
+    rowObj: Record<string, any>,
+    key: string,
+    val: number,
+    unit: '°C' | 'MW'
+  ): React.ReactNode => {
+    const prevVal = rowObj?.[`prev_${key}`];
+    const prevYr = rowObj?.prevYear;
+    if (typeof prevVal !== 'number' || Number.isNaN(prevVal) || !prevYr) return null;
+    const diff = val - prevVal;
+    const sign = diff > 0 ? '+' : '';
+    if (diff > 0.05) {
+      return (
+        <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold whitespace-nowrap">
+          ▲ {sign}{diff.toFixed(1)} {unit} vs {prevYr}
+        </span>
+      );
+    }
+    if (diff < -0.05) {
+      return (
+        <span className="ml-2 px-1.5 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-500/40 text-[10px] font-bold whitespace-nowrap">
+          ▼ {diff.toFixed(1)} {unit} vs {prevYr}
+        </span>
+      );
+    }
+    return (
+      <span className="ml-2 px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-700 text-[10px] whitespace-nowrap">
+        ● 0.0 {unit} vs {prevYr}
+      </span>
+    );
+  };
+
   // Build hover-identical tooltip details for a Chart 1 (Fiber Temp) row
   const buildChart1TooltipItems = (rowObj: Record<string, any>) => {
     const items: Array<{
@@ -651,7 +876,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
 
     if (!rowObj) return items;
 
-    if (comparisonMode !== 'continuous') {
+    if (!isChronologicalMode) {
       availableYears.forEach((yr, idx) => {
         const col = getYearColor(yr, idx);
         const tfVal = rowObj[`Tf_${yr}`];
@@ -685,7 +910,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
           unit: '°C',
           color: '#38bdf8',
           dataKey: 'tfMax',
-          deltaBadge: null,
+          deltaBadge: buildChronologicalDeltaBadge(rowObj, 'tfMax', rowObj.tfMax, '°C'),
         });
       }
       if (typeof rowObj.tcMax === 'number' && !Number.isNaN(rowObj.tcMax) && rowObj.tcMax > 0) {
@@ -695,7 +920,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
           unit: '°C',
           color: '#f59e0b',
           dataKey: 'tcMax',
-          deltaBadge: null,
+          deltaBadge: buildChronologicalDeltaBadge(rowObj, 'tcMax', rowObj.tcMax, '°C'),
         });
       }
     }
@@ -715,7 +940,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
 
     if (!rowObj) return items;
 
-    if (comparisonMode !== 'continuous') {
+    if (!isChronologicalMode) {
       availableYears.forEach((yr, idx) => {
         const col = getYearColor(yr, idx);
         const pushIfValid = (pfx: string, seriesName: string, seriesColor: string) => {
@@ -759,7 +984,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
             unit: 'MW',
             color: seriesColor,
             dataKey: key,
-            deltaBadge: null,
+            deltaBadge: buildChronologicalDeltaBadge(rowObj, key, val, 'MW'),
           });
         }
       };
@@ -786,7 +1011,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
 
   // Compute the highest-value point across the active range for Chart 1 (Fiber Temp)
   const chart1PeakPoint = useMemo(() => {
-    const xKey = comparisonMode === 'year_to_year' || comparisonMode === 'same_month' ? 'monthDay' : 'date';
+    const xKey = !isChronologicalMode ? 'monthDay' : 'date';
     let bestVal = -Infinity;
     let bestRow: Record<string, any> | null = null;
     let bestRowIdx = -1;
@@ -794,7 +1019,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     let bestDataKey = '';
 
     chart1TempData.forEach((row: Record<string, any>, idx: number) => {
-      if (comparisonMode !== 'continuous') {
+      if (!isChronologicalMode) {
         // Prioritize primary solid Fiber Temp (Tf) curve with markers; if Tc is present on the chart, check Tf first so pointer pins directly onto the solid curve marker
         availableYears.forEach((yr, yrIdx) => {
           const col = getYearColor(yr, yrIdx);
@@ -834,11 +1059,11 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
       unit: '°C' as const,
       items,
     };
-  }, [chart1TempData, comparisonMode, availableYears]);
+  }, [chart1TempData, isChronologicalMode, availableYears]);
 
   // Compute the highest-value point across the active range for Chart 2 (Power Records)
   const chart2PeakPoint = useMemo(() => {
-    const xKey = comparisonMode === 'year_to_year' || comparisonMode === 'same_month' ? 'monthDay' : 'date';
+    const xKey = !isChronologicalMode ? 'monthDay' : 'date';
     let bestVal = -Infinity;
     let bestRow: Record<string, any> | null = null;
     let bestRowIdx = -1;
@@ -873,7 +1098,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
       unit: 'MW' as const,
       items,
     };
-  }, [chart2PowerData, comparisonMode, availableYears, selectedPowerCircuit]);
+  }, [chart2PowerData, isChronologicalMode, availableYears, selectedPowerCircuit]);
 
   // Dedicated top band height above the chart grid so the Peak Callout Card never overlays the plotted curves by default
   const tempTopBandHeight = useMemo(() => {
@@ -1262,7 +1487,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
           <div className="h-6 w-px bg-slate-800 hidden sm:block" />
 
           {/* 1. Comparison Mode Filter (Item 2.4 Requirement) */}
-          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-mono">
+          <div className="flex flex-wrap items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-mono">
             <button
               type="button"
               onClick={() => setComparisonMode('year_to_year')}
@@ -1295,6 +1520,17 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
               }`}
             >
               Continuous Timeline
+            </button>
+            <button
+              type="button"
+              onClick={() => setComparisonMode('custom_range')}
+              className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                comparisonMode === 'custom_range'
+                  ? 'bg-amber-500/25 text-amber-300 border border-amber-500/40 font-bold shadow-[0_0_10px_rgba(245,158,11,0.3)]'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Custom Range
             </button>
           </div>
 
@@ -1335,6 +1571,50 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                   </option>
                 ))}
               </select>
+            </div>
+          )}
+
+          {/* Custom Range Start and End Date Selector */}
+          {comparisonMode === 'custom_range' && (
+            <div className="flex flex-wrap items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-amber-500/40 shadow-[0_0_12px_rgba(245,158,11,0.12)]">
+              <div className="flex items-center gap-1.5">
+                <Calendar className="w-3.5 h-3.5 text-amber-400" />
+                <span className="text-[11px] text-amber-300 font-mono font-bold">START:</span>
+                <input
+                  type="date"
+                  value={customStartDate}
+                  min={minAvailableDate || undefined}
+                  max={maxAvailableDate || undefined}
+                  onChange={(e) => setCustomStartDate(e.target.value)}
+                  className="text-xs font-mono font-bold text-amber-200 bg-slate-900/90 px-2 py-0.5 rounded-lg border border-amber-500/30 outline-none focus:border-amber-400 cursor-pointer [color-scheme:dark]"
+                />
+              </div>
+              <span className="text-slate-600 font-mono text-xs">→</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] text-amber-300 font-mono font-bold">END:</span>
+                <input
+                  type="date"
+                  value={customEndDate}
+                  min={minAvailableDate || undefined}
+                  max={maxAvailableDate || undefined}
+                  onChange={(e) => setCustomEndDate(e.target.value)}
+                  className="text-xs font-mono font-bold text-amber-200 bg-slate-900/90 px-2 py-0.5 rounded-lg border border-amber-500/30 outline-none focus:border-amber-400 cursor-pointer [color-scheme:dark]"
+                />
+              </div>
+              {minAvailableDate && maxAvailableDate && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sourceDates = tempAvailableDates.length > 0 ? tempAvailableDates : allAvailableDates;
+                    setCustomStartDate(sourceDates[0] || minAvailableDate);
+                    setCustomEndDate(sourceDates[sourceDates.length - 1] || maxAvailableDate);
+                  }}
+                  title="Expand to full available date range"
+                  className="px-2 py-0.5 rounded-md bg-slate-900 hover:bg-slate-800 text-[10px] font-mono font-bold text-slate-300 hover:text-amber-300 border border-slate-700 transition-colors cursor-pointer"
+                >
+                  Full Range
+                </button>
+              )}
             </div>
           )}
 
@@ -1493,6 +1773,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                       ? '12-Month Window comparison of Peak Fiber Temperature across available years'
                       : comparisonMode === 'same_month'
                       ? `Comparison for Month ${selectedMonth} (${MONTH_NAMES.find((m) => m.num === selectedMonth)?.name}) across available years`
+                      : comparisonMode === 'custom_range'
+                      ? `Custom Range (${effectiveStartDate || 'Start'} to ${effectiveEndDate || 'End'}) daily measured fiber & conductor temperatures`
                       : 'Chronological timeline of daily measured fiber temperatures'}
                     {isLand && selectedPhase ? ` • [${selectedPhase}]` : ''}
                   </p>
@@ -1523,24 +1805,22 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                 )}
               </div>
 
-              {comparisonMode !== 'continuous' && (
-                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/70 border border-slate-800/80 text-[11px] font-mono">
-                  <span className="text-slate-400 font-semibold">
-                    YEAR-OVER-YEAR CHANGE MARKERS (COMPARED TO PREVIOUS YEAR):
+              <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/70 border border-slate-800/80 text-[11px] font-mono">
+                <span className="text-slate-400 font-semibold">
+                  YEAR-OVER-YEAR CHANGE MARKERS (COMPARED TO PREVIOUS YEAR):
+                </span>
+                <div className="flex flex-wrap items-center gap-4">
+                  <span className="inline-flex items-center gap-1.5 text-emerald-400 font-bold">
+                    <span className="text-sm leading-none">▲</span> Increase vs Previous Year
                   </span>
-                  <div className="flex flex-wrap items-center gap-4">
-                    <span className="inline-flex items-center gap-1.5 text-emerald-400 font-bold">
-                      <span className="text-sm leading-none">▲</span> Increase vs Previous Year
-                    </span>
-                    <span className="inline-flex items-center gap-1.5 text-rose-400 font-bold">
-                      <span className="text-sm leading-none">▼</span> Decrease vs Previous Year
-                    </span>
-                    <span className="inline-flex items-center gap-1.5 text-slate-300">
-                      <span className="text-xs leading-none">●</span> Base Year / No Change
-                    </span>
-                  </div>
+                  <span className="inline-flex items-center gap-1.5 text-rose-400 font-bold">
+                    <span className="text-sm leading-none">▼</span> Decrease vs Previous Year
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 text-slate-300">
+                    <span className="text-xs leading-none">●</span> Base Year / No Change
+                  </span>
                 </div>
-              )}
+              </div>
 
               <div className="overflow-x-auto w-full pb-2">
                 <div
@@ -1551,20 +1831,22 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                 >
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart
-                      key={`temp-chart-${selectedSectionId}-${selectedPhase}-${comparisonMode}-${selectedMonth}-${selectedYear}`}
+                      key={`temp-chart-${selectedSectionId}-${selectedPhase}-${comparisonMode}-${selectedMonth}-${selectedYear}-${effectiveStartDate}-${effectiveEndDate}`}
                       data={chart1TempData}
                       margin={{ top: tempTopBandHeight, right: 30, left: 10, bottom: 20 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.7} />
                       <XAxis
-                        dataKey={
-                          comparisonMode === 'year_to_year' || comparisonMode === 'same_month'
-                            ? 'monthDay'
-                            : 'date'
-                        }
+                        dataKey={!isChronologicalMode ? 'monthDay' : 'date'}
                         stroke="#64748b"
                         tick={{ fill: '#94a3b8', fontSize: 11, fontFamily: 'monospace' }}
-                        interval={comparisonMode === 'same_month' ? 2 : comparisonMode === 'year_to_year' ? 14 : 10}
+                        interval={
+                          comparisonMode === 'same_month'
+                            ? 2
+                            : comparisonMode === 'year_to_year'
+                            ? 14
+                            : Math.max(0, Math.floor(chart1TempData.length / 12))
+                        }
                       />
                       <YAxis
                         stroke="#38bdf8"
@@ -1593,44 +1875,11 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                               {payload.map((p, idx) => {
                                 const dataKey = String(p.dataKey || '');
                                 let deltaBadge: React.ReactNode = null;
-                                if (comparisonMode !== 'continuous' && dataKey.includes('_')) {
+                                if (!isChronologicalMode && dataKey.includes('_') && typeof p.value === 'number') {
                                   const [pfx, yr] = dataKey.split('_');
-                                  const yrIdx = availableYears.indexOf(yr);
-                                  if (yrIdx > 0 && typeof p.value === 'number') {
-                                    let prevVal: number | null = null;
-                                    let prevYr = '';
-                                    for (let i = yrIdx - 1; i >= 0; i--) {
-                                      const cand = rowObj[`${pfx}_${availableYears[i]}`];
-                                      if (typeof cand === 'number' && !Number.isNaN(cand)) {
-                                        prevVal = cand;
-                                        prevYr = availableYears[i];
-                                        break;
-                                      }
-                                    }
-                                    if (prevVal !== null) {
-                                      const diff = p.value - prevVal;
-                                      const sign = diff > 0 ? '+' : '';
-                                      if (diff > 0.05) {
-                                        deltaBadge = (
-                                          <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold">
-                                            ▲ {sign}{diff.toFixed(1)} °C vs {prevYr}
-                                          </span>
-                                        );
-                                      } else if (diff < -0.05) {
-                                        deltaBadge = (
-                                          <span className="ml-2 px-1.5 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-500/40 text-[10px] font-bold">
-                                            ▼ {diff.toFixed(1)} °C vs {prevYr}
-                                          </span>
-                                        );
-                                      } else {
-                                        deltaBadge = (
-                                          <span className="ml-2 px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-700 text-[10px]">
-                                            ● 0.0 °C vs {prevYr}
-                                          </span>
-                                        );
-                                      }
-                                    }
-                                  }
+                                  deltaBadge = buildYoYDeltaBadge(rowObj, pfx, yr, p.value, '°C');
+                                } else if (isChronologicalMode && typeof p.value === 'number') {
+                                  deltaBadge = buildChronologicalDeltaBadge(rowObj, dataKey, p.value, '°C');
                                 }
                                 return (
                                   <div key={idx} className="flex justify-between items-center gap-2" style={{ color: p.color }}>
@@ -1653,7 +1902,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                       />
 
                       {/* Dynamic Year lines for Fiber Temp (Tf) and Conductor Temp (Tc) — non-green & non-red colors with ▲/▼ markers */}
-                      {comparisonMode !== 'continuous' ? (
+                      {!isChronologicalMode ? (
                         availableYears.map((yr, idx) => {
                           const col = getYearColor(yr, idx);
                           return (
@@ -1689,7 +1938,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                             name="Daily Peak Fiber Temp (Tf, °C)"
                             stroke="#38bdf8"
                             strokeWidth={2.5}
-                            dot={{ r: 2 }}
+                            dot={renderChronologicalComparisonMarker('tfMax', '#38bdf8')}
+                            activeDot={{ r: 6 }}
                           />
                           <Line
                             type="monotone"
@@ -1753,6 +2003,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                       ? 'Year-to-Year daily peak comparison across available years'
                       : comparisonMode === 'same_month'
                       ? `Circuit peak demands comparison for Month ${selectedMonth} (${MONTH_NAMES.find((m) => m.num === selectedMonth)?.name}) across years`
+                      : comparisonMode === 'custom_range'
+                      ? `Custom Range (${effectiveStartDate || 'Start'} to ${effectiveEndDate || 'End'}) peak MW load across monitored circuits`
                       : 'Continuous chronological peak MW load across monitored circuits'}
                   </p>
                 </div>
@@ -1815,24 +2067,22 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                 )}
               </div>
 
-              {comparisonMode !== 'continuous' && (
-                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/70 border border-slate-800/80 text-[11px] font-mono">
-                  <span className="text-slate-400 font-semibold">
-                    YEAR-OVER-YEAR CHANGE MARKERS (COMPARED TO PREVIOUS YEAR):
+              <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/70 border border-slate-800/80 text-[11px] font-mono">
+                <span className="text-slate-400 font-semibold">
+                  YEAR-OVER-YEAR CHANGE MARKERS (COMPARED TO PREVIOUS YEAR):
+                </span>
+                <div className="flex flex-wrap items-center gap-4">
+                  <span className="inline-flex items-center gap-1.5 text-emerald-400 font-bold">
+                    <span className="text-sm leading-none">▲</span> Increase vs Previous Year
                   </span>
-                  <div className="flex flex-wrap items-center gap-4">
-                    <span className="inline-flex items-center gap-1.5 text-emerald-400 font-bold">
-                      <span className="text-sm leading-none">▲</span> Increase vs Previous Year
-                    </span>
-                    <span className="inline-flex items-center gap-1.5 text-rose-400 font-bold">
-                      <span className="text-sm leading-none">▼</span> Decrease vs Previous Year
-                    </span>
-                    <span className="inline-flex items-center gap-1.5 text-slate-300">
-                      <span className="text-xs leading-none">●</span> Base Year / No Change
-                    </span>
-                  </div>
+                  <span className="inline-flex items-center gap-1.5 text-rose-400 font-bold">
+                    <span className="text-sm leading-none">▼</span> Decrease vs Previous Year
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 text-slate-300">
+                    <span className="text-xs leading-none">●</span> Base Year / No Change
+                  </span>
                 </div>
-              )}
+              </div>
 
               <div className="overflow-x-auto w-full pb-2">
                 <div
@@ -1843,19 +2093,22 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                 >
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart
+                      key={`power-chart-${comparisonMode}-${selectedMonth}-${selectedYear}-${effectiveStartDate}-${effectiveEndDate}-${selectedPowerCircuit}`}
                       data={chart2PowerData}
                       margin={{ top: powerTopBandHeight, right: 30, left: 10, bottom: 20 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.7} />
                       <XAxis
-                        dataKey={
-                          comparisonMode === 'year_to_year' || comparisonMode === 'same_month'
-                            ? 'monthDay'
-                            : 'date'
-                        }
+                        dataKey={!isChronologicalMode ? 'monthDay' : 'date'}
                         stroke="#64748b"
                         tick={{ fill: '#94a3b8', fontSize: 11, fontFamily: 'monospace' }}
-                        interval={comparisonMode === 'same_month' ? 2 : comparisonMode === 'year_to_year' ? 14 : 10}
+                        interval={
+                          comparisonMode === 'same_month'
+                            ? 2
+                            : comparisonMode === 'year_to_year'
+                            ? 14
+                            : Math.max(0, Math.floor(chart2PowerData.length / 12))
+                        }
                       />
                       <YAxis
                         stroke="#a855f7"
@@ -1884,44 +2137,11 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                               {payload.map((p, idx) => {
                                 const dataKey = String(p.dataKey || '');
                                 let deltaBadge: React.ReactNode = null;
-                                if (comparisonMode !== 'continuous' && dataKey.includes('_')) {
+                                if (!isChronologicalMode && dataKey.includes('_') && typeof p.value === 'number') {
                                   const [pfx, yr] = dataKey.split('_');
-                                  const yrIdx = availableYears.indexOf(yr);
-                                  if (yrIdx > 0 && typeof p.value === 'number') {
-                                    let prevVal: number | null = null;
-                                    let prevYr = '';
-                                    for (let i = yrIdx - 1; i >= 0; i--) {
-                                      const cand = rowObj[`${pfx}_${availableYears[i]}`];
-                                      if (typeof cand === 'number' && !Number.isNaN(cand)) {
-                                        prevVal = cand;
-                                        prevYr = availableYears[i];
-                                        break;
-                                      }
-                                    }
-                                    if (prevVal !== null) {
-                                      const diff = p.value - prevVal;
-                                      const sign = diff > 0 ? '+' : '';
-                                      if (diff > 0.05) {
-                                        deltaBadge = (
-                                          <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold">
-                                            ▲ {sign}{diff.toFixed(1)} MW vs {prevYr}
-                                          </span>
-                                        );
-                                      } else if (diff < -0.05) {
-                                        deltaBadge = (
-                                          <span className="ml-2 px-1.5 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-500/40 text-[10px] font-bold">
-                                            ▼ {diff.toFixed(1)} MW vs {prevYr}
-                                          </span>
-                                        );
-                                      } else {
-                                        deltaBadge = (
-                                          <span className="ml-2 px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-700 text-[10px]">
-                                            ● 0.0 MW vs {prevYr}
-                                          </span>
-                                        );
-                                      }
-                                    }
-                                  }
+                                  deltaBadge = buildYoYDeltaBadge(rowObj, pfx, yr, p.value, 'MW');
+                                } else if (isChronologicalMode && typeof p.value === 'number') {
+                                  deltaBadge = buildChronologicalDeltaBadge(rowObj, dataKey, p.value, 'MW');
                                 }
                                 return (
                                   <div key={idx} className="flex justify-between items-center gap-2" style={{ color: p.color }}>
@@ -1943,7 +2163,7 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                         wrapperStyle={{ paddingTop: 10, fontFamily: 'monospace', fontSize: 11 }}
                       />
 
-                      {comparisonMode !== 'continuous' ? (
+                      {!isChronologicalMode ? (
                         availableYears.map((yr, idx) => {
                           const col = getYearColor(yr, idx);
                           if (selectedPowerCircuit === 'combination') {
@@ -2066,7 +2286,8 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                               name="Combination of 4 Circuits (Total Island MW)"
                               stroke="#a855f7"
                               strokeWidth={3}
-                              dot={{ r: 2 }}
+                              dot={renderChronologicalComparisonMarker('totalIslandMW', '#a855f7')}
+                              activeDot={{ r: 6 }}
                             />
                           )}
                           {(selectedPowerCircuit === 'ckt3' || selectedPowerCircuit === 'all_four') && (
@@ -2076,7 +2297,12 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                               name="115kV Circuit #3 Peak (MW)"
                               stroke="#f59e0b"
                               strokeWidth={2.6}
-                              dot={selectedPowerCircuit === 'ckt3' ? { r: 2 } : false}
+                              dot={
+                                selectedPowerCircuit === 'ckt3'
+                                  ? renderChronologicalComparisonMarker('ckt3MW', '#f59e0b')
+                                  : false
+                              }
+                              activeDot={{ r: 6 }}
                             />
                           )}
                           {(selectedPowerCircuit === 'ckt2' || selectedPowerCircuit === 'all_four') && (
@@ -2086,7 +2312,12 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                               name="115kV Circuit #2 Peak (MW)"
                               stroke="#38bdf8"
                               strokeWidth={2.6}
-                              dot={selectedPowerCircuit === 'ckt2' ? { r: 2 } : false}
+                              dot={
+                                selectedPowerCircuit === 'ckt2'
+                                  ? renderChronologicalComparisonMarker('ckt2MW', '#38bdf8')
+                                  : false
+                              }
+                              activeDot={{ r: 6 }}
                             />
                           )}
                           {(selectedPowerCircuit === 'nkt33' || selectedPowerCircuit === 'all_four') && (
@@ -2097,7 +2328,12 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                               stroke="#6366f1"
                               strokeWidth={2.2}
                               strokeDasharray={selectedPowerCircuit === 'all_four' ? '3 3' : undefined}
-                              dot={selectedPowerCircuit === 'nkt33' ? { r: 2 } : false}
+                              dot={
+                                selectedPowerCircuit === 'nkt33'
+                                  ? renderChronologicalComparisonMarker('nkt33MW', '#6366f1')
+                                  : false
+                              }
+                              activeDot={{ r: 6 }}
                             />
                           )}
                           {(selectedPowerCircuit === 'oil33' || selectedPowerCircuit === 'all_four') && (
@@ -2108,7 +2344,12 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                               stroke="#eab308"
                               strokeWidth={2.2}
                               strokeDasharray={selectedPowerCircuit === 'all_four' ? '3 3' : undefined}
-                              dot={selectedPowerCircuit === 'oil33' ? { r: 2 } : false}
+                              dot={
+                                selectedPowerCircuit === 'oil33'
+                                  ? renderChronologicalComparisonMarker('oil33MW', '#eab308')
+                                  : false
+                              }
+                              activeDot={{ r: 6 }}
                             />
                           )}
                         </>
