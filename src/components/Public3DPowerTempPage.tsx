@@ -273,10 +273,20 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
   // Cache of all gathered sections per date: dateKey -> Map<sectionId, ActualDailyTelemetrySummary>
   const cachedDaysMapRef = useRef<Map<string, Map<string, ActualDailyTelemetrySummary>>>(new Map());
 
+  const prevLatestDateRef = useRef<string>(initialDate);
+
   // Automatically sync selectedDate and gatheredDate when Panel 3 dates update or user changes date
   useEffect(() => {
-    if (availableDates.length > 0 && (!selectedDate || !availableDates.includes(selectedDate))) {
-      const latest = availableDates[availableDates.length - 1];
+    const latest = availableDates.length > 0 ? availableDates[availableDates.length - 1] : '';
+    const latestChanged = Boolean(latest && latest !== prevLatestDateRef.current);
+    if (latest) {
+      prevLatestDateRef.current = latest;
+    }
+
+    if (
+      availableDates.length > 0 &&
+      (!selectedDate || !availableDates.includes(selectedDate) || latestChanged)
+    ) {
       setSelectedDate(latest);
       setGatheredDate(latest);
       setHasGathered(true);

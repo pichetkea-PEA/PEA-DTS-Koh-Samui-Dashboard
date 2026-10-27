@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -206,25 +206,29 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
     };
   }, [colorTheme]);
 
-  // Automatically sync single selectedDate when Panel 3 dates update
-  useEffect(() => {
-    if (availableDates.length > 0 && (!selectedDate || !availableDates.includes(selectedDate))) {
-      const latest = availableDates[availableDates.length - 1];
-      setSelectedDate(latest);
-    }
-  }, [availableDates, selectedDate]);
+  const prevLatestDateRef = useRef<string>(initialDate);
 
-  // Sync comparison dates when availableDates change
+  // Automatically sync single selectedDate and comparison dates when Panel 3 dates update
   useEffect(() => {
     if (availableDates.length > 0) {
-      if (!compareDate1 || !availableDates.includes(compareDate1)) {
-        setCompareDate1(availableDates.length >= 2 ? availableDates[availableDates.length - 2] : availableDates[0]);
+      const latest = availableDates[availableDates.length - 1];
+      const secondLatest = availableDates.length >= 2 ? availableDates[availableDates.length - 2] : availableDates[0];
+      const latestChanged = Boolean(latest && latest !== prevLatestDateRef.current);
+      if (latest) {
+        prevLatestDateRef.current = latest;
       }
-      if (!compareDate2 || !availableDates.includes(compareDate2)) {
-        setCompareDate2(availableDates[availableDates.length - 1]);
+
+      if (!selectedDate || !availableDates.includes(selectedDate) || latestChanged) {
+        setSelectedDate(latest);
+      }
+      if (!compareDate1 || !availableDates.includes(compareDate1) || latestChanged) {
+        setCompareDate1(secondLatest);
+      }
+      if (!compareDate2 || !availableDates.includes(compareDate2) || latestChanged) {
+        setCompareDate2(latest);
       }
     }
-  }, [availableDates, compareDate1, compareDate2]);
+  }, [availableDates, selectedDate, compareDate1, compareDate2]);
 
   // Proactively ensure hourly section profiles are loaded for active dates
   useEffect(() => {

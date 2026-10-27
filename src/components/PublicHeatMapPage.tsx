@@ -279,12 +279,23 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   const mapInstanceRef = useRef<L.Map | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
 
+  const prevLatestDateRef = useRef<string>(initialDate);
+
   // Synchronize selectedDate when Panel 1 database dates update
   useEffect(() => {
+    const latest = availableDates.length > 0 ? availableDates[availableDates.length - 1] : '';
+    const latestChanged = Boolean(latest && latest !== prevLatestDateRef.current);
+    if (latest) {
+      prevLatestDateRef.current = latest;
+    }
+
     if (selectedDateFilter && selectedDateFilter !== 'all' && availableDates.includes(selectedDateFilter)) {
       setSelectedDate(selectedDateFilter);
-    } else if (availableDates.length > 0 && (!selectedDate || !availableDates.includes(selectedDate))) {
-      setSelectedDate(availableDates[availableDates.length - 1]);
+    } else if (
+      availableDates.length > 0 &&
+      (!selectedDate || !availableDates.includes(selectedDate) || latestChanged)
+    ) {
+      setSelectedDate(latest);
     }
   }, [selectedDateFilter, availableDates, selectedDate]);
 

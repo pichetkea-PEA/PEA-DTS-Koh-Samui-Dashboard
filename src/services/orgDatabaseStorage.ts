@@ -295,9 +295,11 @@ async function fetchSharedServerDefaultDatabases(forceRefresh = false): Promise<
   if (!forceRefresh && sharedPublicDefaultDbPromise) {
     return sharedPublicDefaultDbPromise;
   }
+  const cacheBust = forceRefresh ? `?t=${Date.now()}` : '';
+  const fetchOpts: RequestInit = forceRefresh ? { cache: 'no-store' } : {};
   sharedPublicDefaultDbPromise = (async () => {
     try {
-      const res = await fetch('/api/public-default-databases');
+      const res = await fetch(`/api/public-default-databases${cacheBust}`, fetchOpts);
       if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
         const json = await res.json();
         if (json?.success && json?.data && (json.data.panel1 || json.data.panel2 || json.data.panel3)) {
@@ -308,7 +310,7 @@ async function fetchSharedServerDefaultDatabases(forceRefresh = false): Promise<
       // ignore network error and fall back to static CDN bundle
     }
     try {
-      const staticRes = await fetch('/data/public-default-databases.json');
+      const staticRes = await fetch(`/data/public-default-databases.json${cacheBust}`, fetchOpts);
       if (staticRes.ok && (staticRes.headers.get('content-type') || '').includes('application/json')) {
         const data = await staticRes.json();
         if (data && (data.panel1 || data.panel2 || data.panel3)) {
@@ -2858,17 +2860,27 @@ export async function syncAllPublicSharedTargetFolders(
   onProgress?.(4, 'Connecting to Telemetry Cache & Scanning 3 Shared Google Drive Folders...');
   await new Promise((r) => setTimeout(r, 10));
 
-  // 0. Immediately hydrate from the pre-seeded server/static default database first (<100ms)
-  let cachedServerDb = await fetchSharedServerDefaultDatabases(false);
-
-  // Also check if any shared Google Drive folder has a newly uploaded file (with 3.5s max timeout so UI never blocks)
+  // 0. Always check the 3 shared Google Drive folders first for any newly uploaded or updated files
   let scanResult: any = null;
+  let scanTicker: ReturnType<typeof setInterval> | null = null;
   try {
+    let tickPct = 5;
+    scanTicker = setInterval(() => {
+      if (tickPct < 11) {
+        tickPct += 1;
+        onProgress?.(
+          tickPct,
+          'Checking & Pulling Latest Database Files from 3 Shared Google Drive Folders...'
+        );
+      }
+    }, 1200);
+
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3500);
-    const scanRes = await fetch('/api/scan-and-sync-public-folders', {
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    const scanRes = await fetch(`/api/scan-and-sync-public-folders?t=${Date.now()}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+      cache: 'no-store',
       signal: controller.signal,
       body: JSON.stringify({
         panel1Url: links.panel1Url,
@@ -2878,6 +2890,11 @@ export async function syncAllPublicSharedTargetFolders(
       }),
     });
     clearTimeout(timeoutId);
+    if (scanTicker) {
+      clearInterval(scanTicker);
+      scanTicker = null;
+    }
+
     if (scanRes.ok && (scanRes.headers.get('content-type') || '').includes('application/json')) {
       scanResult = await scanRes.json();
       if (scanResult?.changesDetected || scanResult?.anyUpdated) {
@@ -2887,20 +2904,23 @@ export async function syncAllPublicSharedTargetFolders(
           scanResult.panel3?.changed ? scanResult.panel3.fileName : null,
         ].filter(Boolean);
         onProgress?.(
-          11,
+          12,
           `Detected & downloaded new database file(s): ${changedNames.join(', ')}`
         );
-        cachedServerDb = await fetchSharedServerDefaultDatabases(true);
       } else {
-        onProgress?.(10, 'Verified all 3 Google Drive Shared Folders are on the latest version...');
-        if (!cachedServerDb) {
-          cachedServerDb = await fetchSharedServerDefaultDatabases(true);
-        }
+        onProgress?.(11, 'Verified all 3 Google Drive Shared Folders are on the latest version...');
       }
     }
   } catch (scanErr) {
+    if (scanTicker) {
+      clearInterval(scanTicker);
+      scanTicker = null;
+    }
     console.warn('Live folder scan warning (using server/cached databases):', scanErr);
   }
+
+  // Always fetch the fresh server database AFTER the 3-folder scan completes
+  const cachedServerDb = await fetchSharedServerDefaultDatabases(true);
 
   let needsIndexRebuild = false;
 
@@ -2921,16 +2941,16 @@ export async function syncAllPublicSharedTargetFolders(
           26,
           `Indexing ${p1TotalRecords.toLocaleString()} Section Records across ${p1TotalDates} Dates (Folder 1)...`
         );
-        if (memoryRecords !== p1Cached.records || !memoryRecordsByDate.size) {
-          memoryConfig = p1Cached.config;
-          memoryRecords = p1Cached.records;
-          savedDefaultPanel1 = p1Cached;
-          needsIndexRebuild = true;
-          try {
-            localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
-          } catch {}
-          void idbSet('panel1', p1Cached);
-        }
+        memoryConfig = p1Cached.config;
+        memoryRecords = p1Cached.records;
+        savedDefaultPanel1 = p1Cached;
+        loadedPanel1DofDates.clear();
+        needsIndexRebuild = true;
+        try {
+          localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(memoryConfig));
+        } catch {}
+        void idbSet('panel1', p1Cached);
+
         onProgress?.(32, 'Synchronizing Heat Map (2.1) & Section Peak telemetry...');
         const p1Info: DataPanelSourceInfo = {
           ...(p1Cached.info || {}),
@@ -2938,7 +2958,7 @@ export async function syncAllPublicSharedTargetFolders(
           name:
             p1Cached.info?.name ||
             p1Cached.config.databaseFileName ||
-            'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
+            'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-10-26.xlsx',
           remoteUrl: links.panel1Url,
           updatedAt: p1Cached.info?.updatedAt || new Date().toISOString(),
           totalDates: p1Cached.config.totalDates,
@@ -2971,19 +2991,18 @@ export async function syncAllPublicSharedTargetFolders(
           54,
           `Indexing ${p2Cached.peaks.length} Dates of 115kV Ckt #3, Ckt #2, 33kV NKT & Oil-Filled MW (Folder 2)...`
         );
-        if (memoryPowerPeaksOnly.size !== p2Cached.peaks.length) {
-          memoryPowerPeaksOnly.clear();
-          p2Cached.peaks.forEach((pk: CircuitDailyPeakPower) => {
-            memoryPowerPeaksOnly.set(pk.date, pk);
-            memoryCircuitPeaksByDate.set(pk.date, pk);
-          });
-          savedDefaultPanel2 = p2Cached;
-          needsIndexRebuild = true;
-          try {
-            localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2Cached.peaks));
-          } catch {}
-          void idbSet('panel2', p2Cached);
-        }
+        memoryPowerPeaksOnly.clear();
+        p2Cached.peaks.forEach((pk: CircuitDailyPeakPower) => {
+          memoryPowerPeaksOnly.set(pk.date, pk);
+          memoryCircuitPeaksByDate.set(pk.date, pk);
+        });
+        savedDefaultPanel2 = p2Cached;
+        needsIndexRebuild = true;
+        try {
+          localStorage.setItem(STORAGE_KEY_POWER_PEAKS, JSON.stringify(p2Cached.peaks));
+        } catch {}
+        void idbSet('panel2', p2Cached);
+
         onProgress?.(62, 'Synchronizing 4-Circuit Yearly Comparison (2.4)...');
         const sortedP2Dates = p2Cached.peaks.map((p: CircuitDailyPeakPower) => p.date).sort();
         const p2Info: DataPanelSourceInfo = {
@@ -2991,13 +3010,13 @@ export async function syncAllPublicSharedTargetFolders(
           sourceType: 'googledrive',
           name:
             p2Cached.info?.name ||
-            'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-18_to_2026-10-23.csv',
+            'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-23_to_2026-10-26.csv',
           remoteUrl: links.panel2Url,
           updatedAt: p2Cached.info?.updatedAt || new Date().toISOString(),
           totalDates: p2Cached.peaks.length,
           dateRange: p2Cached.info?.dateRange || {
             firstDate: sortedP2Dates[0] || '2025-07-01',
-            latestDate: sortedP2Dates[sortedP2Dates.length - 1] || '2026-10-23',
+            latestDate: sortedP2Dates[sortedP2Dates.length - 1] || '2026-10-26',
           },
           recordCount: p2Cached.peaks.length,
         };
@@ -3043,7 +3062,10 @@ export async function syncAllPublicSharedTargetFolders(
 
       // If cachedServerDb didn't include Panel 3 records, query the dedicated fast endpoint
       if (recordsToUse.length === 0 || allDatesToUse.length === 0) {
-        const fastRes = await fetch(`/api/fetch-shared-section-profiles?url=${encodeURIComponent(links.panel3Url)}`)
+        const fastRes = await fetch(
+          `/api/fetch-shared-section-profiles?url=${encodeURIComponent(links.panel3Url)}&t=${Date.now()}`,
+          { cache: 'no-store' }
+        )
           .then((r) => (r.ok && (r.headers.get('content-type') || '').includes('application/json') ? r.json() : null))
           .catch(() => null);
         if (fastRes?.success) {
@@ -3064,7 +3086,8 @@ export async function syncAllPublicSharedTargetFolders(
         onProgress?.(85, 'Indexing 24-Hour Section Curves & Ckt #3 MW across 19 Sections (Folder 3)...');
         await new Promise((r) => setTimeout(r, 10));
 
-        if (recordsToUse.length > 0 && memorySectionProfileRecords !== recordsToUse) {
+        fetchingDates.clear();
+        if (recordsToUse.length > 0) {
           memorySectionProfileRecords = recordsToUse;
         }
         if (allDatesToUse.length > 0) {
@@ -3085,13 +3108,13 @@ export async function syncAllPublicSharedTargetFolders(
           sourceType: 'googledrive',
           name:
             p3Cached?.info?.name ||
-            'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx',
+            'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-10-26.xlsx',
           remoteUrl: links.panel3Url,
           updatedAt: p3Cached?.info?.updatedAt || new Date().toISOString(),
           totalDates: totalDatesCount,
           dateRange: p3Cached?.info?.dateRange || {
-            firstDate: memorySectionProfileDates[0] || '2025-07-01',
-            latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-23',
+            firstDate: memorySectionProfileDates[0] || '2021-11-28',
+            latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-26',
           },
           recordCount:
             p3Cached?.info?.recordCount ||

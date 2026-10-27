@@ -1235,10 +1235,11 @@ async function scanSharedDriveFolderMetadata(
     // 2. Public Google Drive Embedded Folder View (fast ~2KB HTML listing of shared folder files)
     if (foundFiles.length === 0) {
       try {
-        const embedRes = await fetch(`https://drive.google.com/embeddedfolderview?id=${folderId}#list`, {
+        const embedRes = await fetch(`https://drive.google.com/embeddedfolderview?id=${folderId}&_t=${Date.now()}#list`, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Cache-Control': 'no-cache',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
           },
         });
         if (embedRes.ok) {
@@ -1263,10 +1264,11 @@ async function scanSharedDriveFolderMetadata(
     // 3. Fallback to standard folder HTML page scrape if embedded view returned nothing
     if (foundFiles.length === 0) {
       try {
-        const folderHtmlRes = await fetch(`https://drive.google.com/drive/folders/${folderId}`, {
+        const folderHtmlRes = await fetch(`https://drive.google.com/drive/folders/${folderId}?_t=${Date.now()}`, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Cache-Control': 'no-cache',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
           },
         });
         if (folderHtmlRes.ok) {
@@ -1904,8 +1906,10 @@ function parsePanel3WorkbookFast(
   let totalRecordCount = 0;
   for (const [d, list] of byDate.entries()) {
     totalRecordCount += list.length;
+    compactSectionProfilesByDate[d] = list;
     fs.writeFileSync(path.join(SECTION_PROFILES_DIR, `${d}.json`), JSON.stringify(list));
   }
+  compactSectionProfileAllDates = allDates;
   fs.writeFileSync(path.join(SECTION_PROFILES_DIR, 'all_dates.json'), JSON.stringify(allDates));
 
   const recentDates = allDates.slice(-10);
@@ -1936,14 +1940,15 @@ function parsePanel3WorkbookFast(
 
 async function downloadDriveFileWithCache(
   meta: ScannedDriveFileMetadata,
-  authHeader = ''
+  authHeader = '',
+  forceDownload = false
 ): Promise<Buffer> {
   if (!fs.existsSync(DRIVE_DOWNLOADS_CACHE_DIR)) {
     fs.mkdirSync(DRIVE_DOWNLOADS_CACHE_DIR, { recursive: true });
   }
   const ext = meta.fileName.toLowerCase().endsWith('.csv') ? 'csv' : 'xlsx';
   const cachedFilePath = path.join(DRIVE_DOWNLOADS_CACHE_DIR, `${meta.fileId}.${ext}`);
-  if (fs.existsSync(cachedFilePath)) {
+  if (!forceDownload && fs.existsSync(cachedFilePath)) {
     try {
       const stat = fs.statSync(cachedFilePath);
       if (stat.size > 100 && (meta.fileSize <= 0 || stat.size === meta.fileSize)) {
@@ -1956,6 +1961,7 @@ async function downloadDriveFileWithCache(
 
   const headers: Record<string, string> = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Cache-Control': 'no-cache',
   };
   let fetchUrl = meta.downloadUrl;
   if (authHeader && !meta.isGoogleSheets) {
@@ -1994,6 +2000,9 @@ function hasPanelDatabaseChanged(
   if (cachedInfo.fileId && scanned.fileId !== cachedInfo.fileId) return true;
   if (cachedInfo.name && scanned.fileName !== cachedInfo.name) return true;
   if (scanned.fileSize > 0 && cachedInfo.fileSize && scanned.fileSize !== cachedInfo.fileSize) return true;
+  if (scanned.modifiedLabel && cachedInfo.modifiedTime && scanned.modifiedLabel !== cachedInfo.modifiedTime && !cachedInfo.modifiedTime.includes('T')) {
+    return true;
+  }
   if (!cachedInfo.fileId && !cachedInfo.versionSignature) return true;
   return false;
 }
@@ -2080,18 +2089,19 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
         }
       }
 
+      const forceDl = Boolean(options?.forceDownload);
       const p1Changed =
-        Boolean(options?.forceDownload) ||
+        forceDl ||
         !currentDb?.panel1?.records?.length ||
         hasPanelDatabaseChanged(scan1, currentDb?.panel1?.info);
 
       const p2Changed =
-        Boolean(options?.forceDownload) ||
+        forceDl ||
         !currentDb?.panel2?.peaks?.length ||
         hasPanelDatabaseChanged(scan2, currentDb?.panel2?.info);
 
       const p3Changed =
-        Boolean(options?.forceDownload) ||
+        forceDl ||
         !allDatesPopulated ||
         !currentDb?.panel3?.records?.length ||
         hasPanelDatabaseChanged(scan3, currentDb?.panel3?.info);
@@ -2103,7 +2113,7 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
       // 2. Download and parse any panel where a change or newer file was detected
       if (p1Changed && scan1) {
         try {
-          const buf1 = await downloadDriveFileWithCache(scan1, authHeader);
+          const buf1 = await downloadDriveFileWithCache(scan1, authHeader, forceDl);
           const parsed1 = parsePanel1WorkbookFast(buf1, scan1, panel1Url);
           if (parsed1.records.length > 0) {
             currentDb.panel1 = parsed1;
@@ -2116,7 +2126,7 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
 
       if (p2Changed && scan2) {
         try {
-          const buf2 = await downloadDriveFileWithCache(scan2, authHeader);
+          const buf2 = await downloadDriveFileWithCache(scan2, authHeader, forceDl);
           const parsed2 = parsePanel2CsvFast(
             buf2,
             scan2,
@@ -2134,7 +2144,7 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
 
       if (p3Changed && scan3) {
         try {
-          const buf3 = await downloadDriveFileWithCache(scan3, authHeader);
+          const buf3 = await downloadDriveFileWithCache(scan3, authHeader, forceDl);
           const parsed3 = parsePanel3WorkbookFast(buf3, scan3, panel3Url);
           if (parsed3.allDates.length > 0) {
             currentDb.panel3 = parsed3;
@@ -2161,6 +2171,39 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
         cachedPublicDefaultDbResponseGzip = zlib.gzipSync(
           Buffer.from(cachedPublicDefaultDbResponseJson, 'utf-8')
         );
+
+        // Also persist static bundle files so cold starts always serve the latest Google Drive databases
+        try {
+          if (fs.existsSync(STATIC_PUBLIC_DATA_DIR)) {
+            fs.writeFileSync(path.join(STATIC_PUBLIC_DATA_DIR, 'public-default-databases.json'), rawOut, 'utf-8');
+            fs.writeFileSync(
+              path.join(STATIC_PUBLIC_DATA_DIR, 'public-default-databases.json.gz'),
+              zlib.gzipSync(Buffer.from(rawOut, 'utf-8'))
+            );
+            if (p1Updated && Object.keys(panel1DofsByDateMap).length > 0) {
+              fs.writeFileSync(
+                path.join(STATIC_PUBLIC_DATA_DIR, 'panel1_dofs_by_date.json.gz'),
+                zlib.gzipSync(Buffer.from(JSON.stringify(panel1DofsByDateMap), 'utf-8'))
+              );
+            }
+            if (p3Updated && compactSectionProfileAllDates.length > 0) {
+              fs.writeFileSync(
+                path.join(STATIC_PUBLIC_DATA_DIR, 'section_profiles_compact.json.gz'),
+                zlib.gzipSync(
+                  Buffer.from(
+                    JSON.stringify({
+                      allDates: compactSectionProfileAllDates,
+                      byDate: compactSectionProfilesByDate,
+                    }),
+                    'utf-8'
+                  )
+                )
+              );
+            }
+          }
+        } catch (persistErr) {
+          console.warn('Static bundle persistence warning:', persistErr);
+        }
       }
 
       const p1Info = currentDb?.panel1?.info || {};
