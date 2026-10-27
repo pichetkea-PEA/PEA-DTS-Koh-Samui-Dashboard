@@ -11,6 +11,7 @@ import {
   Tooltip,
   Legend,
   ReferenceLine,
+  ReferenceDot,
 } from 'recharts';
 import {
   CalendarRange,
@@ -26,6 +27,12 @@ import {
   Radio,
   Calendar,
   Filter,
+  Pin,
+  Eye,
+  EyeOff,
+  X,
+  Move,
+  RotateCcw,
 } from 'lucide-react';
 import {
   CIRCUIT_3_SECTIONS,
@@ -137,6 +144,19 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
   const [selectedYear, setSelectedYear] = useState<string>('ALL'); // Default to ALL so full 400+ days timeline is visible immediately
   const [activeChartTab, setActiveChartTab] = useState<'both' | 'temp' | 'power'>('both');
   const [selectedPowerCircuit, setSelectedPowerCircuit] = useState<PowerCircuitFilter>('combination');
+  const [isTempPeakCardOpen, setIsTempPeakCardOpen] = useState<boolean>(true);
+  const [isPowerPeakCardOpen, setIsPowerPeakCardOpen] = useState<boolean>(true);
+  const [tempCardOffset, setTempCardOffset] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+  const [powerCardOffset, setPowerCardOffset] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+
+  // Reset card offsets when range mode or filters change so card always starts in clean non-overlapping position
+  useEffect(() => {
+    setTempCardOffset({ dx: 0, dy: 0 });
+  }, [comparisonMode, selectedMonth, selectedYear, selectedSectionId, selectedPhase]);
+
+  useEffect(() => {
+    setPowerCardOffset({ dx: 0, dy: 0 });
+  }, [comparisonMode, selectedMonth, selectedYear, selectedPowerCircuit]);
 
   const activeSection = useMemo(() => {
     return (
@@ -573,6 +593,641 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
     };
   };
 
+  // Shared helper to compute YoY delta badge for a given row, prefix, year, value, and unit
+  const buildYoYDeltaBadge = (
+    rowObj: Record<string, any>,
+    pfx: string,
+    yr: string,
+    val: number,
+    unit: '°C' | 'MW'
+  ): React.ReactNode => {
+    if (comparisonMode === 'continuous') return null;
+    const yrIdx = availableYears.indexOf(yr);
+    if (yrIdx <= 0) return null;
+    let prevVal: number | null = null;
+    let prevYr = '';
+    for (let i = yrIdx - 1; i >= 0; i--) {
+      const cand = rowObj[`${pfx}_${availableYears[i]}`];
+      if (typeof cand === 'number' && !Number.isNaN(cand)) {
+        prevVal = cand;
+        prevYr = availableYears[i];
+        break;
+      }
+    }
+    if (prevVal === null) return null;
+    const diff = val - prevVal;
+    const sign = diff > 0 ? '+' : '';
+    if (diff > 0.05) {
+      return (
+        <span className="ml-2 px-1.5 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold whitespace-nowrap">
+          ▲ {sign}{diff.toFixed(1)} {unit} vs {prevYr}
+        </span>
+      );
+    }
+    if (diff < -0.05) {
+      return (
+        <span className="ml-2 px-1.5 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-500/40 text-[10px] font-bold whitespace-nowrap">
+          ▼ {diff.toFixed(1)} {unit} vs {prevYr}
+        </span>
+      );
+    }
+    return (
+      <span className="ml-2 px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-700 text-[10px] whitespace-nowrap">
+        ● 0.0 {unit} vs {prevYr}
+      </span>
+    );
+  };
+
+  // Build hover-identical tooltip details for a Chart 1 (Fiber Temp) row
+  const buildChart1TooltipItems = (rowObj: Record<string, any>) => {
+    const items: Array<{
+      name: string;
+      value: number;
+      unit: '°C';
+      color: string;
+      dataKey: string;
+      deltaBadge: React.ReactNode;
+    }> = [];
+
+    if (!rowObj) return items;
+
+    if (comparisonMode !== 'continuous') {
+      availableYears.forEach((yr, idx) => {
+        const col = getYearColor(yr, idx);
+        const tfVal = rowObj[`Tf_${yr}`];
+        if (typeof tfVal === 'number' && !Number.isNaN(tfVal)) {
+          items.push({
+            name: `Year ${yr} Tf (°C)`,
+            value: tfVal,
+            unit: '°C',
+            color: col,
+            dataKey: `Tf_${yr}`,
+            deltaBadge: buildYoYDeltaBadge(rowObj, 'Tf', yr, tfVal, '°C'),
+          });
+        }
+        const tcVal = rowObj[`Tc_${yr}`];
+        if (typeof tcVal === 'number' && !Number.isNaN(tcVal) && tcVal > 0) {
+          items.push({
+            name: `Year ${yr} Tc (°C)`,
+            value: tcVal,
+            unit: '°C',
+            color: col,
+            dataKey: `Tc_${yr}`,
+            deltaBadge: buildYoYDeltaBadge(rowObj, 'Tc', yr, tcVal, '°C'),
+          });
+        }
+      });
+    } else {
+      if (typeof rowObj.tfMax === 'number' && !Number.isNaN(rowObj.tfMax) && rowObj.tfMax > 0) {
+        items.push({
+          name: 'Daily Peak Fiber Temp (Tf, °C)',
+          value: rowObj.tfMax,
+          unit: '°C',
+          color: '#38bdf8',
+          dataKey: 'tfMax',
+          deltaBadge: null,
+        });
+      }
+      if (typeof rowObj.tcMax === 'number' && !Number.isNaN(rowObj.tcMax) && rowObj.tcMax > 0) {
+        items.push({
+          name: 'Est Conductor Temp (Tc, °C)',
+          value: rowObj.tcMax,
+          unit: '°C',
+          color: '#f59e0b',
+          dataKey: 'tcMax',
+          deltaBadge: null,
+        });
+      }
+    }
+    return items;
+  };
+
+  // Build hover-identical tooltip details for a Chart 2 (Power Records) row
+  const buildChart2TooltipItems = (rowObj: Record<string, any>) => {
+    const items: Array<{
+      name: string;
+      value: number;
+      unit: 'MW';
+      color: string;
+      dataKey: string;
+      deltaBadge: React.ReactNode;
+    }> = [];
+
+    if (!rowObj) return items;
+
+    if (comparisonMode !== 'continuous') {
+      availableYears.forEach((yr, idx) => {
+        const col = getYearColor(yr, idx);
+        const pushIfValid = (pfx: string, seriesName: string, seriesColor: string) => {
+          const val = rowObj[`${pfx}_${yr}`];
+          if (typeof val === 'number' && !Number.isNaN(val)) {
+            items.push({
+              name: seriesName,
+              value: val,
+              unit: 'MW',
+              color: seriesColor,
+              dataKey: `${pfx}_${yr}`,
+              deltaBadge: buildYoYDeltaBadge(rowObj, pfx, yr, val, 'MW'),
+            });
+          }
+        };
+
+        if (selectedPowerCircuit === 'combination') {
+          pushIfValid('Total', `Year ${yr} Combination Total (MW)`, col);
+        } else if (selectedPowerCircuit === 'ckt3') {
+          pushIfValid('Ckt3', `Year ${yr} 115kV Ckt #3 (MW)`, col);
+        } else if (selectedPowerCircuit === 'ckt2') {
+          pushIfValid('Ckt2', `Year ${yr} 115kV Ckt #2 (MW)`, col);
+        } else if (selectedPowerCircuit === 'nkt33') {
+          pushIfValid('Nkt', `Year ${yr} 33kV NKT (MW)`, col);
+        } else if (selectedPowerCircuit === 'oil33') {
+          pushIfValid('Oil', `Year ${yr} 33kV Oil (MW)`, col);
+        } else {
+          // all_four
+          pushIfValid('Total', `Yr ${yr} Total MW`, col);
+          pushIfValid('Ckt3', `Yr ${yr} Ckt #3`, '#f59e0b');
+          pushIfValid('Ckt2', `Yr ${yr} Ckt #2`, '#38bdf8');
+        }
+      });
+    } else {
+      const pushContIfValid = (key: string, seriesName: string, seriesColor: string) => {
+        const val = rowObj[key];
+        if (typeof val === 'number' && !Number.isNaN(val) && val > 0) {
+          items.push({
+            name: seriesName,
+            value: val,
+            unit: 'MW',
+            color: seriesColor,
+            dataKey: key,
+            deltaBadge: null,
+          });
+        }
+      };
+
+      if (selectedPowerCircuit === 'combination' || selectedPowerCircuit === 'all_four') {
+        pushContIfValid('totalIslandMW', 'Combination of 4 Circuits (Total Island MW)', '#a855f7');
+      }
+      if (selectedPowerCircuit === 'ckt3' || selectedPowerCircuit === 'all_four') {
+        pushContIfValid('ckt3MW', '115kV Circuit #3 Peak (MW)', '#f59e0b');
+      }
+      if (selectedPowerCircuit === 'ckt2' || selectedPowerCircuit === 'all_four') {
+        pushContIfValid('ckt2MW', '115kV Circuit #2 Peak (MW)', '#38bdf8');
+      }
+      if (selectedPowerCircuit === 'nkt33' || selectedPowerCircuit === 'all_four') {
+        pushContIfValid('nkt33MW', '33kV NKT Submarine Peak (MW)', '#6366f1');
+      }
+      if (selectedPowerCircuit === 'oil33' || selectedPowerCircuit === 'all_four') {
+        pushContIfValid('oil33MW', '33kV Oil-Filled Submarine Peak (MW)', '#eab308');
+      }
+    }
+
+    return items;
+  };
+
+  // Compute the highest-value point across the active range for Chart 1 (Fiber Temp)
+  const chart1PeakPoint = useMemo(() => {
+    const xKey = comparisonMode === 'year_to_year' || comparisonMode === 'same_month' ? 'monthDay' : 'date';
+    let bestVal = -Infinity;
+    let bestRow: Record<string, any> | null = null;
+    let bestRowIdx = -1;
+    let bestColor = '#38bdf8';
+    let bestDataKey = '';
+
+    chart1TempData.forEach((row: Record<string, any>, idx: number) => {
+      if (comparisonMode !== 'continuous') {
+        // Prioritize primary solid Fiber Temp (Tf) curve with markers; if Tc is present on the chart, check Tf first so pointer pins directly onto the solid curve marker
+        availableYears.forEach((yr, yrIdx) => {
+          const col = getYearColor(yr, yrIdx);
+          const tf = row[`Tf_${yr}`];
+          if (typeof tf === 'number' && !Number.isNaN(tf) && tf > bestVal) {
+            bestVal = tf;
+            bestRow = row;
+            bestRowIdx = idx;
+            bestColor = col;
+            bestDataKey = `Tf_${yr}`;
+          }
+        });
+      } else {
+        const tf = row.tfMax;
+        if (typeof tf === 'number' && !Number.isNaN(tf) && tf > bestVal) {
+          bestVal = tf;
+          bestRow = row;
+          bestRowIdx = idx;
+          bestColor = '#38bdf8';
+          bestDataKey = 'tfMax';
+        }
+      }
+    });
+
+    if (!bestRow || bestVal === -Infinity) return null;
+    const xValue = String((bestRow as Record<string, any>)[xKey] || '');
+    const items = buildChart1TooltipItems(bestRow);
+
+    return {
+      xValue,
+      yValue: bestVal,
+      row: bestRow,
+      rowIndex: bestRowIdx,
+      totalRows: chart1TempData.length,
+      peakColor: bestColor,
+      peakDataKey: bestDataKey,
+      unit: '°C' as const,
+      items,
+    };
+  }, [chart1TempData, comparisonMode, availableYears]);
+
+  // Compute the highest-value point across the active range for Chart 2 (Power Records)
+  const chart2PeakPoint = useMemo(() => {
+    const xKey = comparisonMode === 'year_to_year' || comparisonMode === 'same_month' ? 'monthDay' : 'date';
+    let bestVal = -Infinity;
+    let bestRow: Record<string, any> | null = null;
+    let bestRowIdx = -1;
+    let bestColor = '#c084fc';
+    let bestDataKey = '';
+
+    chart2PowerData.forEach((row: Record<string, any>, idx: number) => {
+      const rowItems = buildChart2TooltipItems(row);
+      rowItems.forEach((it) => {
+        if (typeof it.value === 'number' && !Number.isNaN(it.value) && it.value > bestVal) {
+          bestVal = it.value;
+          bestRow = row;
+          bestRowIdx = idx;
+          bestColor = it.color;
+          bestDataKey = it.dataKey;
+        }
+      });
+    });
+
+    if (!bestRow || bestVal === -Infinity) return null;
+    const xValue = String((bestRow as Record<string, any>)[xKey] || '');
+    const items = buildChart2TooltipItems(bestRow);
+
+    return {
+      xValue,
+      yValue: bestVal,
+      row: bestRow,
+      rowIndex: bestRowIdx,
+      totalRows: chart2PowerData.length,
+      peakColor: bestColor,
+      peakDataKey: bestDataKey,
+      unit: 'MW' as const,
+      items,
+    };
+  }, [chart2PowerData, comparisonMode, availableYears, selectedPowerCircuit]);
+
+  // Dedicated top band height above the chart grid so the Peak Callout Card never overlays the plotted curves by default
+  const tempTopBandHeight = useMemo(() => {
+    if (!chart1PeakPoint) return 24;
+    if (!isTempPeakCardOpen) return 44;
+    return Math.max(108, Math.min(168, 56 + chart1PeakPoint.items.length * 23));
+  }, [chart1PeakPoint, isTempPeakCardOpen]);
+
+  const powerTopBandHeight = useMemo(() => {
+    if (!chart2PeakPoint) return 24;
+    if (!isPowerPeakCardOpen) return 44;
+    return Math.max(108, Math.min(168, 56 + chart2PeakPoint.items.length * 23));
+  }, [chart2PeakPoint, isPowerPeakCardOpen]);
+
+  // Built-in moveable Peak Callout Card renderer (positioned in non-overlapping top band by default, draggable anywhere)
+  const renderInChartPeakCallout = (
+    peak: {
+      xValue: string;
+      yValue: number;
+      rowIndex: number;
+      totalRows: number;
+      peakColor: string;
+      peakDataKey: string;
+      unit: '°C' | 'MW';
+      items: Array<{
+        name: string;
+        value: number;
+        unit: '°C' | 'MW';
+        color: string;
+        dataKey: string;
+        deltaBadge: React.ReactNode;
+      }>;
+    },
+    isOpen: boolean,
+    setIsOpen: (open: boolean) => void,
+    offset: { dx: number; dy: number },
+    setOffset: React.Dispatch<React.SetStateAction<{ dx: number; dy: number }>>,
+    themeVariant: 'cyan' | 'emerald'
+  ) => {
+    const handleMouseDragStart = (e: React.MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startDx = offset.dx;
+      const startDy = offset.dy;
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        setOffset({
+          dx: startDx + (moveEvent.clientX - startX),
+          dy: startDy + (moveEvent.clientY - startY),
+        });
+      };
+
+      const onMouseUp = () => {
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    };
+
+    const handleTouchDragStart = (e: React.TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      e.stopPropagation();
+      const startX = e.touches[0].clientX;
+      const startY = e.touches[0].clientY;
+      const startDx = offset.dx;
+      const startDy = offset.dy;
+
+      const onTouchMove = (moveEvent: TouchEvent) => {
+        if (moveEvent.touches.length !== 1) return;
+        setOffset({
+          dx: startDx + (moveEvent.touches[0].clientX - startX),
+          dy: startDy + (moveEvent.touches[0].clientY - startY),
+        });
+      };
+
+      const onTouchEnd = () => {
+        window.removeEventListener('touchmove', onTouchMove);
+        window.removeEventListener('touchend', onTouchEnd);
+      };
+
+      window.addEventListener('touchmove', onTouchMove, { passive: true });
+      window.addEventListener('touchend', onTouchEnd);
+    };
+
+    return (props: any) => {
+      const { cx, cy } = props;
+      if (typeof cx !== 'number' || typeof cy !== 'number' || Number.isNaN(cx) || Number.isNaN(cy)) {
+        return null;
+      }
+
+      const accentStroke = themeVariant === 'cyan' ? '#22d3ee' : '#34d399';
+      const borderClass =
+        themeVariant === 'cyan' ? 'border-cyan-500/60' : 'border-emerald-500/60';
+      const headerTextClass =
+        themeVariant === 'cyan' ? 'text-cyan-300' : 'text-emerald-300';
+      const badgeBgClass =
+        themeVariant === 'cyan'
+          ? 'bg-cyan-500/20 text-cyan-200 border-cyan-400/40'
+          : 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40';
+
+      // Default position is inside the dedicated non-overlapping top band (y = 4) directly above (cx, cy),
+      // so the card NEVER overlays the plotted curves unless the user drags it elsewhere.
+      const cardWidth = 325;
+      const estCardHeight = Math.min(260, 52 + peak.items.length * 22);
+      const baseCardX = Math.max(66, Math.min(cx - cardWidth / 2, 855 - cardWidth));
+      const baseCardY = 4;
+
+      const cardX = Math.max(10, baseCardX + offset.dx);
+      const cardY = Math.max(2, baseCardY + offset.dy);
+      const isMoved = offset.dx !== 0 || offset.dy !== 0;
+
+      // 4-edge smart connector from the card boundary to the highest point (cx, cy)
+      const clampedX = Math.max(cardX + 14, Math.min(cx, cardX + cardWidth - 14));
+      const clampedY = Math.max(cardY + 14, Math.min(cy, cardY + estCardHeight - 14));
+      let connectX = clampedX;
+      let connectY = cardY + estCardHeight;
+
+      if (cardY + estCardHeight <= cy) {
+        connectX = clampedX;
+        connectY = cardY + estCardHeight;
+      } else if (cardY >= cy) {
+        connectX = clampedX;
+        connectY = cardY;
+      } else if (cardX + cardWidth <= cx) {
+        connectX = cardX + cardWidth;
+        connectY = clampedY;
+      } else {
+        connectX = cardX;
+        connectY = clampedY;
+      }
+
+      // Arrowhead near (cx, cy) pointing directly at the peak point
+      const dx = connectX - cx;
+      const dy = connectY - cy;
+      const len = Math.max(1, Math.hypot(dx, dy));
+      const ux = dx / len;
+      const uy = dy / len;
+      const tipX = cx + ux * 8;
+      const tipY = cy + uy * 8;
+      const baseX = cx + ux * 15;
+      const baseY = cy + uy * 15;
+      const perpX = -uy * 4;
+      const perpY = ux * 4;
+
+      // Closed mini-pill coordinates (also in the non-overlapping top band above cy)
+      const closedWidth = 225;
+      const baseClosedX = Math.max(66, Math.min(cx - closedWidth / 2, 855 - closedWidth));
+      const closedX = Math.max(10, baseClosedX + offset.dx);
+      const closedY = Math.max(4, 6 + offset.dy);
+
+      return (
+        <g key={`peak-callout-${peak.xValue}-${peak.yValue}`}>
+          {/* Outer glowing ring at the highest value point */}
+          <circle
+            cx={cx}
+            cy={cy}
+            r={10.5}
+            fill={peak.peakColor}
+            fillOpacity={0.22}
+            stroke={accentStroke}
+            strokeWidth={1.6}
+            strokeDasharray="3 2"
+          />
+          {/* Inner crisp ring around the curve marker */}
+          <circle
+            cx={cx}
+            cy={cy}
+            r={6}
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth={1.8}
+          />
+
+          {isOpen ? (
+            <>
+              {/* Leader line from highest point to the moveable card */}
+              <line
+                x1={tipX}
+                y1={tipY}
+                x2={connectX}
+                y2={connectY}
+                stroke="#020617"
+                strokeWidth={3.5}
+                strokeLinecap="round"
+              />
+              <line
+                x1={tipX}
+                y1={tipY}
+                x2={connectX}
+                y2={connectY}
+                stroke={accentStroke}
+                strokeWidth={1.8}
+                strokeDasharray="3 2"
+                strokeLinecap="round"
+              />
+              {/* Pointer arrowhead pointing directly at the highest point */}
+              <polygon
+                points={`${tipX},${tipY} ${baseX + perpX},${baseY + perpY} ${baseX - perpX},${baseY - perpY}`}
+                fill={accentStroke}
+                stroke="#020617"
+                strokeWidth={0.8}
+              />
+
+              {/* Moveable Card positioned above the curves by default with Drag Handle, Reset, and Close buttons */}
+              <foreignObject
+                x={cardX}
+                y={cardY}
+                width={cardWidth}
+                height={Math.max(180, estCardHeight + 30)}
+                style={{ overflow: 'visible', pointerEvents: 'auto' }}
+              >
+                <div
+                  onMouseDown={handleMouseDragStart}
+                  onTouchStart={handleTouchDragStart}
+                  onClick={(e) => e.stopPropagation()}
+                  title="Drag to move this card anywhere"
+                  className={`bg-slate-950/95 backdrop-blur-md border ${borderClass} rounded-xl p-2.5 text-[11px] font-mono shadow-[0_8px_30px_rgba(0,0,0,0.75)] space-y-1.5 cursor-grab active:cursor-grabbing select-none`}
+                  style={{ width: `${cardWidth}px`, pointerEvents: 'auto' }}
+                >
+                  {/* Card Header: Drag Handle + Highest Value Badge + Date/Day + Reset & Close Buttons */}
+                  <div className="flex items-center justify-between gap-1.5 border-b border-slate-800 pb-1.5">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className="p-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800 shrink-0"
+                        title="Drag card to move"
+                      >
+                        <Move className="w-3 h-3" />
+                      </span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded border text-[9px] font-extrabold uppercase tracking-wider shrink-0 ${badgeBgClass}`}
+                      >
+                        ★ Peak
+                      </span>
+                      <span className={`font-bold truncate ${headerTextClass}`}>
+                        Date / Day: {peak.xValue}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {isMoved && (
+                        <button
+                          type="button"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onTouchStart={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOffset({ dx: 0, dy: 0 });
+                          }}
+                          title="Reset card to default non-overlapping position"
+                          className="px-1.5 py-0.5 rounded-md bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-cyan-300 border border-slate-700 text-[9px] font-bold transition-colors cursor-pointer flex items-center gap-0.5"
+                        >
+                          <RotateCcw className="w-2.5 h-2.5" />
+                          <span>Reset</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onTouchStart={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsOpen(false);
+                        }}
+                        title="Close highest value card"
+                        className="px-1.5 py-0.5 rounded-md bg-slate-900 hover:bg-rose-950/80 text-slate-300 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-[10px] font-bold transition-colors cursor-pointer flex items-center gap-0.5"
+                      >
+                        <X className="w-3 h-3" />
+                        <span>Close</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Same details that appear on mouse hover for this point */}
+                  <div className="space-y-1">
+                    {peak.items.map((it, idx) => {
+                      const isMaxSeries = it.dataKey === peak.peakDataKey;
+                      return (
+                        <div
+                          key={idx}
+                          className={`flex justify-between items-center gap-1.5 rounded px-1 py-0.5 ${
+                            isMaxSeries ? 'bg-slate-900/90 ring-1 ring-white/15' : ''
+                          }`}
+                          style={{ color: it.color }}
+                        >
+                          <span className="truncate" title={it.name}>
+                            {isMaxSeries ? '★ ' : ''}
+                            {it.name}:
+                          </span>
+                          <div className="flex items-center shrink-0">
+                            <span className="font-bold">
+                              {it.value} {it.unit}
+                            </span>
+                            {it.deltaBadge}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </foreignObject>
+            </>
+          ) : (
+            /* Compact Re-Open Pill in the non-overlapping top band with pointer line when closed */
+            <>
+              <line
+                x1={cx}
+                y1={cy - 7}
+                x2={closedX + closedWidth / 2}
+                y2={closedY + 26}
+                stroke={accentStroke}
+                strokeWidth={1.3}
+                strokeDasharray="2 2"
+              />
+              <foreignObject
+                x={closedX}
+                y={closedY}
+                width={closedWidth}
+                height={34}
+                style={{ overflow: 'visible', pointerEvents: 'auto' }}
+              >
+                <div
+                  onMouseDown={handleMouseDragStart}
+                  onTouchStart={handleTouchDragStart}
+                  className={`px-2.5 py-1 rounded-lg bg-slate-950/95 border ${borderClass} text-[10px] font-mono font-bold ${headerTextClass} shadow-lg flex items-center justify-between gap-1.5 whitespace-nowrap cursor-grab active:cursor-grabbing select-none`}
+                  style={{ pointerEvents: 'auto' }}
+                >
+                  <span className="flex items-center gap-1">
+                    <Move className="w-2.5 h-2.5 text-slate-400" />
+                    <span>★ Peak: {peak.yValue} {peak.unit} ({peak.xValue})</span>
+                  </span>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onTouchStart={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsOpen(true);
+                    }}
+                    className="px-1.5 py-0.2 rounded bg-slate-800 hover:bg-slate-700 text-slate-100 text-[9px] cursor-pointer"
+                  >
+                    Open
+                  </button>
+                </div>
+              </foreignObject>
+            </>
+          )}
+        </g>
+      );
+    };
+  };
+
   if (!hasAnyDataSource) {
     return (
       <NoDatabaseEmptyState
@@ -842,6 +1497,30 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                     {isLand && selectedPhase ? ` • [${selectedPhase}]` : ''}
                   </p>
                 </div>
+
+                {/* Built-in Peak Card Open/Close Toggle */}
+                {chart1PeakPoint && (
+                  <button
+                    type="button"
+                    onClick={() => setIsTempPeakCardOpen((prev) => !prev)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isTempPeakCardOpen
+                        ? 'bg-cyan-950/80 text-cyan-300 border-cyan-500/50 shadow-[0_0_12px_rgba(6,182,212,0.2)]'
+                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:border-slate-700'
+                    }`}
+                    title="Open or close the built-in highest value card inside the Fiber Temp chart"
+                  >
+                    {isTempPeakCardOpen ? (
+                      <Eye className="w-3.5 h-3.5 text-cyan-400" />
+                    ) : (
+                      <EyeOff className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                    <span>
+                      Highest Value Card ({chart1PeakPoint.yValue} °C on {chart1PeakPoint.xValue}):{' '}
+                      {isTempPeakCardOpen ? 'OPEN' : 'CLOSED'}
+                    </span>
+                  </button>
+                )}
               </div>
 
               {comparisonMode !== 'continuous' && (
@@ -864,12 +1543,17 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
               )}
 
               <div className="overflow-x-auto w-full pb-2">
-                <div style={{ minWidth: `${Math.max(900, chart1TempData.length * 16)}px` }} className="h-[360px]">
+                <div
+                  style={{
+                    minWidth: `${Math.max(900, chart1TempData.length * 16)}px`,
+                    height: `${355 + tempTopBandHeight}px`,
+                  }}
+                >
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart
                       key={`temp-chart-${selectedSectionId}-${selectedPhase}-${comparisonMode}-${selectedMonth}-${selectedYear}`}
                       data={chart1TempData}
-                      margin={{ top: 20, right: 30, left: 10, bottom: 20 }}
+                      margin={{ top: tempTopBandHeight, right: 30, left: 10, bottom: 20 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.7} />
                       <XAxis
@@ -1027,6 +1711,23 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                           label={{ value: '65°C Alert', fill: '#f59e0b', fontSize: 10, position: 'insideTopLeft' }}
                         />
                       )}
+
+                      {chart1PeakPoint && (
+                        <ReferenceDot
+                          x={chart1PeakPoint.xValue}
+                          y={chart1PeakPoint.yValue}
+                          r={6}
+                          ifOverflow="extendDomain"
+                          shape={renderInChartPeakCallout(
+                            chart1PeakPoint,
+                            isTempPeakCardOpen,
+                            setIsTempPeakCardOpen,
+                            tempCardOffset,
+                            setTempCardOffset,
+                            'cyan'
+                          )}
+                        />
+                      )}
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
@@ -1088,6 +1789,30 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                     );
                   })}
                 </div>
+
+                {/* Built-in Peak Card Open/Close Toggle for Power Records */}
+                {chart2PeakPoint && (
+                  <button
+                    type="button"
+                    onClick={() => setIsPowerPeakCardOpen((prev) => !prev)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isPowerPeakCardOpen
+                        ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/50 shadow-[0_0_12px_rgba(16,185,129,0.2)]'
+                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:border-slate-700'
+                    }`}
+                    title="Open or close the built-in highest value card inside the Power Records chart"
+                  >
+                    {isPowerPeakCardOpen ? (
+                      <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <EyeOff className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                    <span>
+                      Highest Value Card ({chart2PeakPoint.yValue} MW on {chart2PeakPoint.xValue}):{' '}
+                      {isPowerPeakCardOpen ? 'OPEN' : 'CLOSED'}
+                    </span>
+                  </button>
+                )}
               </div>
 
               {comparisonMode !== 'continuous' && (
@@ -1110,11 +1835,16 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
               )}
 
               <div className="overflow-x-auto w-full pb-2">
-                <div style={{ minWidth: `${Math.max(900, chart2PowerData.length * 16)}px` }} className="h-[360px]">
+                <div
+                  style={{
+                    minWidth: `${Math.max(900, chart2PowerData.length * 16)}px`,
+                    height: `${355 + powerTopBandHeight}px`,
+                  }}
+                >
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart
                       data={chart2PowerData}
-                      margin={{ top: 20, right: 30, left: 10, bottom: 20 }}
+                      margin={{ top: powerTopBandHeight, right: 30, left: 10, bottom: 20 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.7} />
                       <XAxis
@@ -1382,6 +2112,23 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                             />
                           )}
                         </>
+                      )}
+
+                      {chart2PeakPoint && (
+                        <ReferenceDot
+                          x={chart2PeakPoint.xValue}
+                          y={chart2PeakPoint.yValue}
+                          r={6}
+                          ifOverflow="extendDomain"
+                          shape={renderInChartPeakCallout(
+                            chart2PeakPoint,
+                            isPowerPeakCardOpen,
+                            setIsPowerPeakCardOpen,
+                            powerCardOffset,
+                            setPowerCardOffset,
+                            'emerald'
+                          )}
+                        />
                       )}
                     </LineChart>
                   </ResponsiveContainer>
