@@ -27,6 +27,7 @@ import {
 } from '../data/cableCircuitStructure';
 import {
   getOrgRecordsForDate,
+  subscribeToOrgDatabase,
   OrgDatabaseRecord,
   OrgDatabaseConfig,
 } from '../services/orgDatabaseStorage';
@@ -126,7 +127,37 @@ export interface EnrichedPublicPoint extends CableSamplingPoint {
   p33OilMaxMW: number;
   peakTime: string;
   sourceFile: string;
+  pointIndexInSection: number;
+  totalPointsInSection: number;
+  tfColLetter: string;
+  tcColLetter: string;
 }
+
+function excelColIndexToLetters(colIdx: number): string {
+  let n = colIdx + 1;
+  let str = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    str = String.fromCharCode(65 + rem) + str;
+    n = Math.floor((n - 1) / 26);
+  }
+  return str;
+}
+
+const SECTION_DISTINCT_DOFS_MAP: Map<string, number[]> = (() => {
+  const map = new Map<string, number[]>();
+  CIRCUIT_3_SECTIONS.forEach((sec) => {
+    const dofs = Array.from(
+      new Set(
+        CIRCUIT_3_SAMPLING_POINTS.filter((p) => p.sectionId === sec.sectionId).map((p) =>
+          Number(p.dof.toFixed(2))
+        )
+      )
+    ).sort((a, b) => a - b);
+    map.set(sec.sectionId, dofs);
+  });
+  return map;
+})();
 
 // 7 Required Important Landmark Locations with Coordinates
 interface LandmarkLocation {
@@ -247,6 +278,14 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   powerSummariesByDate,
   selectedDateFilter = 'all',
 }) => {
+  const [dbVersion, setDbVersion] = useState<number>(0);
+
+  useEffect(() => {
+    return subscribeToOrgDatabase(() => {
+      setDbVersion((v) => v + 1);
+    });
+  }, []);
+
   // Determine available dates strictly from Panel 1 ("Daily peak temperature database")
   const availableDates = useMemo(() => {
     const dates = new Set<string>();
@@ -254,7 +293,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
       dbConfig.availableDates.forEach((d) => dates.add(d));
     }
     return Array.from(dates).sort();
-  }, [dbConfig]);
+  }, [dbConfig, dbVersion]);
 
   const hasAnyDataSource = availableDates.length > 0 || (dbConfig.hasDatabase && dbConfig.totalRecords > 0);
 
@@ -303,7 +342,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   const dailyRecords = useMemo(() => {
     if (!selectedDate) return [];
     return getOrgRecordsForDate(selectedDate);
-  }, [selectedDate, dbConfig]);
+  }, [selectedDate, dbConfig, dbVersion]);
 
   // Determine the day before selectedDate and load its records for day-over-day comparison
   const { prevDate, prevDailyRecords } = useMemo(() => {
@@ -325,7 +364,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
       return { prevDate: fallbackPrev, prevDailyRecords: getOrgRecordsForDate(fallbackPrev) };
     }
     return { prevDate: candidateDate, prevDailyRecords: [] as OrgDatabaseRecord[] };
-  }, [selectedDate, availableDates, dbConfig]);
+  }, [selectedDate, availableDates, dbConfig, dbVersion]);
 
   // Section record lookup map
   const sectionRecordMap = useMemo(() => {
@@ -335,27 +374,51 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
       if (r.phase) {
         const pNorm = r.phase.replace(/^Phase\s+/i, '').trim();
         map.set(`${r.sectionId}_${pNorm}`, r);
+        if (/Submarine/i.test(pNorm)) {
+          map.set(`${r.sectionId}_SM`, r);
+        }
       }
     });
     return map;
-  }, [dailyRecords]);
+  }, [dailyRecords, dbVersion]);
 
   // Helper to resolve per-DOF daily maximum Tf, Tc, and peak time from an OrgDatabaseRecord
   const resolveDofDailyPeak = (p: CableSamplingPoint, rec?: OrgDatabaseRecord) => {
+    const secDofs = SECTION_DISTINCT_DOFS_MAP.get(p.sectionId) || [];
+    const ptIdx = secDofs.findIndex((d) => Math.abs(d - p.dof) < 0.05);
+    const totalPts = secDofs.length || 1;
+    const colIdxTf = 5 + Math.max(0, ptIdx) * 2;
+    const colIdxTc = colIdxTf + 1;
+    const tfColLetter = excelColIndexToLetters(colIdxTf);
+    const tcColLetter = excelColIndexToLetters(colIdxTc);
+
     if (!rec) {
-      return { tf: 0, tc: 0, peakTime: '14:30' };
+      return {
+        tf: 0,
+        tc: 0,
+        peakTime: '14:30',
+        pointIndexInSection: Math.max(0, ptIdx),
+        totalPointsInSection: totalPts,
+        tfColLetter,
+        tcColLetter,
+      };
     }
     const k2 = p.dof.toFixed(2);
     const k1 = p.dof.toFixed(1);
     const k0 = String(Math.round(p.dof));
+    const kIdx = ptIdx >= 0 ? `idx_${ptIdx}` : '';
 
     let dofTf: number | undefined =
-      rec.dofTfMax?.[k2] ?? rec.dofTfMax?.[k1] ?? rec.dofTfMax?.[k0];
+      rec.dofTfMax?.[k2] ??
+      rec.dofTfMax?.[k1] ??
+      (kIdx ? rec.dofTfMax?.[kIdx] : undefined) ??
+      rec.dofTfMax?.[k0];
 
     if (dofTf === undefined && rec.dofTfMax) {
       for (const [k, val] of Object.entries(rec.dofTfMax)) {
+        if (k.startsWith('idx_')) continue;
         const dNum = parseFloat(k);
-        if (!isNaN(dNum) && Math.abs(dNum - p.dof) < 0.35 && val > 0 && val < 130) {
+        if (!isNaN(dNum) && Math.abs(dNum - p.dof) < 0.6 && Number.isFinite(val)) {
           dofTf = val;
           break;
         }
@@ -363,48 +426,68 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
     }
 
     let dofTc: number | undefined =
-      rec.dofTcMax?.[k2] ?? rec.dofTcMax?.[k1] ?? rec.dofTcMax?.[k0];
+      rec.dofTcMax?.[k2] ??
+      rec.dofTcMax?.[k1] ??
+      (kIdx ? rec.dofTcMax?.[kIdx] : undefined) ??
+      rec.dofTcMax?.[k0];
 
     if (dofTc === undefined && rec.dofTcMax) {
       for (const [k, val] of Object.entries(rec.dofTcMax)) {
+        if (k.startsWith('idx_')) continue;
         const dNum = parseFloat(k);
-        if (!isNaN(dNum) && Math.abs(dNum - p.dof) < 0.35 && val > 0 && val < 160) {
+        if (!isNaN(dNum) && Math.abs(dNum - p.dof) < 0.6 && Number.isFinite(val)) {
           dofTc = val;
           break;
         }
       }
     }
 
-    const rawSecTf = rec.tfMax > 0 && rec.tfMax < 130 ? rec.tfMax : 45.2;
-    const rawSecTc = rec.tcMax > 0 && rec.tcMax < 160 ? rec.tcMax : 54.8;
+    const finalTf =
+      dofTf !== undefined && Number.isFinite(dofTf)
+        ? dofTf
+        : Number.isFinite(rec.tfMax) && rec.tfMax > 0
+          ? rec.tfMax
+          : 0;
 
-    const finalTf = dofTf !== undefined && dofTf > 0 && dofTf < 130 ? dofTf : rawSecTf;
-    let finalTc = dofTc !== undefined && dofTc > 0 && dofTc < 160 ? dofTc : 0;
-    if (finalTc <= 0 && finalTf > 0) {
-      const secObj = CIRCUIT_3_SECTIONS.find((s) => s.sectionId === p.sectionId);
-      if (secObj) {
-        const est = evaluateSectionConductorTemp(
-          secObj,
-          finalTf,
-          rec.pCkt3MaxMW || 35,
-          rec.pCkt2MaxMW || 0,
-          rec.p33NktMaxMW || 0,
-          rec.p33OilMaxMW || 0
-        );
-        if (est.tc60287 && est.tc60287 > 0) {
-          finalTc = Number(est.tc60287.toFixed(2));
+    let finalTc = dofTc !== undefined && Number.isFinite(dofTc) ? dofTc : NaN;
+    if (isNaN(finalTc)) {
+      if (Number.isFinite(finalTf) && finalTf !== 0) {
+        const secObj = CIRCUIT_3_SECTIONS.find((s) => s.sectionId === p.sectionId);
+        if (secObj) {
+          const est = evaluateSectionConductorTemp(
+            secObj,
+            finalTf,
+            rec.pCkt3MaxMW || 35,
+            rec.pCkt2MaxMW || 0,
+            rec.p33NktMaxMW || 0,
+            rec.p33OilMaxMW || 0
+          );
+          if (est.tc60287 !== null && Number.isFinite(est.tc60287)) {
+            finalTc = Number(est.tc60287.toFixed(2));
+          }
         }
       }
-      if (finalTc <= 0) finalTc = rawSecTc;
+      if (isNaN(finalTc)) {
+        finalTc = Number.isFinite(rec.tcMax) && rec.tcMax > 0 ? rec.tcMax : 0;
+      }
     }
 
     const dofTime =
       rec.dofTimeMax?.[k2] ||
       rec.dofTimeMax?.[k1] ||
+      (kIdx ? rec.dofTimeMax?.[kIdx] : undefined) ||
       rec.dofTimeMax?.[k0] ||
       extractTimeFromPeakInfo(rec.timestampMax, rec.fileNameMax);
 
-    return { tf: finalTf, tc: finalTc, peakTime: dofTime };
+    return {
+      tf: finalTf,
+      tc: finalTc,
+      peakTime: dofTime,
+      pointIndexInSection: Math.max(0, ptIdx),
+      totalPointsInSection: totalPts,
+      tfColLetter,
+      tcColLetter,
+    };
   };
 
   // Filtered sampling points enriched with each DOF's daily maximum temperature & coincident power flows
@@ -422,7 +505,15 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
         (p.phase ? sectionRecordMap.get(`${p.sectionId}_${p.phase}`) : null) ||
         sectionRecordMap.get(p.sectionId);
 
-      const { tf, tc, peakTime } = resolveDofDailyPeak(p, rec);
+      const {
+        tf,
+        tc,
+        peakTime,
+        pointIndexInSection,
+        totalPointsInSection,
+        tfColLetter,
+        tcColLetter,
+      } = resolveDofDailyPeak(p, rec);
       const powerAtMaxMW = rec?.powerAtMaxMW ?? 0;
       const pCkt3MaxMW = rec?.pCkt3MaxMW ?? 0;
       const pCkt2MaxMW = rec?.pCkt2MaxMW ?? 0;
@@ -440,9 +531,13 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
         p33OilMaxMW,
         peakTime,
         sourceFile: rec?.fileNameMax || '',
+        pointIndexInSection,
+        totalPointsInSection,
+        tfColLetter,
+        tcColLetter,
       };
     });
-  }, [selectedCategory, selectedSectionFilter, selectedPhaseFilter, sectionRecordMap]);
+  }, [selectedCategory, selectedSectionFilter, selectedPhaseFilter, sectionRecordMap, dbVersion]);
 
   // Helper to compute stats for a set of daily records (respecting current category/section/phase filters)
   const computeStatsForRecords = (records: OrgDatabaseRecord[]) => {
@@ -455,6 +550,9 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
       if (r.phase) {
         const pNorm = r.phase.replace(/^Phase\s+/i, '').trim();
         recMap.set(`${r.sectionId}_${pNorm}`, r);
+        if (/Submarine/i.test(pNorm)) {
+          recMap.set(`${r.sectionId}_SM`, r);
+        }
       }
     });
 
@@ -713,10 +811,10 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
                 ${routeName} ${phaseBadge ? `[Phase ${phaseBadge}]` : ''}
               </div>
               <div style="color: #0369a1; font-weight: bold;">
-                From: ${p1.pos} (${p1.tfMax > 0 ? p1.tfMax.toFixed(1) + ' °C' : 'N/A'})
+                From: ${p1.pos} [DOF ${p1.dof.toFixed(2)}m] (Tf: ${Number.isFinite(p1.tfMax) && p1.tfMax !== 0 ? p1.tfMax.toFixed(2) + ' °C' : 'N/A'} | Tc: ${Number.isFinite(p1.tcMax) && p1.tcMax !== 0 ? p1.tcMax.toFixed(2) + ' °C' : 'N/A'})
               </div>
               <div style="color: #0369a1; font-weight: bold;">
-                To: ${p2.pos} (${p2.tfMax > 0 ? p2.tfMax.toFixed(1) + ' °C' : 'N/A'})
+                To: ${p2.pos} [DOF ${p2.dof.toFixed(2)}m] (Tf: ${Number.isFinite(p2.tfMax) && p2.tfMax !== 0 ? p2.tfMax.toFixed(2) + ' °C' : 'N/A'} | Tc: ${Number.isFinite(p2.tcMax) && p2.tcMax !== 0 ? p2.tcMax.toFixed(2) + ' °C' : 'N/A'})
               </div>
             </div>`,
             { sticky: true, opacity: 0.95 }
@@ -749,7 +847,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
       const zoneInfo = getThermalZoneInfo(p.tfMax > 0 ? p.tfMax : 28);
 
       marker.bindPopup(`
-        <div style="font-family: monospace; font-size: 11px; min-width: 260px; padding: 4px; color: #0f172a;">
+        <div style="font-family: monospace; font-size: 11px; min-width: 275px; padding: 4px; color: #0f172a;">
           <!-- Header -->
           <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid ${color}; padding-bottom: 6px; margin-bottom: 6px;">
             <div>
@@ -766,22 +864,22 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
             <b>Section:</b> ${p.sectionId} — ${p.sectionName}
           </div>
           <div style="color: #475569; margin-bottom: 6px; font-size: 10px;">
-            <b>Category:</b> ${p.cableCategory === 'land' ? 'Land Cable (Khanom/Samui)' : 'PEA-Submarine Cable (Gulf of Thailand)'} | <b>DOF:</b> ${p.dof.toFixed(1)} m | <b>KP:</b> ${p.kpFormatted}
+            <b>Point:</b> ${p.pointIndexInSection + 1}/${p.totalPointsInSection} | <b>DOF:</b> ${p.dof.toFixed(2)} m | <b>KP:</b> ${p.kpFormatted}
           </div>
 
           <!-- Thermal & Power Telemetry Grid -->
           <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; margin-bottom: 6px;">
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
               <div>
-                <span style="font-size: 9px; text-transform: uppercase; color: #64748b; display: block; font-weight: bold;">Peak Fiber Tf</span>
+                <span style="font-size: 9px; text-transform: uppercase; color: #64748b; display: block; font-weight: bold;">Peak Fiber Tf (Col ${p.tfColLetter})</span>
                 <span style="font-size: 15px; font-weight: 900; color: ${color}; font-family: monospace;">
-                  ${p.tfMax > 0 ? p.tfMax.toFixed(2) + ' °C' : 'N/A'}
+                  ${Number.isFinite(p.tfMax) && p.tfMax !== 0 ? p.tfMax.toFixed(2) + ' °C' : 'N/A'}
                 </span>
               </div>
               <div>
-                <span style="font-size: 9px; text-transform: uppercase; color: #64748b; display: block; font-weight: bold;">Est Conductor Tc</span>
+                <span style="font-size: 9px; text-transform: uppercase; color: #64748b; display: block; font-weight: bold;">Est Conductor Tc (Col ${p.tcColLetter})</span>
                 <span style="font-size: 15px; font-weight: 900; color: #d97706; font-family: monospace;">
-                  ${p.tcMax > 0 ? p.tcMax.toFixed(2) + ' °C' : 'N/A'}
+                  ${Number.isFinite(p.tcMax) && p.tcMax !== 0 ? p.tcMax.toFixed(2) + ' °C' : 'N/A'}
                 </span>
               </div>
             </div>

@@ -1778,22 +1778,25 @@ function parsePanel1WorkbookFast(
     const idxPOil = headers.findIndex((h) => /Power_Flow_During_Max_33Oil_MW|Power_33Oil_MW/i.test(h || ''));
     const idxFileMax = headers.findIndex((h) => /File_Name_Max/i.test(h || ''));
 
-    const dofCols: Array<{ type: 'tf' | 'tc' | 'time'; dof: number; cIdx: number }> = [];
+    const dofCols: Array<{ type: 'tf' | 'tc' | 'time'; dof: number; cIdx: number; ptIdx: number }> = [];
+    let tfPtCounter = 0;
+    let tcPtCounter = 0;
+    let tmPtCounter = 0;
     headers.forEach((h, cIdx) => {
       if (!h) return;
       const tfM = h.match(/^Tf[_ ]?DOF[_ ]?([\d.]+)m?(?:[_ ]?C)?$/i);
       if (tfM) {
-        dofCols.push({ type: 'tf', dof: parseFloat(tfM[1]), cIdx });
+        dofCols.push({ type: 'tf', dof: parseFloat(tfM[1]), cIdx, ptIdx: tfPtCounter++ });
         return;
       }
       const tcM = h.match(/^Tc[_ ]?DOF[_ ]?([\d.]+)m?(?:[_ ]?C)?$/i);
       if (tcM) {
-        dofCols.push({ type: 'tc', dof: parseFloat(tcM[1]), cIdx });
+        dofCols.push({ type: 'tc', dof: parseFloat(tcM[1]), cIdx, ptIdx: tcPtCounter++ });
         return;
       }
       const tmM = h.match(/^Time[_ ]?DOF[_ ]?([\d.]+)m?$/i);
       if (tmM) {
-        dofCols.push({ type: 'time', dof: parseFloat(tmM[1]), cIdx });
+        dofCols.push({ type: 'time', dof: parseFloat(tmM[1]), cIdx, ptIdx: tmPtCounter++ });
       }
     });
 
@@ -1820,19 +1823,23 @@ function parsePanel1WorkbookFast(
 
       for (const dc of dofCols) {
         const cellVal = vals[dc.cIdx];
-        if (!cellVal) continue;
+        if (cellVal === undefined || cellVal === null || String(cellVal).trim() === '') continue;
         const k2 = dc.dof.toFixed(2);
+        const kIdx = `idx_${dc.ptIdx}`;
         if (dc.type === 'time') {
           dofTimeMax[k2] = cellVal;
+          dofTimeMax[kIdx] = cellVal;
         } else {
           const v = parseFloat(cellVal);
-          if (!isNaN(v) && v > 0) {
+          if (!isNaN(v)) {
             const num = Number(v.toFixed(2));
             if (dc.type === 'tf') {
               dofTfMax[k2] = num;
+              dofTfMax[kIdx] = num;
               dofTfList.push(num);
             } else {
               dofTcMax[k2] = num;
+              dofTcMax[kIdx] = num;
               dofTcList.push(num);
             }
           }
@@ -1893,14 +1900,6 @@ function parsePanel1WorkbookFast(
   }
 
   const sortedDates = Array.from(p1DatesSet).sort();
-  const recentDatesSet = new Set(sortedDates.slice(-5));
-  for (const r of p1Records) {
-    if (!recentDatesSet.has(r.date)) {
-      delete r.dofTfMax;
-      delete r.dofTcMax;
-      delete r.dofTimeMax;
-    }
-  }
   const sortedYears = Array.from(new Set(sortedDates.map((d) => d.slice(0, 4)))).sort();
   const config = {
     hasDatabase: p1Records.length > 0,

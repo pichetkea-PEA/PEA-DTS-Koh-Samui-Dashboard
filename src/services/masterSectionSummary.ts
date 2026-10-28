@@ -2990,9 +2990,14 @@ export function parseUploadedDatabaseForUpdate(
           ? sheetSecCandidate
           : fallbackSecId;
         const sheetRows = XLSX.utils.sheet_to_json<any>(sheet, { defval: '' });
-        for (const sr of sheetRows) {
+        const rawMatrix = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, defval: '' });
+        for (let rIdx = 0; rIdx < sheetRows.length; rIdx++) {
+          const sr = sheetRows[rIdx];
           if (sheetSecId) {
             sr._sheetSecId = sheetSecId;
+          }
+          if (Array.isArray(rawMatrix[rIdx + 1])) {
+            sr._colValues = rawMatrix[rIdx + 1];
           }
           rawRows.push(sr);
         }
@@ -3095,7 +3100,7 @@ export function parseUploadedDatabaseForUpdate(
       for (const rawKey of Object.keys(r)) {
         if (rawKey.startsWith('_')) continue;
         const key = rawKey.trim();
-        const cleanKey = key.replace(/[°\\[\\]()]/g, '').trim();
+        const cleanKey = key.replace(/[°\[\]()]/g, '').trim();
 
         // Check if key is a time column
         const timeMatch = cleanKey.match(/Time[_ ]?DOF[_ ]?([\d.]+)m?/i);
@@ -3107,7 +3112,7 @@ export function parseUploadedDatabaseForUpdate(
         }
 
         const val = toNumOrEmptyCell(r[rawKey]);
-        if (typeof val !== 'number' || isNaN(val) || val <= 0) continue;
+        if (typeof val !== 'number' || isNaN(val)) continue;
 
         // Check if key explicitly relates to Tc
         const isTc = /\bTc\b|^Tc[_ ]|[_ ]Tc/i.test(cleanKey);
@@ -3126,26 +3131,27 @@ export function parseUploadedDatabaseForUpdate(
         }
       }
 
-      // Positional column fallback for standard 19-sheet database tables
-      // Col 0: Sheet_Section_ID, Col 1: Section_Name, Col 2: Category, Col 3: Date, Col 4: Phase
-      // Col 5, 6: DOF 0 Tf, Tc
-      // Col 7, 8: DOF 1 Tf, Tc
-      // ...
+      // Positional column mapping for standard 19-sheet database tables
+      // Col 0 (A): Sheet_Section_ID, Col 1 (B): Section_Name, Col 2 (C): Category, Col 3 (D): Date, Col 4 (E): Phase
+      // Col 5 (F), Col 6 (G): DOF Point 1 Tf, Tc
+      // Col 7 (H), Col 8 (I): DOF Point 2 Tf, Tc
+      // ... (e.g., Col F to U for 8-point sections like LS1)
       if (Array.isArray(colVals) && colVals.length >= 5 + distinctDofs.length * 2) {
         for (let dofIdx = 0; dofIdx < distinctDofs.length; dofIdx++) {
           const dof = distinctDofs[dofIdx];
           const posTfVal = toNumOrEmptyCell(colVals[5 + dofIdx * 2]);
           const posTcVal = toNumOrEmptyCell(colVals[5 + dofIdx * 2 + 1]);
-          if (typeof posTfVal === 'number' && posTfVal > 0 && !parsedRawTfByDof.has(dof)) {
+          if (typeof posTfVal === 'number' && !isNaN(posTfVal) && !parsedRawTfByDof.has(dof)) {
             parsedRawTfByDof.set(dof, posTfVal);
           }
-          if (typeof posTcVal === 'number' && posTcVal > 0 && !parsedRawTcByDof.has(dof)) {
+          if (typeof posTcVal === 'number' && !isNaN(posTcVal) && !parsedRawTcByDof.has(dof)) {
             parsedRawTcByDof.set(dof, posTcVal);
           }
         }
       }
 
-      for (const dof of distinctDofs) {
+      for (let dofIdx = 0; dofIdx < distinctDofs.length; dofIdx++) {
+        const dof = distinctDofs[dofIdx];
         const dofKey = dof.toFixed(2);
         const dofKey1 = dof.toFixed(1);
         const dofKey0 = String(Math.round(dof));
@@ -3171,7 +3177,7 @@ export function parseUploadedDatabaseForUpdate(
         ];
         for (const cand of candidateTfKeys) {
           const v = toNumOrEmptyCell(r[cand] ?? cleanOriginalCols[cand]);
-          if (typeof v === 'number' && v > 0) {
+          if (typeof v === 'number' && !isNaN(v)) {
             tfCell = v;
             break;
           }
@@ -3187,6 +3193,14 @@ export function parseUploadedDatabaseForUpdate(
           }
         }
 
+        // Strategy 3: Positional column index (Col F = 5 + dofIdx * 2)
+        if (tfCell === '' && Array.isArray(colVals) && colVals.length > 5 + dofIdx * 2) {
+          const posTfVal = toNumOrEmptyCell(colVals[5 + dofIdx * 2]);
+          if (typeof posTfVal === 'number' && !isNaN(posTfVal)) {
+            tfCell = posTfVal;
+          }
+        }
+
         const candidateTcKeys = [
           tcCol,
           `Tc_DOF_${dofKey1}m_C`,
@@ -3198,7 +3212,7 @@ export function parseUploadedDatabaseForUpdate(
         ];
         for (const cand of candidateTcKeys) {
           const v = toNumOrEmptyCell(r[cand] ?? cleanOriginalCols[cand]);
-          if (typeof v === 'number' && v > 0) {
+          if (typeof v === 'number' && !isNaN(v)) {
             tcCell = v;
             break;
           }
@@ -3213,6 +3227,14 @@ export function parseUploadedDatabaseForUpdate(
           }
         }
 
+        // Strategy 3: Positional column index (Col G = 5 + dofIdx * 2 + 1)
+        if (tcCell === '' && Array.isArray(colVals) && colVals.length > 5 + dofIdx * 2 + 1) {
+          const posTcVal = toNumOrEmptyCell(colVals[5 + dofIdx * 2 + 1]);
+          if (typeof posTcVal === 'number' && !isNaN(posTcVal)) {
+            tcCell = posTcVal;
+          }
+        }
+
         dofValuesMap[tfCol] = tfCell;
         dofValuesMap[tcCol] = tcCell;
 
@@ -3223,7 +3245,7 @@ export function parseUploadedDatabaseForUpdate(
           }
         }
 
-        if (typeof tfCell === 'number' && tfCell > 0) {
+        if (typeof tfCell === 'number' && !isNaN(tfCell)) {
           dofTfNums.push(tfCell);
           const dofStoreKey = `${secInfo.sectionId}_${phase}_${dateKey}_${dofKey}`;
           if (!store.dofDailyPeaks[dofStoreKey]) {
@@ -3235,7 +3257,7 @@ export function parseUploadedDatabaseForUpdate(
             };
           }
         }
-        if (typeof tcCell === 'number' && tcCell > 0) dofTcNums.push(tcCell);
+        if (typeof tcCell === 'number' && !isNaN(tcCell)) dofTcNums.push(tcCell);
       }
 
       let maxTfCell = toNumOrEmptyCell(

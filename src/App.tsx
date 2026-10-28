@@ -120,7 +120,7 @@ export default function App() {
   // Subscribe to changes in persistent organization database
   useEffect(() => {
     const unsubscribe = subscribeToOrgDatabase(() => {
-      setDbConfig(getOrgDatabaseConfig());
+      setDbConfig({ ...getOrgDatabaseConfig() });
     });
     return unsubscribe;
   }, []);

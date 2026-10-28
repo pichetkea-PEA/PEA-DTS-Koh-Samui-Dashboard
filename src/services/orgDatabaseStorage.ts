@@ -549,7 +549,7 @@ export function getPanel3StatisticsSummary(): Panel3StatisticsSummary | null {
 }
 let hasStartedAsyncHydration = false;
 
-const IDB_NAME = 'dts_public_default_db_idb_v1';
+const IDB_NAME = 'dts_public_default_db_idb_v2';
 const IDB_STORE = 'defaults';
 
 function openDefaultIdb(): Promise<IDBDatabase | null> {
@@ -845,7 +845,14 @@ const loadedPanel1DofDates = new Set<string>();
 export async function fetchPanel1DofsForDate(date: string): Promise<boolean> {
   if (!date || fetchingPanel1DofDates.has(date) || loadedPanel1DofDates.has(date)) return false;
   const recs = memoryRecordsByDate.get(date);
-  if (recs && recs.length > 0 && recs[0].dofTfMax && Object.keys(recs[0].dofTfMax).length > 0) {
+  if (
+    recs &&
+    recs.length > 0 &&
+    recs[0].dofTfMax &&
+    Object.keys(recs[0].dofTfMax).length > 0 &&
+    recs[0].dofTcMax &&
+    Object.keys(recs[0].dofTcMax).length > 0
+  ) {
     loadedPanel1DofDates.add(date);
     return true;
   }
@@ -860,7 +867,12 @@ export async function fetchPanel1DofsForDate(date: string): Promise<boolean> {
         const dateRecs = memoryRecordsByDate.get(date) || [];
         let updatedAny = false;
         for (const r of dateRecs) {
-          const entry = dofsMap[`${r.sectionId}_${r.phase}`];
+          const pNorm = (r.phase || '').replace(/^Phase\s+/i, '').trim();
+          const entry =
+            dofsMap[`${r.sectionId}_${r.phase}`] ||
+            dofsMap[`${r.sectionId}_Phase ${pNorm}`] ||
+            dofsMap[`${r.sectionId}_Submarine (CH 3)`] ||
+            dofsMap[`${r.sectionId}_${pNorm}`];
           if (entry) {
             if (entry.dofTfMax) r.dofTfMax = entry.dofTfMax;
             if (entry.dofTcMax) r.dofTcMax = entry.dofTcMax;
@@ -1605,16 +1617,28 @@ export async function saveUploadedOrgDatabase(
         const pOil = typeof row.Power_Flow_During_Max_33Oil_MW === 'number' ? row.Power_Flow_During_Max_33Oil_MW : parseFloat(String(row.Power_Flow_During_Max_33Oil_MW ?? rawAny.Power_33Oil_MW ?? '')) || 0;
         const pTotal = typeof row.Power_Flow_During_Max_Total_MW === 'number' ? row.Power_Flow_During_Max_Total_MW : parseFloat(String(row.Power_Flow_During_Max_Total_MW ?? rawAny.Power_Total_MW ?? '')) || (pCkt3 + pCkt2 + pNkt + pOil);
 
+        const secSamplingDofs = Array.from(
+          new Set(
+            CIRCUIT_3_SAMPLING_POINTS.filter((p) => p.sectionId === secId).map((p) =>
+              Number(p.dof.toFixed(2))
+            )
+          )
+        ).sort((a, b) => a - b);
+
         for (const key of Object.keys(rawAny)) {
           const tfMatch = key.match(/^Tf[_ ]?DOF[_ ]?([\d.]+)m?(?:[_ ]?C)?$/i);
           if (tfMatch) {
             const dNum = parseFloat(tfMatch[1]);
-            const v = typeof rawAny[key] === 'number' ? rawAny[key] : parseFloat(String(rawAny[key] ?? ''));
-            if (!isNaN(dNum) && !isNaN(v) && v > 0) {
+            const cellRaw = rawAny[key];
+            if (cellRaw === '' || cellRaw === null || cellRaw === undefined) continue;
+            const v = typeof cellRaw === 'number' ? cellRaw : parseFloat(String(cellRaw));
+            if (!isNaN(dNum) && !isNaN(v)) {
               const val = Number(v.toFixed(2));
               rowDofTf[dNum.toFixed(2)] = val;
               rowDofTf[dNum.toFixed(1)] = val;
               rowDofTf[String(Math.round(dNum))] = val;
+              const ptIdx = secSamplingDofs.findIndex((d) => Math.abs(d - dNum) < 0.6);
+              if (ptIdx >= 0) rowDofTf[`idx_${ptIdx}`] = val;
               rowDofTfValues.push(val);
             }
             continue;
@@ -1622,12 +1646,16 @@ export async function saveUploadedOrgDatabase(
           const tcMatch = key.match(/^Tc[_ ]?DOF[_ ]?([\d.]+)m?(?:[_ ]?C)?$/i);
           if (tcMatch) {
             const dNum = parseFloat(tcMatch[1]);
-            const v = typeof rawAny[key] === 'number' ? rawAny[key] : parseFloat(String(rawAny[key] ?? ''));
-            if (!isNaN(dNum) && !isNaN(v) && v > 0) {
+            const cellRaw = rawAny[key];
+            if (cellRaw === '' || cellRaw === null || cellRaw === undefined) continue;
+            const v = typeof cellRaw === 'number' ? cellRaw : parseFloat(String(cellRaw));
+            if (!isNaN(dNum) && !isNaN(v)) {
               const val = Number(v.toFixed(2));
               rowDofTc[dNum.toFixed(2)] = val;
               rowDofTc[dNum.toFixed(1)] = val;
               rowDofTc[String(Math.round(dNum))] = val;
+              const ptIdx = secSamplingDofs.findIndex((d) => Math.abs(d - dNum) < 0.6);
+              if (ptIdx >= 0) rowDofTc[`idx_${ptIdx}`] = val;
               rowDofTcValues.push(val);
             }
             continue;
@@ -1640,13 +1668,15 @@ export async function saveUploadedOrgDatabase(
               rowDofTime[dNum.toFixed(2)] = tStr;
               rowDofTime[dNum.toFixed(1)] = tStr;
               rowDofTime[String(Math.round(dNum))] = tStr;
+              const ptIdx = secSamplingDofs.findIndex((d) => Math.abs(d - dNum) < 0.6);
+              if (ptIdx >= 0) rowDofTime[`idx_${ptIdx}`] = tStr;
             }
           }
         }
 
         // Fill in estimated Tc for any DOF that has Tf_DOF_* but no Tc_DOF_*
         for (const [dKey, tfVal] of Object.entries(rowDofTf)) {
-          if (!rowDofTc[dKey] || rowDofTc[dKey] <= 0) {
+          if (rowDofTc[dKey] === undefined) {
             const estTc = Number(estimateConductorTempFromFiber(tfVal, pCkt3 || 35, category, secId).toFixed(2));
             rowDofTc[dKey] = estTc;
             rowDofTcValues.push(estTc);
