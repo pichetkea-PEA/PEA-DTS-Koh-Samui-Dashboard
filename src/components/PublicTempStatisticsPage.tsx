@@ -1107,8 +1107,13 @@ const IndividualTempBarChartCard: React.FC<{
                                                 height: `${segPct}%`,
                                                 backgroundColor: zInfo.hexColor,
                                               }}
-                                              className="w-full transition-all"
-                                            />
+                                              className="w-full min-h-[14px] flex items-center justify-center overflow-hidden border-b border-black/15 last:border-b-0 transition-all"
+                                              title={`${zInfo.name}: ${zCount.toLocaleString()} hrs`}
+                                            >
+                                              <span className="text-[9px] sm:text-[10px] font-mono font-extrabold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)] bg-slate-950/30 px-1 py-0.2 rounded leading-none whitespace-nowrap select-none">
+                                                {zCount.toLocaleString()}
+                                              </span>
+                                            </div>
                                           );
                                         })}
                                       </div>
@@ -1150,7 +1155,7 @@ const IndividualTempBarChartCard: React.FC<{
                         >
                           {/* Bar Column (Exact % of h-72 plot area) */}
                           <div
-                            className={`w-full max-w-[32px] rounded-t-md transition-all duration-300 relative ${
+                            className={`w-full max-w-[36px] rounded-t-md transition-all duration-300 relative ${
                               isHighest ? 'ring-2 ring-amber-300' : 'group-hover:brightness-125'
                             }`}
                             style={{
@@ -1200,8 +1205,13 @@ const IndividualTempBarChartCard: React.FC<{
                                       height: `${segPct}%`,
                                       backgroundColor: zInfo.hexColor,
                                     }}
-                                    className="w-full transition-all"
-                                  />
+                                    className="w-full min-h-[14px] flex items-center justify-center overflow-hidden border-b border-black/15 last:border-b-0 transition-all"
+                                    title={`${zInfo.name}: ${zCount.toLocaleString()} hrs`}
+                                  >
+                                    <span className="text-[9px] sm:text-[10px] font-mono font-extrabold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)] bg-slate-950/30 px-1 py-0.2 rounded leading-none whitespace-nowrap select-none">
+                                      {zCount.toLocaleString()}
+                                    </span>
+                                  </div>
                                 );
                               })}
                             </div>
