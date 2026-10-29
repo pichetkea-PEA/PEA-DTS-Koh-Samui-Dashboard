@@ -1299,99 +1299,23 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
             </div>
           )}
 
-          {/* 4. Action Button: Gather temperature data and power record */}
-          <button
-            type="button"
-            onClick={handleGatherData}
-            disabled={isGathering}
-            className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold font-mono transition-all cursor-pointer shadow-md ${
-              isPendingGather
-                ? 'bg-gradient-to-r from-purple-500 to-indigo-600 hover:from-purple-400 hover:to-indigo-500 text-white shadow-purple-500/25 animate-pulse'
-                : 'bg-slate-800 hover:bg-slate-750 text-purple-300 border border-purple-500/30 shadow-black/20'
-            }`}
-            title="Read fiber temperature in Target Folder 1 and power consumption in Target Folder 2"
-          >
-            {isGathering ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-300" />
-                <span>Gathering Records...</span>
-              </>
-            ) : (
-              <>
-                <Database className="w-3.5 h-3.5 text-purple-300" />
-                <span>Gather temperature data and power record</span>
-              </>
-            )}
-          </button>
         </div>
 
-        {hasGathered && (
+        {selectedDate && (
           <div className="flex items-center gap-2 text-xs font-mono">
             <span className="text-[10px] text-slate-400 uppercase">PLOTTED 3D:</span>
             <span className="px-2.5 py-1 rounded-lg bg-purple-950/70 border border-purple-500/40 text-purple-300 font-bold">
-              {gatheredDate} (Sec {selectedSectionId})
+              {gatheredDate || selectedDate} (Sec {selectedSectionId})
             </span>
           </div>
         )}
       </div>
 
-      {/* 3D Visualizer Container or Gathering Required Empty State */}
-      {!hasGathered ? (
-        <div className="bg-slate-950 rounded-3xl border border-purple-500/20 p-8 sm:p-14 text-center space-y-5 shadow-[0_0_35px_rgba(168,85,247,0.08)] max-w-xl mx-auto">
-          <div className="w-16 h-16 rounded-3xl bg-purple-950/70 border border-purple-500/40 text-purple-400 flex items-center justify-center mx-auto shadow-[0_0_30px_rgba(168,85,247,0.25)] animate-pulse">
-            <Box className="w-8 h-8" />
-          </div>
-          <div className="space-y-1.5">
-            <h3 className="text-base font-extrabold text-white font-mono tracking-tight uppercase">
-              3D TELEMETRY GATHERING REQUIRED FOR {selectedDate || 'SELECTED DATE'}
-            </h3>
-            <p className="text-xs text-slate-400 font-mono leading-relaxed">
-              To guarantee zero mockup data, the 3D thermal manifold is not visualized until actual files are gathered from Target Folders 1 &amp; 2.
-            </p>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 text-left text-xs font-mono space-y-2.5">
-            <div className="text-purple-300 font-bold text-[11px] uppercase tracking-wider flex items-center gap-1.5 pb-2 border-b border-slate-800">
-              <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>3D Spatial Telemetry Pipeline</span>
-            </div>
-            <div className="text-slate-300 text-[11px] space-y-2">
-              <div className="flex items-start gap-2.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 mt-1.5 shrink-0" />
-                <div>
-                  <strong className="text-cyan-300">Target Folder 1 (.TEPR)</strong>: Reads fiber temperature inside ~480 records/day across all DOFs for Section {activeSection.sectionId} ({activeSection.name}).
-                </div>
-              </div>
-              <div className="flex items-start gap-2.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
-                <div>
-                  <strong className="text-emerald-300">Target Folder 2 (.CSV)</strong>: Reads 1-record CSV per day for 4 submarine power circuits (96 intervals @ 15 min).
-                </div>
-              </div>
-              <div className="flex items-start gap-2.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 mt-1.5 shrink-0" />
-                <div>
-                  <strong className="text-amber-300">Equations Alpha – Echo</strong>: Calculates conductor temperature Tc along the 3D spatial time axis.
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleGatherData}
-            disabled={isGathering || !selectedDate}
-            className="inline-flex items-center gap-2.5 px-6 py-3.5 rounded-2xl bg-gradient-to-r from-purple-500 via-indigo-600 to-cyan-500 hover:from-purple-400 hover:to-cyan-400 text-white font-mono font-bold text-sm shadow-[0_0_25px_rgba(168,85,247,0.4)] transition-all cursor-pointer transform hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-50"
-          >
-            <Database className="w-4 h-4 text-white" />
-            <span>Gather temperature data and power record</span>
-          </button>
-        </div>
-      ) : (
-        <div
-          ref={containerRef}
-          className="relative bg-slate-950 rounded-3xl border border-purple-500/20 overflow-hidden shadow-[0_0_35px_rgba(168,85,247,0.08)]"
-        >
+      {/* 3D Visualizer Container */}
+      <div
+        ref={containerRef}
+        className="relative bg-slate-950 rounded-3xl border border-purple-500/20 overflow-hidden shadow-[0_0_35px_rgba(168,85,247,0.08)]"
+      >
           {/* Guaranteed 3D Spatial Projection Canvas */}
           <canvas
             ref={canvasRef}
@@ -1494,7 +1418,6 @@ export const Public3DPowerTempPage: React.FC<Public3DPowerTempPageProps> = ({
             </div>
           )}
         </div>
-      )}
 
       {/* Mini Pop-up Loading Screen for Gathering (0 - 100%) with Reading Status of both TEPR & CSV */}
       {isGatheringModalOpen && (

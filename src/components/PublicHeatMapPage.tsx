@@ -17,6 +17,8 @@ import {
   AlertTriangle,
   Compass,
   Navigation,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 import {
   CIRCUIT_3_SECTIONS,
@@ -313,6 +315,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   const [selectedSectionFilter, setSelectedSectionFilter] = useState<string>('all');
   const [selectedPhaseFilter, setSelectedPhaseFilter] = useState<'all' | 'A' | 'B' | 'C'>('all');
   const [highlightedLandmark, setHighlightedLandmark] = useState<string | null>(null);
+  const [isTopPanelMinimized, setIsTopPanelMinimized] = useState<boolean>(false);
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -995,6 +998,38 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
     }
   }, [enrichedPoints, selectedDate, selectedSectionFilter]);
 
+  // Resize Leaflet map when top panel is minimized or expanded or container resizes
+  useEffect(() => {
+    const container = mapContainerRef.current;
+    const map = mapInstanceRef.current;
+    if (!container || !map) return;
+
+    const refreshMapViewport = () => {
+      map.invalidateSize({ animate: false });
+      const allLatLngs = enrichedPoints.map((p) => [p.latitude, p.longitude] as [number, number]);
+      if (allLatLngs.length > 0 && !highlightedLandmark) {
+        map.fitBounds(L.latLngBounds(allLatLngs), { padding: [50, 50], maxZoom: 14 });
+      }
+    };
+
+    const raf = requestAnimationFrame(refreshMapViewport);
+    const t1 = setTimeout(refreshMapViewport, 120);
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        map.invalidateSize({ animate: false });
+      });
+      observer.observe(container);
+    }
+
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(t1);
+      if (observer) observer.disconnect();
+    };
+  }, [isTopPanelMinimized, enrichedPoints, highlightedLandmark]);
+
   // Handle zooming/focusing to landmark when clicked from legend
   const handleFocusLandmark = (lm: LandmarkLocation) => {
     setHighlightedLandmark(lm.id);
@@ -1017,228 +1052,282 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   }
 
   return (
-    <div className="space-y-4 animate-in fade-in duration-300">
-      {/* Top Filter and Context Bar */}
-      <div className="bg-slate-900/90 backdrop-blur-xl p-4 rounded-2xl border border-cyan-500/20 shadow-[0_4px_25px_rgba(6,182,212,0.06)] flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className="p-2 rounded-xl bg-rose-950/60 text-rose-400 border border-rose-500/30 shadow-[0_0_12px_rgba(244,63,94,0.25)]">
-              <MapPin className="w-5 h-5" />
+    <div className="space-y-3 animate-in fade-in duration-300">
+      {/* Top Filter and Context Bar (Minimizable to expand Heat Map Chart size) */}
+      {isTopPanelMinimized ? (
+        <div className="bg-slate-900/90 backdrop-blur-xl px-4 py-2.5 rounded-2xl border border-cyan-500/20 shadow-[0_4px_20px_rgba(6,182,212,0.06)] flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
+            <span className="p-1.5 rounded-lg bg-rose-950/60 text-rose-400 border border-rose-500/30">
+              <MapPin className="w-4 h-4" />
             </span>
-            <div>
-              <h2 className="text-sm font-black text-slate-100 font-mono tracking-tight leading-tight">
-                [2.1] DAILY MAXIMUM HEAT MAP CHART
-              </h2>
-              <p className="text-[11px] text-cyan-400/80 font-mono">
-                Satellite Thermal Distribution along PEA-Submarine Cable Route
-              </p>
+            <span className="font-black text-slate-100 tracking-tight">
+              [2.1] DAILY MAXIMUM HEAT MAP CHART
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-slate-950 border border-slate-800 text-cyan-300 font-bold">
+              Date: {selectedDate}
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-rose-950/50 border border-rose-500/30 text-rose-300 font-bold">
+              Peak Tf: {summaryStats.maxTf > 0 ? `${summaryStats.maxTf.toFixed(1)} °C` : '-'}
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-amber-950/50 border border-amber-500/30 text-amber-300 font-bold">
+              Peak Tc: {summaryStats.maxTc > 0 ? `${summaryStats.maxTc.toFixed(1)} °C` : '-'}
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-cyan-950/50 border border-cyan-500/30 text-cyan-300 font-bold">
+              Power: {summaryStats.totalPowerMW > 0 ? `${summaryStats.totalPowerMW.toFixed(1)} MW` : '-'}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setIsTopPanelMinimized(false)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/40 text-xs font-mono font-bold transition-all cursor-pointer shadow-[0_0_12px_rgba(6,182,212,0.2)]"
+            title="Expand Filter and KPI Panel"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            <span>Show Panel</span>
+            <ChevronDown className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ) : (
+        <div className="bg-slate-900/90 backdrop-blur-xl p-4 rounded-2xl border border-cyan-500/20 shadow-[0_4px_25px_rgba(6,182,212,0.06)] flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="p-2 rounded-xl bg-rose-950/60 text-rose-400 border border-rose-500/30 shadow-[0_0_12px_rgba(244,63,94,0.25)]">
+                <MapPin className="w-5 h-5" />
+              </span>
+              <div>
+                <h2 className="text-sm font-black text-slate-100 font-mono tracking-tight leading-tight">
+                  [2.1] DAILY MAXIMUM HEAT MAP CHART
+                </h2>
+                <p className="text-[11px] text-cyan-400/80 font-mono">
+                  Satellite Thermal Distribution along PEA-Submarine Cable Route
+                </p>
+              </div>
             </div>
-          </div>
 
-          <div className="h-6 w-px bg-slate-800 hidden sm:block" />
+            <div className="h-6 w-px bg-slate-800 hidden sm:block" />
 
-          {/* Date Selector */}
-          <div className="flex items-center gap-1.5 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800">
-            <Calendar className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="text-xs text-slate-400 font-mono">DATE:</span>
-            <select
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              className="text-xs font-mono font-bold text-cyan-300 bg-transparent border-none outline-none cursor-pointer"
-            >
-              {availableDates.map((d) => (
-                <option key={d} value={d} className="bg-slate-900 text-slate-200">
-                  {d}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Section Category Filter: All / Submarine / Land */}
-          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-mono">
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedCategory('all');
-                setSelectedSectionFilter('all');
-              }}
-              className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                selectedCategory === 'all'
-                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_10px_rgba(6,182,212,0.3)] font-bold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              All Route (19)
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedCategory('submarine');
-                setSelectedSectionFilter('all');
-              }}
-              className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                selectedCategory === 'submarine'
-                  ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40 shadow-[0_0_10px_rgba(59,130,246,0.3)] font-bold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Submarine (13 Zones)
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedCategory('land');
-                setSelectedSectionFilter('all');
-              }}
-              className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                selectedCategory === 'land'
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_10px_rgba(16,185,129,0.3)] font-bold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Land (6 Sections)
-            </button>
-          </div>
-
-          {/* Filter for all land cable section, all submarine cable zone */}
-          <div className="flex items-center gap-1.5 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-xs font-mono">
-            <Filter className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="text-slate-400">SECTION / ZONE:</span>
-            <select
-              value={selectedSectionFilter}
-              onChange={(e) => {
-                const val = e.target.value;
-                setSelectedSectionFilter(val);
-                if (val !== 'all') {
-                  const isLand = landSectionsList.some((s) => s.sectionId === val);
-                  if (isLand && selectedCategory === 'submarine') setSelectedCategory('all');
-                  const isSub = submarineZonesList.some((s) => s.sectionId === val);
-                  if (isSub && selectedCategory === 'land') setSelectedCategory('all');
-                }
-              }}
-              className="text-xs font-mono font-bold text-cyan-300 bg-transparent border-none outline-none cursor-pointer max-w-[200px]"
-            >
-              <option value="all" className="bg-slate-900 text-slate-200">
-                All Sections &amp; Zones (19)
-              </option>
-              <optgroup label="── LAND CABLE (6 SECTIONS) ──" className="bg-slate-950 text-emerald-400 font-bold">
-                {landSectionsList.map((sec) => (
-                  <option key={sec.sectionId} value={sec.sectionId} className="bg-slate-900 text-slate-200">
-                    Sec {sec.sectionId}: {sec.name}
+            {/* Date Selector */}
+            <div className="flex items-center gap-1.5 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800">
+              <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-xs text-slate-400 font-mono">DATE:</span>
+              <select
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="text-xs font-mono font-bold text-cyan-300 bg-transparent border-none outline-none cursor-pointer"
+              >
+                {availableDates.map((d) => (
+                  <option key={d} value={d} className="bg-slate-900 text-slate-200">
+                    {d}
                   </option>
                 ))}
-              </optgroup>
-              <optgroup label="── SUBMARINE CABLE (13 ZONES) ──" className="bg-slate-950 text-cyan-400 font-bold">
-                {submarineZonesList.map((sec) => (
-                  <option key={sec.sectionId} value={sec.sectionId} className="bg-slate-900 text-slate-200">
-                    Zone {sec.sectionId}: {sec.name}
-                  </option>
-                ))}
-              </optgroup>
-            </select>
-          </div>
+              </select>
+            </div>
 
-          {/* Land Phase Filter (When Land Cable is selected or active) */}
-          {(selectedCategory === 'land' || selectedSectionFilter.startsWith('1.')) && (
+            {/* Section Category Filter: All / Submarine / Land */}
             <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-mono">
-              <span className="text-[10px] text-slate-400 px-1 font-bold">PHASE:</span>
               <button
                 type="button"
-                onClick={() => setSelectedPhaseFilter('all')}
-                className={`px-2 py-0.5 rounded text-[11px] transition-all cursor-pointer ${
-                  selectedPhaseFilter === 'all'
-                    ? 'bg-slate-700 text-slate-100 font-bold'
+                onClick={() => {
+                  setSelectedCategory('all');
+                  setSelectedSectionFilter('all');
+                }}
+                className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                  selectedCategory === 'all'
+                    ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-[0_0_10px_rgba(6,182,212,0.3)] font-bold'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                All
+                All Route (19)
               </button>
               <button
                 type="button"
-                onClick={() => setSelectedPhaseFilter('A')}
-                className={`px-2 py-0.5 rounded text-[11px] transition-all cursor-pointer ${
-                  selectedPhaseFilter === 'A'
-                    ? 'bg-red-500/30 text-red-300 border border-red-500/50 font-bold'
+                onClick={() => {
+                  setSelectedCategory('submarine');
+                  setSelectedSectionFilter('all');
+                }}
+                className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                  selectedCategory === 'submarine'
+                    ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40 shadow-[0_0_10px_rgba(59,130,246,0.3)] font-bold'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                A
+                Submarine (13 Zones)
               </button>
               <button
                 type="button"
-                onClick={() => setSelectedPhaseFilter('B')}
-                className={`px-2 py-0.5 rounded text-[11px] transition-all cursor-pointer ${
-                  selectedPhaseFilter === 'B'
-                    ? 'bg-amber-500/30 text-amber-300 border border-amber-500/50 font-bold'
+                onClick={() => {
+                  setSelectedCategory('land');
+                  setSelectedSectionFilter('all');
+                }}
+                className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                  selectedCategory === 'land'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_10px_rgba(16,185,129,0.3)] font-bold'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                B
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedPhaseFilter('C')}
-                className={`px-2 py-0.5 rounded text-[11px] transition-all cursor-pointer ${
-                  selectedPhaseFilter === 'C'
-                    ? 'bg-blue-500/30 text-blue-300 border border-blue-500/50 font-bold'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                C
+                Land (6 Sections)
               </button>
             </div>
-          )}
+
+            {/* Filter for all land cable section, all submarine cable zone */}
+            <div className="flex items-center gap-1.5 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-xs font-mono">
+              <Filter className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-slate-400">SECTION / ZONE:</span>
+              <select
+                value={selectedSectionFilter}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSelectedSectionFilter(val);
+                  if (val !== 'all') {
+                    const isLand = landSectionsList.some((s) => s.sectionId === val);
+                    if (isLand && selectedCategory === 'submarine') setSelectedCategory('all');
+                    const isSub = submarineZonesList.some((s) => s.sectionId === val);
+                    if (isSub && selectedCategory === 'land') setSelectedCategory('all');
+                  }
+                }}
+                className="text-xs font-mono font-bold text-cyan-300 bg-transparent border-none outline-none cursor-pointer max-w-[200px]"
+              >
+                <option value="all" className="bg-slate-900 text-slate-200">
+                  All Sections &amp; Zones (19)
+                </option>
+                <optgroup label="── LAND CABLE (6 SECTIONS) ──" className="bg-slate-950 text-emerald-400 font-bold">
+                  {landSectionsList.map((sec) => (
+                    <option key={sec.sectionId} value={sec.sectionId} className="bg-slate-900 text-slate-200">
+                      Sec {sec.sectionId}: {sec.name}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="── SUBMARINE CABLE (13 ZONES) ──" className="bg-slate-950 text-cyan-400 font-bold">
+                  {submarineZonesList.map((sec) => (
+                    <option key={sec.sectionId} value={sec.sectionId} className="bg-slate-900 text-slate-200">
+                      Zone {sec.sectionId}: {sec.name}
+                    </option>
+                  ))}
+                </optgroup>
+              </select>
+            </div>
+
+            {/* Land Phase Filter (When Land Cable is selected or active) */}
+            {(selectedCategory === 'land' || selectedSectionFilter.startsWith('1.')) && (
+              <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-mono">
+                <span className="text-[10px] text-slate-400 px-1 font-bold">PHASE:</span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedPhaseFilter('all')}
+                  className={`px-2 py-0.5 rounded text-[11px] transition-all cursor-pointer ${
+                    selectedPhaseFilter === 'all'
+                      ? 'bg-slate-700 text-slate-100 font-bold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedPhaseFilter('A')}
+                  className={`px-2 py-0.5 rounded text-[11px] transition-all cursor-pointer ${
+                    selectedPhaseFilter === 'A'
+                      ? 'bg-red-500/30 text-red-300 border border-red-500/50 font-bold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  A
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedPhaseFilter('B')}
+                  className={`px-2 py-0.5 rounded text-[11px] transition-all cursor-pointer ${
+                    selectedPhaseFilter === 'B'
+                      ? 'bg-amber-500/30 text-amber-300 border border-amber-500/50 font-bold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  B
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedPhaseFilter('C')}
+                  className={`px-2 py-0.5 rounded text-[11px] transition-all cursor-pointer ${
+                    selectedPhaseFilter === 'C'
+                      ? 'bg-blue-500/30 text-blue-300 border border-blue-500/50 font-bold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  C
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Minimize Panel Button */}
+          <div className="ml-auto self-start">
+            <button
+              type="button"
+              onClick={() => setIsTopPanelMinimized(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-cyan-300 border border-slate-700 hover:border-cyan-500/40 text-xs font-mono font-bold transition-all cursor-pointer"
+              title="Minimize Filter & KPI Panel to enlarge Heat Map Chart"
+            >
+              <Minimize2 className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Minimize Panel</span>
+              <ChevronUp className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Quick KPI stats — Re-arranged with wide separation so the 3 boxes do not stay close to each other,
+              and with an external Increase/Decrease indicator right next to each related box */}
+          <div className="w-full pt-3 mt-1 border-t border-slate-800/80 grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-10">
+            {/* 1. Peak Fiber TF Box + Outside Indicator */}
+            <div className="flex items-center gap-3.5">
+              <div className="bg-rose-950/40 border border-rose-500/40 px-4 py-2 rounded-xl text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.15)] shrink-0 min-w-[145px]">
+                <span className="text-[10px] uppercase font-bold text-rose-400 block">
+                  Peak Fiber TF
+                </span>
+                <span className="font-extrabold text-base font-mono">
+                  {summaryStats.maxTf > 0 ? `${summaryStats.maxTf.toFixed(1)} °C` : '-'}
+                </span>
+              </div>
+              {renderDayBeforeIndicator(summaryStats.maxTf, prevSummaryStats.maxTf, '°C')}
+            </div>
+
+            {/* 2. Peak Conductor TC Box + Outside Indicator */}
+            <div className="flex items-center gap-3.5">
+              <div className="bg-amber-950/40 border border-amber-500/40 px-4 py-2 rounded-xl text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.15)] shrink-0 min-w-[155px]">
+                <span className="text-[10px] uppercase font-bold text-amber-400 block">
+                  Peak Conductor TC
+                </span>
+                <span className="font-extrabold text-base font-mono">
+                  {summaryStats.maxTc > 0 ? `${summaryStats.maxTc.toFixed(1)} °C` : '-'}
+                </span>
+              </div>
+              {renderDayBeforeIndicator(summaryStats.maxTc, prevSummaryStats.maxTc, '°C')}
+            </div>
+
+            {/* 3. Peak Power Flow Box + Outside Indicator */}
+            <div className="flex items-center gap-3.5">
+              <div className="bg-cyan-950/40 border border-cyan-500/40 px-4 py-2 rounded-xl text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.15)] shrink-0 min-w-[150px]">
+                <span className="text-[10px] uppercase font-bold text-cyan-400 block">
+                  Peak Power Flow
+                </span>
+                <span className="font-extrabold text-base font-mono">
+                  {summaryStats.totalPowerMW > 0 ? `${summaryStats.totalPowerMW.toFixed(1)} MW` : '-'}
+                </span>
+              </div>
+              {renderDayBeforeIndicator(summaryStats.totalPowerMW, prevSummaryStats.totalPowerMW, 'MW')}
+            </div>
+          </div>
         </div>
+      )}
 
-        {/* Quick KPI stats — Re-arranged with wide separation so the 3 boxes do not stay close to each other,
-            and with an external Increase/Decrease indicator right next to each related box */}
-        <div className="w-full pt-3 mt-1 border-t border-slate-800/80 grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-10">
-          {/* 1. Peak Fiber TF Box + Outside Indicator */}
-          <div className="flex items-center gap-3.5">
-            <div className="bg-rose-950/40 border border-rose-500/40 px-4 py-2 rounded-xl text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.15)] shrink-0 min-w-[145px]">
-              <span className="text-[10px] uppercase font-bold text-rose-400 block">
-                Peak Fiber TF
-              </span>
-              <span className="font-extrabold text-base font-mono">
-                {summaryStats.maxTf > 0 ? `${summaryStats.maxTf.toFixed(1)} °C` : '-'}
-              </span>
-            </div>
-            {renderDayBeforeIndicator(summaryStats.maxTf, prevSummaryStats.maxTf, '°C')}
-          </div>
-
-          {/* 2. Peak Conductor TC Box + Outside Indicator */}
-          <div className="flex items-center gap-3.5">
-            <div className="bg-amber-950/40 border border-amber-500/40 px-4 py-2 rounded-xl text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.15)] shrink-0 min-w-[155px]">
-              <span className="text-[10px] uppercase font-bold text-amber-400 block">
-                Peak Conductor TC
-              </span>
-              <span className="font-extrabold text-base font-mono">
-                {summaryStats.maxTc > 0 ? `${summaryStats.maxTc.toFixed(1)} °C` : '-'}
-              </span>
-            </div>
-            {renderDayBeforeIndicator(summaryStats.maxTc, prevSummaryStats.maxTc, '°C')}
-          </div>
-
-          {/* 3. Peak Power Flow Box + Outside Indicator */}
-          <div className="flex items-center gap-3.5">
-            <div className="bg-cyan-950/40 border border-cyan-500/40 px-4 py-2 rounded-xl text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.15)] shrink-0 min-w-[150px]">
-              <span className="text-[10px] uppercase font-bold text-cyan-400 block">
-                Peak Power Flow
-              </span>
-              <span className="font-extrabold text-base font-mono">
-                {summaryStats.totalPowerMW > 0 ? `${summaryStats.totalPowerMW.toFixed(1)} MW` : '-'}
-              </span>
-            </div>
-            {renderDayBeforeIndicator(summaryStats.totalPowerMW, prevSummaryStats.totalPowerMW, 'MW')}
-          </div>
-        </div>
-      </div>
-
-      {/* Satellite Map Container */}
-      <div className="relative bg-slate-950 rounded-3xl border border-cyan-500/20 overflow-hidden shadow-[0_0_35px_rgba(6,182,212,0.08)]">
+      {/* Satellite Map Container — Increases height when top panel is minimized */}
+      <div
+        className={`relative bg-slate-950 rounded-3xl border border-cyan-500/20 overflow-hidden shadow-[0_0_35px_rgba(6,182,212,0.08)] ${
+          isTopPanelMinimized ? 'h-[calc(100vh-145px)] min-h-[780px]' : 'h-[600px]'
+        }`}
+      >
         <div
           ref={mapContainerRef}
-          className="w-full h-[600px] z-10"
+          className="w-full h-full z-10"
           style={{ background: '#070b14' }}
         />
 
