@@ -586,6 +586,195 @@ let fetchingPage26Promise: Promise<{
   loadCurve: Page26LoadCurveDataset | null;
 }> | null = null;
 
+function extractMaxDateFromText(text?: string): string {
+  if (!text) return '';
+  const matches = text.match(/\d{4}-\d{2}-\d{2}/g);
+  if (!matches || matches.length === 0) return '';
+  return matches.sort()[matches.length - 1];
+}
+
+export function parsePage26OpCondFromBuffer(
+  buffer: ArrayBuffer,
+  fileName: string,
+  fileId = '',
+  folderUrl = 'https://drive.google.com/drive/folders/1xGm5ZH9mkNQhTAuXmmBCsCnORL0un4nE?usp=sharing'
+): Page26OpCondDataset | null {
+  try {
+    const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' });
+    const sheetOrder = [
+      { idx: 0, match: (n: string) => /ckt\s*#?3|circuit\s*#?3|kmb/i.test(n) },
+      { idx: 1, match: (n: string) => /ckt\s*#?2|circuit\s*#?2|kma/i.test(n) },
+      { idx: 2, match: (n: string) => /nkt|kna.*1|circuit\s*#?1/i.test(n) && !/oil/i.test(n) },
+      { idx: 3, match: (n: string) => /oil/i.test(n) },
+    ];
+    const byDate: Record<string, number[][]> = {};
+    const datesSet = new Set<string>();
+
+    wb.SheetNames.forEach((sheetName, sIdx) => {
+      let cktIdx = sheetOrder.find((s) => s.match(sheetName))?.idx;
+      if (cktIdx === undefined && sIdx < 4) cktIdx = sIdx;
+      if (cktIdx === undefined) return;
+
+      const rows: any[][] = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, defval: '' });
+      if (rows.length < 2) return;
+      const hdr = rows[0].map((c: any) => String(c || '').trim().toLowerCase());
+      const dateCol = Math.max(0, hdr.findIndex((c: string) => c.includes('date')));
+      const normCol = hdr.findIndex((c: string) => c.includes('normal') && c.includes('min'));
+      const emergCol = hdr.findIndex((c: string) => c.includes('emerg') && c.includes('min'));
+      const critCol = hdr.findIndex((c: string) => c.includes('crit') && c.includes('min'));
+      const ovlCol = hdr.findIndex((c: string) => (c.includes('overload') || c.includes('over')) && c.includes('min'));
+
+      const cN = normCol >= 0 ? normCol : 2;
+      const cE = emergCol >= 0 ? emergCol : 3;
+      const cC = critCol >= 0 ? critCol : 4;
+      const cO = ovlCol >= 0 ? ovlCol : 5;
+
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        if (!row || row.length <= dateCol) continue;
+        const dStr = String(row[dateCol] || '').trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dStr)) continue;
+        datesSet.add(dStr);
+        if (!byDate[dStr]) {
+          byDate[dStr] = [
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+          ];
+        }
+        byDate[dStr][cktIdx][0] += parseFloat(String(row[cN] ?? '0')) || 0;
+        byDate[dStr][cktIdx][1] += parseFloat(String(row[cE] ?? '0')) || 0;
+        byDate[dStr][cktIdx][2] += parseFloat(String(row[cC] ?? '0')) || 0;
+        byDate[dStr][cktIdx][3] += parseFloat(String(row[cO] ?? '0')) || 0;
+      }
+    });
+
+    const dates = Array.from(datesSet).sort();
+    if (dates.length === 0) return null;
+    for (const d of dates) {
+      for (let c = 0; c < 4; c++) {
+        for (let k = 0; k < 4; k++) {
+          byDate[d][c][k] = Number(byDate[d][c][k].toFixed(2));
+        }
+      }
+    }
+    return {
+      folderUrl,
+      fileName,
+      fileId,
+      fileSize: buffer.byteLength,
+      versionSignature: `${fileId}_${fileName}_${buffer.byteLength}`,
+      updatedAt: new Date().toISOString(),
+      totalDates: dates.length,
+      dateRange: {
+        firstDate: dates[0] || '',
+        latestDate: dates[dates.length - 1] || '',
+      },
+      dates,
+      byDate,
+    };
+  } catch (e) {
+    console.warn('Client parsePage26OpCondFromBuffer error:', e);
+    return null;
+  }
+}
+
+export function parsePage26LoadCurveFromBuffer(
+  buffer: ArrayBuffer,
+  fileName: string,
+  fileId = '',
+  folderUrl = 'https://drive.google.com/drive/folders/1OCCulyWoTU5hnRltkH9J7ZcsNdXDbCeo?usp=sharing'
+): Page26LoadCurveDataset | null {
+  try {
+    const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' });
+    const firstSheet = wb.SheetNames[0];
+    if (!firstSheet) return null;
+    const rows: any[][] = XLSX.utils.sheet_to_json(wb.Sheets[firstSheet], { header: 1, defval: '' });
+    if (rows.length < 2) return;
+
+    const slots: string[] = [];
+    for (let s = 0; s < 48; s++) {
+      const h1 = Math.floor(s / 2);
+      const m1 = s % 2 === 0 ? '00' : '30';
+      const h2 = Math.floor((s + 1) / 2);
+      const m2 = (s + 1) % 2 === 0 ? '00' : '30';
+      slots.push(`${String(h1).padStart(2, '0')}:${m1}-${String(h2).padStart(2, '0')}:${m2}`);
+    }
+
+    const byDate: Record<string, number[][]> = {};
+    const datesSet = new Set<string>();
+
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || row.length < 6) continue;
+      const dStr = String(row[0] || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dStr)) continue;
+      const periodStr = String(row[1] || '').trim();
+      let slotIdx = slots.indexOf(periodStr);
+      if (slotIdx === -1) {
+        const m = periodStr.match(/^(\d{1,2}):(\d{2})/);
+        if (m) {
+          const hh = parseInt(m[1], 10);
+          const mm = parseInt(m[2], 10);
+          slotIdx = Math.min(47, Math.max(0, hh * 2 + (mm >= 30 ? 1 : 0)));
+        }
+      }
+      if (slotIdx < 0 || slotIdx >= 48) continue;
+
+      datesSet.add(dStr);
+      if (!byDate[dStr]) {
+        byDate[dStr] = Array.from({ length: 48 }, () => [0, 0, 0, 0]);
+      }
+      const c3 = Number((parseFloat(String(row[2] ?? '0')) || 0).toFixed(2));
+      const c2 = Number((parseFloat(String(row[3] ?? '0')) || 0).toFixed(2));
+      const nk = Number((parseFloat(String(row[4] ?? '0')) || 0).toFixed(2));
+      const oi = Number((parseFloat(String(row[5] ?? '0')) || 0).toFixed(2));
+      byDate[dStr][slotIdx] = [c3, c2, nk, oi];
+    }
+
+    const dates = Array.from(datesSet).sort();
+    if (dates.length === 0) return null;
+
+    return {
+      folderUrl,
+      fileName,
+      fileId,
+      fileSize: buffer.byteLength,
+      versionSignature: `${fileId}_${fileName}_${buffer.byteLength}`,
+      updatedAt: new Date().toISOString(),
+      totalDates: dates.length,
+      dateRange: {
+        firstDate: dates[0] || '',
+        latestDate: dates[dates.length - 1] || '',
+      },
+      slots,
+      dates,
+      byDate,
+    };
+  } catch (e) {
+    console.warn('Client parsePage26LoadCurveFromBuffer error:', e);
+    return null;
+  }
+}
+
+function pickNewerPage26Dataset<T extends { dates?: string[]; totalDates?: number; dateRange?: { latestDate: string }; fileName?: string }>(
+  a: T | null | undefined,
+  b: T | null | undefined
+): T | null {
+  if (!a?.dates?.length) return b?.dates?.length ? b : null;
+  if (!b?.dates?.length) return a;
+  const aLatest = a.dateRange?.latestDate || a.dates[a.dates.length - 1] || '';
+  const bLatest = b.dateRange?.latestDate || b.dates[b.dates.length - 1] || '';
+  if (bLatest !== aLatest) {
+    return bLatest > aLatest ? b : a;
+  }
+  if ((b.dates.length || 0) !== (a.dates.length || 0)) {
+    return (b.dates.length || 0) > (a.dates.length || 0) ? b : a;
+  }
+  return a;
+}
+
 export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<{
   opCond: Page26OpCondDataset | null;
   loadCurve: Page26LoadCurveDataset | null;
@@ -600,7 +789,8 @@ export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<
   if (
     !forceRefresh &&
     memoryPage26OpCondDataset?.dates?.length &&
-    memoryPage26LoadCurveDataset?.dates?.length
+    memoryPage26LoadCurveDataset?.dates?.length &&
+    (memoryPage26OpCondDataset.dateRange?.latestDate || '') >= (BUNDLED_PAGE26_OP_COND.dateRange?.latestDate || '')
   ) {
     return {
       opCond: memoryPage26OpCondDataset,
@@ -612,73 +802,119 @@ export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<
   }
 
   fetchingPage26Promise = (async () => {
-    const cacheBust = forceRefresh ? `?t=${Date.now()}` : '';
-    const fetchOpts: RequestInit = forceRefresh ? { cache: 'no-store' } : {};
+    const cacheBust = `?t=${Date.now()}`;
+    const fetchOpts: RequestInit = { cache: 'no-store' };
 
-    // 1. Try unified fast server endpoint /api/page26-data
-    try {
-      const res = await fetch(`/api/page26-data${cacheBust}`, fetchOpts);
-      if (res.ok) {
-        const json = await res.json();
-        if (json?.opCond?.dates?.length && json?.loadCurve?.dates?.length) {
-          memoryPage26OpCondDataset = json.opCond;
-          memoryPage26LoadCurveDataset = json.loadCurve;
-          void idbSet('page26_op_cond', json.opCond);
-          void idbSet('page26_load_curve', json.loadCurve);
-          notifyListeners();
-          return {
-            opCond: memoryPage26OpCondDataset,
-            loadCurve: memoryPage26LoadCurveDataset,
-          };
-        }
-      }
-    } catch {}
+    let bestOp: Page26OpCondDataset | null = pickNewerPage26Dataset(memoryPage26OpCondDataset, BUNDLED_PAGE26_OP_COND);
+    let bestLc: Page26LoadCurveDataset | null = pickNewerPage26Dataset(memoryPage26LoadCurveDataset, BUNDLED_PAGE26_LOAD_CURVE);
 
-    // 2. Fallback to static pre-bundled JSON files (/data/page26_op_cond.json & /data/page26_load_curve.json)
-    try {
-      const [opRes, lcRes] = await Promise.all([
-        fetch(`/data/page26_op_cond.json${cacheBust}`, fetchOpts),
-        fetch(`/data/page26_load_curve.json${cacheBust}`, fetchOpts),
-      ]);
-      if (opRes.ok) {
-        const opJson = await opRes.json();
-        if (opJson?.dates?.length) {
-          memoryPage26OpCondDataset = opJson;
-          void idbSet('page26_op_cond', opJson);
-        }
-      }
-      if (lcRes.ok) {
-        const lcJson = await lcRes.json();
-        if (lcJson?.dates?.length) {
-          memoryPage26LoadCurveDataset = lcJson;
-          void idbSet('page26_load_curve', lcJson);
-        }
-      }
-      if (memoryPage26OpCondDataset?.dates?.length || memoryPage26LoadCurveDataset?.dates?.length) {
-        notifyListeners();
-        return {
-          opCond: memoryPage26OpCondDataset,
-          loadCurve: memoryPage26LoadCurveDataset,
-        };
-      }
-    } catch {}
-
-    // 3. Fallback to IndexedDB cache
+    // 1. Check IndexedDB cache first (may hold a newer live-downloaded Google Drive file)
     try {
       const [idbOp, idbLc] = await Promise.all([
         idbGet<Page26OpCondDataset>('page26_op_cond'),
         idbGet<Page26LoadCurveDataset>('page26_load_curve'),
       ]);
-      if (idbOp?.dates?.length) memoryPage26OpCondDataset = idbOp;
-      if (idbLc?.dates?.length) memoryPage26LoadCurveDataset = idbLc;
+      bestOp = pickNewerPage26Dataset(bestOp, idbOp);
+      bestLc = pickNewerPage26Dataset(bestLc, idbLc);
     } catch {}
 
-    if (!memoryPage26OpCondDataset?.dates?.length) {
-      memoryPage26OpCondDataset = BUNDLED_PAGE26_OP_COND;
+    // 2. Try unified fast server endpoint /api/page26-data
+    try {
+      const res = await fetch(`/api/page26-data${cacheBust}`, fetchOpts);
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const json = await res.json();
+        if (json?.opCond?.dates?.length) {
+          bestOp = pickNewerPage26Dataset(bestOp, json.opCond);
+        }
+        if (json?.loadCurve?.dates?.length) {
+          bestLc = pickNewerPage26Dataset(bestLc, json.loadCurve);
+        }
+      }
+    } catch {}
+
+    // 3. Also check static pre-bundled JSON files (/data/page26_op_cond.json & /data/page26_load_curve.json)
+    try {
+      const [opRes, lcRes] = await Promise.all([
+        fetch(`/data/page26_op_cond.json${cacheBust}`, fetchOpts),
+        fetch(`/data/page26_load_curve.json${cacheBust}`, fetchOpts),
+      ]);
+      if (opRes.ok && (opRes.headers.get('content-type') || '').includes('application/json')) {
+        const opJson = await opRes.json();
+        if (opJson?.dates?.length) {
+          bestOp = pickNewerPage26Dataset(bestOp, opJson);
+        }
+      }
+      if (lcRes.ok && (lcRes.headers.get('content-type') || '').includes('application/json')) {
+        const lcJson = await lcRes.json();
+        if (lcJson?.dates?.length) {
+          bestLc = pickNewerPage26Dataset(bestLc, lcJson);
+        }
+      }
+    } catch {}
+
+    // 4. If forceRefresh is requested, also verify live Google Drive folders for Page 2.6
+    if (forceRefresh) {
+      try {
+        const scanRes = await fetch(`/api/fetch-shared-database?scanAll=1&t=${Date.now()}`, { cache: 'no-store' });
+        if (scanRes.ok && (scanRes.headers.get('content-type') || '').includes('application/json')) {
+          const scanJson = await scanRes.json();
+          const opMeta = scanJson?.folders?.page26OpCond;
+          const lcMeta = scanJson?.folders?.page26LoadCurve;
+
+          if (
+            opMeta?.fileId &&
+            (opMeta.fileId !== bestOp?.fileId ||
+              (opMeta.latestDateInName && opMeta.latestDateInName > (bestOp?.dateRange?.latestDate || '')))
+          ) {
+            const dl = await fetchRemoteDatabaseFile(
+              opMeta.downloadUrl || 'https://drive.google.com/drive/folders/1xGm5ZH9mkNQhTAuXmmBCsCnORL0un4nE?usp=sharing',
+              'xlsx'
+            );
+            if (dl.success && dl.buffer) {
+              const parsedOp = parsePage26OpCondFromBuffer(
+                dl.buffer,
+                opMeta.fileName || dl.fileName,
+                opMeta.fileId
+              );
+              if (parsedOp?.dates?.length) {
+                bestOp = parsedOp;
+              }
+            }
+          }
+
+          if (
+            lcMeta?.fileId &&
+            (lcMeta.fileId !== bestLc?.fileId ||
+              (lcMeta.latestDateInName && lcMeta.latestDateInName > (bestLc?.dateRange?.latestDate || '')))
+          ) {
+            const dl = await fetchRemoteDatabaseFile(
+              lcMeta.downloadUrl || 'https://drive.google.com/drive/folders/1OCCulyWoTU5hnRltkH9J7ZcsNdXDbCeo?usp=sharing',
+              'xlsx'
+            );
+            if (dl.success && dl.buffer) {
+              const parsedLc = parsePage26LoadCurveFromBuffer(
+                dl.buffer,
+                lcMeta.fileName || dl.fileName,
+                lcMeta.fileId
+              );
+              if (parsedLc?.dates?.length) {
+                bestLc = parsedLc;
+              }
+            }
+          }
+        }
+      } catch {}
     }
-    if (!memoryPage26LoadCurveDataset?.dates?.length) {
-      memoryPage26LoadCurveDataset = BUNDLED_PAGE26_LOAD_CURVE;
+
+    if (bestOp?.dates?.length) {
+      memoryPage26OpCondDataset = bestOp;
+      void idbSet('page26_op_cond', bestOp);
     }
+    if (bestLc?.dates?.length) {
+      memoryPage26LoadCurveDataset = bestLc;
+      void idbSet('page26_load_curve', bestLc);
+    }
+
     notifyListeners();
 
     return {
@@ -846,8 +1082,8 @@ async function fetchSharedServerDefaultDatabases(forceRefresh = false): Promise<
   if (!forceRefresh && sharedPublicDefaultDbPromise) {
     return sharedPublicDefaultDbPromise;
   }
-  const cacheBust = forceRefresh ? `?t=${Date.now()}` : '';
-  const fetchOpts: RequestInit = forceRefresh ? { cache: 'no-store' } : {};
+  const cacheBust = `?t=${Date.now()}`;
+  const fetchOpts: RequestInit = { cache: 'no-store' };
   sharedPublicDefaultDbPromise = (async () => {
     try {
       const res = await fetch(`/api/public-default-databases${cacheBust}`, fetchOpts);
@@ -877,6 +1113,42 @@ async function fetchSharedServerDefaultDatabases(forceRefresh = false): Promise<
   return sharedPublicDefaultDbPromise;
 }
 
+function pickNewestPanel1(a: any, b: any): any {
+  if (!a?.records?.length) return b?.records?.length ? b : null;
+  if (!b?.records?.length) return a;
+  const aLatest = a.config?.dateRange?.latestDate || a.info?.dateRange?.latestDate || extractMaxDateFromText(a.info?.name) || '';
+  const bLatest = b.config?.dateRange?.latestDate || b.info?.dateRange?.latestDate || extractMaxDateFromText(b.info?.name) || '';
+  if (bLatest !== aLatest) return bLatest > aLatest ? b : a;
+  const aDates = a.config?.totalDates || a.info?.totalDates || 0;
+  const bDates = b.config?.totalDates || b.info?.totalDates || 0;
+  if (bDates !== aDates) return bDates > aDates ? b : a;
+  return a;
+}
+
+function pickNewestPanel2(a: any, b: any): any {
+  if (!a?.peaks?.length) return b?.peaks?.length ? b : null;
+  if (!b?.peaks?.length) return a;
+  const aLatest = a.info?.dateRange?.latestDate || a.peaks[a.peaks.length - 1]?.date || extractMaxDateFromText(a.info?.name) || '';
+  const bLatest = b.info?.dateRange?.latestDate || b.peaks[b.peaks.length - 1]?.date || extractMaxDateFromText(b.info?.name) || '';
+  if (bLatest !== aLatest) return bLatest > aLatest ? b : a;
+  if (b.peaks.length !== a.peaks.length) return b.peaks.length > a.peaks.length ? b : a;
+  return a;
+}
+
+function pickNewestPanel3(a: any, b: any): any {
+  if (!a) return b || null;
+  if (!b) return a;
+  const aDatesArr = a.allDates || a.dates || a.stats?.dates || [];
+  const bDatesArr = b.allDates || b.dates || b.stats?.dates || [];
+  const aLatest = a.info?.dateRange?.latestDate || aDatesArr[aDatesArr.length - 1] || extractMaxDateFromText(a.info?.name) || '';
+  const bLatest = b.info?.dateRange?.latestDate || bDatesArr[bDatesArr.length - 1] || extractMaxDateFromText(b.info?.name) || '';
+  if (bLatest !== aLatest) return bLatest > aLatest ? b : a;
+  const aCount = aDatesArr.length || a.info?.totalDates || 0;
+  const bCount = bDatesArr.length || b.info?.totalDates || 0;
+  if (bCount !== aCount) return bCount > aCount ? b : a;
+  return a;
+}
+
 async function hydrateFromPublicDefaultDatabases(): Promise<void> {
   if (hasStartedAsyncHydration) return;
   hasStartedAsyncHydration = true;
@@ -897,9 +1169,9 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
     info: DataPanelSourceInfo;
   }>('panel3');
 
-  const p1 = serverData?.panel1 || idbP1;
-  const p2 = serverData?.panel2 || idbP2;
-  const p3 = serverData?.panel3 || idbP3;
+  const p1 = pickNewestPanel1(serverData?.panel1, idbP1);
+  const p2 = pickNewestPanel2(serverData?.panel2, idbP2);
+  const p3 = pickNewestPanel3(serverData?.panel3, idbP3);
 
   let didUpdate = false;
 
@@ -3273,20 +3545,32 @@ export const KNOWN_DEFAULT_GOOGLE_DRIVE_FILES: Record<
 > = {
   // Folder 1: Daily Peak Temp
   '1CMSH2f5hAl0N6F3PHhpr9mwStcX29kgS': {
-    fileId: '1GQUwUGgFliauqXJd2reNsUT9ArifUDen',
-    fileName: 'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-10-26.xlsx',
+    fileId: '1Ya1JFd4CuINtfrbfH0H1KiZG10qf6xJ0',
+    fileName: 'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-10-31.xlsx',
     format: 'xlsx',
   },
   // Folder 2: 4-Circuit Power Record
   '1jqS95Z-nF1SivlJFuka8CcIKiyFBMrZ6': {
-    fileId: '1H2JhkJ1y_ZsZDksIko6AMKwM40zIfhyD',
-    fileName: 'Daily_Maximum_Power_Consumption_Database_Updated_2025-07-31_to_2026-10-26.csv',
+    fileId: '1xdb2zFsdWDkWeAOr7VYYvVv9ovlKz3vN',
+    fileName: 'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-26_to_2026-10-31.csv',
     format: 'csv',
   },
   // Folder 3: 24-Hour Section Profile
   '15rgLYl3V7sqPDNPY8zOLEz9eDBtZLj2_': {
-    fileId: '1jhWEfxnurZ32G-ck9Tw8Ob_S7EJ7mKay',
-    fileName: 'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-10-26.xlsx',
+    fileId: '1Lt8jRjIpQJ1D0r7az7cNZ2ey_noOUZeE',
+    fileName: 'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-10-31.xlsx',
+    format: 'xlsx',
+  },
+  // Page 2.6 Folder 1: Operation Condition Database
+  '1xGm5ZH9mkNQhTAuXmmBCsCnORL0un4nE': {
+    fileId: '1U8JX9NmtNmO7Xw8CmsZ8yoGuu32NlRb1',
+    fileName: 'Power_Operating_Condition_Database_Updated_2026-10-26_to_2026-10-31.xlsx',
+    format: 'xlsx',
+  },
+  // Page 2.6 Folder 2: 30-Min Load Curve Database
+  '1OCCulyWoTU5hnRltkH9J7ZcsNdXDbCeo': {
+    fileId: '1nae0hRouMpxNT8kYb9YARnlXQIDVvVwv',
+    fileName: 'Hourly_Load_Curve_Database_Updated_2026-10-26_to_2026-10-31.xlsx',
     format: 'xlsx',
   },
 };
@@ -3359,8 +3643,8 @@ export async function fetchRemoteDatabaseFile(
       headers['Authorization'] = `Bearer ${accessToken}`;
     }
     const res = await fetch(
-      `/api/fetch-shared-database?url=${encodeURIComponent(cleanUrl)}&format=${preferredFormat}&binary=1`,
-      { headers }
+      `/api/fetch-shared-database?url=${encodeURIComponent(cleanUrl)}&format=${preferredFormat}&binary=1&t=${Date.now()}`,
+      { headers, cache: 'no-store' }
     );
     const contentType = res.headers.get('content-type') || '';
     if (res.ok && !contentType.includes('text/html') && !contentType.includes('text/plain')) {
@@ -3554,9 +3838,11 @@ export interface PublicDataRefreshResult {
 }
 
 /**
- * Automatically reads and loads data from the 3 configured shared Google Drive folders
- * (Panel 1: Daily Peak Temp, Panel 2: 4-Circuit Power Record, Panel 3: Section Daily Profile)
- * with non-blocking async yielding and 0-100% progress tracking.
+ * Automatically reads and loads data from all configured shared Google Drive folders
+ * (Panel 1: Daily Peak Temp, Panel 2: 4-Circuit Power Record, Panel 3: Section Daily Profile,
+ * plus Page 2.6 Operation Condition & 30-Min Load Curve)
+ * with live Google Drive folder scanning, client-side fallback parsing for static/serverless deployments,
+ * and 0-100% progress tracking.
  */
 export async function syncAllPublicSharedTargetFolders(
   accessToken?: string,
@@ -3572,11 +3858,13 @@ export async function syncAllPublicSharedTargetFolders(
     message: '',
   };
 
-  onProgress?.(4, 'Connecting to Telemetry Cache & Scanning 3 Shared Google Drive Folders...');
+  onProgress?.(4, 'Connecting to Telemetry Cache & Scanning Shared Google Drive Folders...');
   await new Promise((r) => setTimeout(r, 10));
 
-  // 0. Always check the 3 shared Google Drive folders first for any newly uploaded or updated files
+  // 0. Check all shared Google Drive folders for any newly uploaded or updated files
   let scanResult: any = null;
+  let liveFoldersMeta: Record<string, { fileId: string; fileName: string; latestDateInName: string; downloadUrl: string }> | null = null;
+  let anyLiveClientUpdated = false;
   let scanTicker: ReturnType<typeof setInterval> | null = null;
   try {
     let tickPct = 5;
@@ -3585,32 +3873,59 @@ export async function syncAllPublicSharedTargetFolders(
         tickPct += 1;
         onProgress?.(
           tickPct,
-          'Checking & Pulling Latest Database Files from 3 Shared Google Drive Folders...'
+          'Checking & Pulling Latest Database Files from Shared Google Drive Folders...'
         );
       }
     }, 1200);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000);
-    const scanRes = await fetch(`/api/scan-and-sync-public-folders?t=${Date.now()}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
-      cache: 'no-store',
-      signal: controller.signal,
-      body: JSON.stringify({
-        panel1Url: links.panel1Url,
-        panel2Url: links.panel2Url,
-        panel3Url: links.panel3Url,
-        token: accessToken,
-      }),
-    });
+
+    // Run server-side full sync (if server.ts is active) and lightweight live folder metadata scan (works on Vercel & server.ts) in parallel
+    const [scanRes, metaScanRes] = await Promise.all([
+      fetch(`/api/scan-and-sync-public-folders?t=${Date.now()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+        cache: 'no-store',
+        signal: controller.signal,
+        body: JSON.stringify({
+          panel1Url: links.panel1Url,
+          panel2Url: links.panel2Url,
+          panel3Url: links.panel3Url,
+          token: accessToken,
+        }),
+      }).catch(() => null),
+      fetch(`/api/fetch-shared-database?scanAll=1&t=${Date.now()}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      }).catch(() => null),
+    ]);
+
     clearTimeout(timeoutId);
     if (scanTicker) {
       clearInterval(scanTicker);
       scanTicker = null;
     }
 
-    if (scanRes.ok && (scanRes.headers.get('content-type') || '').includes('application/json')) {
+    if (metaScanRes && metaScanRes.ok && (metaScanRes.headers.get('content-type') || '').includes('application/json')) {
+      const metaJson = await metaScanRes.json().catch(() => null);
+      if (metaJson?.success && metaJson?.folders) {
+        liveFoldersMeta = metaJson.folders;
+        // Also update KNOWN_DEFAULT_GOOGLE_DRIVE_FILES in-memory with live discovered fileIds
+        for (const key of Object.keys(metaJson.folders)) {
+          const item = metaJson.folders[key];
+          if (item?.folderId && item?.fileId && item?.fileName && KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[item.folderId]) {
+            KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[item.folderId] = {
+              ...KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[item.folderId],
+              fileId: item.fileId,
+              fileName: item.fileName,
+            };
+          }
+        }
+      }
+    }
+
+    if (scanRes && scanRes.ok && (scanRes.headers.get('content-type') || '').includes('application/json')) {
       scanResult = await scanRes.json();
       if (scanResult?.changesDetected || scanResult?.anyUpdated) {
         const changedNames = [
@@ -3623,7 +3938,7 @@ export async function syncAllPublicSharedTargetFolders(
           `Detected & downloaded new database file(s): ${changedNames.join(', ')}`
         );
       } else {
-        onProgress?.(11, 'Verified all 3 Google Drive Shared Folders are on the latest version...');
+        onProgress?.(11, 'Verified Shared Google Drive Folders are on the latest version...');
       }
     }
   } catch (scanErr) {
@@ -3634,8 +3949,13 @@ export async function syncAllPublicSharedTargetFolders(
     console.warn('Live folder scan warning (using server/cached databases):', scanErr);
   }
 
-  // Always fetch the fresh server database AFTER the 3-folder scan completes
-  const cachedServerDb = await fetchSharedServerDefaultDatabases(true);
+  // Fetch both the server/static database and IndexedDB cache so we can pick the newest or pull live from Google Drive if Google Drive has an even newer file
+  const [cachedServerDb, idbP1, idbP2, idbP3] = await Promise.all([
+    fetchSharedServerDefaultDatabases(true),
+    idbGet<any>('panel1'),
+    idbGet<any>('panel2'),
+    idbGet<any>('panel3'),
+  ]);
 
   let needsIndexRebuild = false;
 
@@ -3643,7 +3963,43 @@ export async function syncAllPublicSharedTargetFolders(
   if (links.panel1Url) {
     try {
       onProgress?.(16, 'Energizing Folder 1: Reading 19-Section Daily Peak Temperature...');
-      const p1Cached = cachedServerDb?.panel1;
+      let p1Cached = pickNewestPanel1(cachedServerDb?.panel1, idbP1);
+      const liveP1 = liveFoldersMeta?.panel1;
+      const cachedP1Latest =
+        p1Cached?.config?.dateRange?.latestDate ||
+        p1Cached?.info?.dateRange?.latestDate ||
+        extractMaxDateFromText(p1Cached?.info?.name) ||
+        '';
+
+      // If Google Drive has a newer file than cachedServerDb / IndexedDB (e.g., on static Vercel after a new file is uploaded to Drive), download & parse it directly
+      if (
+        liveP1?.fileId &&
+        liveP1.latestDateInName &&
+        liveP1.latestDateInName > cachedP1Latest
+      ) {
+        onProgress?.(20, `Downloading new Folder 1 database (${liveP1.fileName}) from Google Drive...`);
+        const dl = await fetchRemoteDatabaseFile(liveP1.downloadUrl || links.panel1Url, 'xlsx', accessToken);
+        if (dl.success && dl.buffer) {
+          const saved = await saveUploadedOrgDatabase(dl.buffer, liveP1.fileName || dl.fileName);
+          if (saved.success) {
+            anyLiveClientUpdated = true;
+            p1Cached = {
+              config: saved.config,
+              records: memoryRecords || [],
+              info: {
+                sourceType: 'googledrive',
+                name: liveP1.fileName || dl.fileName,
+                remoteUrl: links.panel1Url,
+                updatedAt: new Date().toISOString(),
+                totalDates: saved.config.totalDates,
+                dateRange: saved.config.dateRange,
+                recordCount: saved.config.totalRecords,
+              },
+            };
+          }
+        }
+      }
+
       if (
         p1Cached &&
         Array.isArray(p1Cached.records) &&
@@ -3671,9 +4027,11 @@ export async function syncAllPublicSharedTargetFolders(
           ...(p1Cached.info || {}),
           sourceType: 'googledrive',
           name:
-            p1Cached.info?.name ||
-            p1Cached.config.databaseFileName ||
-            'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-10-26.xlsx',
+            liveP1?.fileName && liveP1.latestDateInName === p1Cached.config.dateRange?.latestDate
+              ? liveP1.fileName
+              : p1Cached.info?.name ||
+                p1Cached.config.databaseFileName ||
+                'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-10-31.xlsx',
           remoteUrl: links.panel1Url,
           updatedAt: p1Cached.info?.updatedAt || new Date().toISOString(),
           totalDates: p1Cached.config.totalDates,
@@ -3700,7 +4058,41 @@ export async function syncAllPublicSharedTargetFolders(
   if (links.panel2Url) {
     try {
       onProgress?.(44, 'Energizing Folder 2: Reading 4-Circuit Submarine Power Load...');
-      const p2Cached = cachedServerDb?.panel2;
+      let p2Cached = pickNewestPanel2(cachedServerDb?.panel2, idbP2);
+      const liveP2 = liveFoldersMeta?.panel2;
+      const cachedP2Latest =
+        p2Cached?.info?.dateRange?.latestDate ||
+        p2Cached?.peaks?.[p2Cached.peaks.length - 1]?.date ||
+        extractMaxDateFromText(p2Cached?.info?.name) ||
+        '';
+
+      if (
+        liveP2?.fileId &&
+        liveP2.latestDateInName &&
+        liveP2.latestDateInName > cachedP2Latest
+      ) {
+        onProgress?.(48, `Downloading new Folder 2 database (${liveP2.fileName}) from Google Drive...`);
+        const dl = await fetchRemoteDatabaseFile(liveP2.downloadUrl || links.panel2Url, 'csv', accessToken);
+        if (dl.success && dl.buffer) {
+          const saved = await saveUploadedPowerDatabase(dl.buffer, liveP2.fileName || dl.fileName);
+          if (saved.success) {
+            anyLiveClientUpdated = true;
+            p2Cached = {
+              peaks: Array.from(memoryPowerPeaksOnly.values()),
+              info: {
+                sourceType: 'googledrive',
+                name: liveP2.fileName || dl.fileName,
+                remoteUrl: links.panel2Url,
+                updatedAt: new Date().toISOString(),
+                totalDates: saved.count,
+                dateRange: saved.dateRange,
+                recordCount: saved.count,
+              },
+            };
+          }
+        }
+      }
+
       if (p2Cached && Array.isArray(p2Cached.peaks) && p2Cached.peaks.length > 0) {
         onProgress?.(
           54,
@@ -3741,18 +4133,21 @@ export async function syncAllPublicSharedTargetFolders(
 
         onProgress?.(62, 'Synchronizing 4-Circuit Yearly Comparison (2.4)...');
         const sortedP2Dates = p2Cached.peaks.map((p: CircuitDailyPeakPower) => p.date).sort();
+        const latestP2Date = sortedP2Dates[sortedP2Dates.length - 1] || '2026-10-31';
         const p2Info: DataPanelSourceInfo = {
           ...(p2Cached.info || {}),
           sourceType: 'googledrive',
           name:
-            p2Cached.info?.name ||
-            'Daily_Maximum_Power_Consumption_Database_Updated_2025-07-31_to_2026-10-26.csv',
+            liveP2?.fileName && liveP2.latestDateInName === latestP2Date
+              ? liveP2.fileName
+              : p2Cached.info?.name ||
+                'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-26_to_2026-10-31.csv',
           remoteUrl: links.panel2Url,
           updatedAt: p2Cached.info?.updatedAt || new Date().toISOString(),
           totalDates: p2Cached.peaks.length,
           dateRange: p2Cached.info?.dateRange || {
             firstDate: sortedP2Dates[0] || '2021-11-28',
-            latestDate: sortedP2Dates[sortedP2Dates.length - 1] || '2026-10-26',
+            latestDate: latestP2Date,
           },
           recordCount: p2Cached.peaks.length,
         };
@@ -3782,7 +4177,43 @@ export async function syncAllPublicSharedTargetFolders(
   if (links.panel3Url) {
     try {
       onProgress?.(74, 'Energizing Folder 3: Fetching 24-Hour Section Daily Profile...');
-      const p3Cached = cachedServerDb?.panel3;
+      let p3Cached = pickNewestPanel3(cachedServerDb?.panel3, idbP3);
+      const liveP3 = liveFoldersMeta?.panel3;
+      const p3DatesArr = p3Cached?.allDates || p3Cached?.dates || p3Cached?.stats?.dates || [];
+      const cachedP3Latest =
+        p3Cached?.info?.dateRange?.latestDate ||
+        p3DatesArr[p3DatesArr.length - 1] ||
+        extractMaxDateFromText(p3Cached?.info?.name) ||
+        '';
+
+      if (
+        liveP3?.fileId &&
+        liveP3.latestDateInName &&
+        liveP3.latestDateInName > cachedP3Latest
+      ) {
+        onProgress?.(78, `Downloading new Folder 3 database (${liveP3.fileName}) from Google Drive...`);
+        const dl = await fetchRemoteDatabaseFile(liveP3.downloadUrl || links.panel3Url, 'xlsx', accessToken);
+        if (dl.success && dl.buffer) {
+          const saved = await saveUploadedSectionDailyProfileDatabase(dl.buffer, liveP3.fileName || dl.fileName);
+          if (saved.success) {
+            anyLiveClientUpdated = true;
+            p3Cached = {
+              records: memorySectionProfileRecords,
+              allDates: saved.dates,
+              stats: memoryPanel3StatsSummary,
+              info: {
+                sourceType: 'googledrive',
+                name: liveP3.fileName || dl.fileName,
+                remoteUrl: links.panel3Url,
+                updatedAt: new Date().toISOString(),
+                totalDates: saved.dates.length,
+                dateRange: saved.dateRange,
+                recordCount: saved.count,
+              },
+            };
+          }
+        }
+      }
 
       let recordsToUse: OrgSectionHourlyRecord[] =
         p3Cached && Array.isArray(p3Cached.records) && p3Cached.records.length > 0
@@ -3834,7 +4265,7 @@ export async function syncAllPublicSharedTargetFolders(
 
         onProgress?.(91, 'Synchronizing Daily Curve (2.2) & 3D Thermal Surface (2.3)...');
 
-        // Also pre-load or compute the full 484-date Panel 3 Statistics Summary for Page 2.5 & Page 2.6
+        // Also pre-load or compute the full Panel 3 Statistics Summary for Page 2.5 & Page 2.6
         onProgress?.(94, 'Pre-calculating Temperature (2.5) & Power Operating Condition (2.6) Statistics...');
         if (p3Cached?.stats && Array.isArray(p3Cached.stats.dates) && p3Cached.stats.dates.length > 0) {
           memoryPanel3StatsSummary = p3Cached.stats;
@@ -3847,19 +4278,22 @@ export async function syncAllPublicSharedTargetFolders(
           allDatesToUse.length ||
           p3Cached?.info?.totalDates ||
           memorySectionProfileDates.length;
+        const latestP3Date = memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-31';
 
         const defaultP3Info: DataPanelSourceInfo = {
           ...(p3Cached?.info || {}),
           sourceType: 'googledrive',
           name:
-            p3Cached?.info?.name ||
-            'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-10-26.xlsx',
+            liveP3?.fileName && liveP3.latestDateInName === latestP3Date
+              ? liveP3.fileName
+              : p3Cached?.info?.name ||
+                'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-10-31.xlsx',
           remoteUrl: links.panel3Url,
           updatedAt: p3Cached?.info?.updatedAt || new Date().toISOString(),
           totalDates: totalDatesCount,
           dateRange: p3Cached?.info?.dateRange || {
             firstDate: memorySectionProfileDates[0] || '2021-11-28',
-            latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-26',
+            latestDate: latestP3Date,
           },
           recordCount:
             p3Cached?.info?.recordCount ||
@@ -3922,7 +4356,10 @@ export async function syncAllPublicSharedTargetFolders(
   if (result.panel3.success) successfulPanels.push(`Panel 3 (${result.panel3.count} dates)`);
 
   if (result.success) {
-    const updatePrefix = scanResult?.anyUpdated ? 'Detected & auto-downloaded updated Google Drive files! ' : '';
+    const updatePrefix =
+      scanResult?.anyUpdated || anyLiveClientUpdated
+        ? 'Detected & auto-downloaded updated Google Drive files! '
+        : '';
     result.message = `${updatePrefix}Successfully loaded data from shared folders: ${successfulPanels.join(', ')}.`;
   } else {
     const errorDetails = [result.panel1.error, result.panel2.error, result.panel3.error]
@@ -3932,7 +4369,7 @@ export async function syncAllPublicSharedTargetFolders(
     result.message = `Unable to fetch from shared Google Drive links (${errorDetails || 'Network or access error'}). Current telemetry remains active.`;
   }
 
-  onProgress?.(100, 'All 3 Shared Folders Synchronized (100%)');
+  onProgress?.(100, 'All Shared Folders Synchronized (100%)');
   return result;
 }
 

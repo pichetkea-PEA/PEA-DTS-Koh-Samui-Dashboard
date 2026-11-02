@@ -199,7 +199,7 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
     () => BUNDLED_PAGE26_OP_COND.dates[0] || '2021-11-28'
   );
   const [customEndDate, setCustomEndDate] = useState<string>(
-    () => BUNDLED_PAGE26_OP_COND.dates[BUNDLED_PAGE26_OP_COND.dates.length - 1] || '2026-10-26'
+    () => BUNDLED_PAGE26_OP_COND.dates[BUNDLED_PAGE26_OP_COND.dates.length - 1] || '2026-10-31'
   );
 
   // Local Built-in Chart 1 Filters
@@ -213,14 +213,21 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
   const [isGlobalFilterMinimized, setIsGlobalFilterMinimized] = useState<boolean>(false);
   const [isLocalFilterMinimized, setIsLocalFilterMinimized] = useState<boolean>(false);
 
+  const prevLatestChart1DateRef = React.useRef<string>(
+    BUNDLED_PAGE26_OP_COND.dates[BUNDLED_PAGE26_OP_COND.dates.length - 1] || ''
+  );
+
   useEffect(() => {
     if (availableYears.length > 0 && selectedYears.length === 0) {
       setSelectedYears([...availableYears]);
       setSelectedSingleYearForMonths(availableYears[availableYears.length - 1]);
     }
-    if (allDatesChart1.length > 0 && (!customStartDate || !customEndDate)) {
-      setCustomStartDate(allDatesChart1[0]);
-      setCustomEndDate(allDatesChart1[allDatesChart1.length - 1]);
+    if (allDatesChart1.length > 0) {
+      const latest = allDatesChart1[allDatesChart1.length - 1];
+      const latestChanged = Boolean(latest && latest !== prevLatestChart1DateRef.current);
+      if (latest) prevLatestChart1DateRef.current = latest;
+      if (!customStartDate) setCustomStartDate(allDatesChart1[0]);
+      if (!customEndDate || latestChanged) setCustomEndDate(latest);
     }
   }, [availableYears, allDatesChart1, selectedYears.length, customStartDate, customEndDate]);
 
@@ -527,21 +534,29 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
   const allDatesChart2 = useMemo(() => loadCurveData?.dates || [], [loadCurveData]);
   const [chart2Mode, setChart2Mode] = useState<'single' | 'dual'>('single');
   const [chart2Date1, setChart2Date1] = useState<string>(
-    () => BUNDLED_PAGE26_LOAD_CURVE.dates[BUNDLED_PAGE26_LOAD_CURVE.dates.length - 1] || '2026-10-26'
+    () => BUNDLED_PAGE26_LOAD_CURVE.dates[BUNDLED_PAGE26_LOAD_CURVE.dates.length - 1] || '2026-10-31'
   );
   const [chart2Date2, setChart2Date2] = useState<string>(
-    () => BUNDLED_PAGE26_LOAD_CURVE.dates[Math.max(0, BUNDLED_PAGE26_LOAD_CURVE.dates.length - 2)] || '2026-10-25'
+    () => BUNDLED_PAGE26_LOAD_CURVE.dates[Math.max(0, BUNDLED_PAGE26_LOAD_CURVE.dates.length - 2)] || '2026-10-30'
   );
   const [chart2CircuitKey, setChart2CircuitKey] = useState<PowerCircuitKey>('ckt3');
   const [isChart2FilterMinimized, setIsChart2FilterMinimized] = useState<boolean>(false);
 
-  // Initialize Chart 2 default dates (latest date & previous date)
+  const prevLatestChart2DateRef = React.useRef<string>(
+    BUNDLED_PAGE26_LOAD_CURVE.dates[BUNDLED_PAGE26_LOAD_CURVE.dates.length - 1] || ''
+  );
+
+  // Initialize and auto-advance Chart 2 default dates (latest date & previous date) when dataset updates
   useEffect(() => {
     if (allDatesChart2.length > 0) {
-      if (!chart2Date1 || !allDatesChart2.includes(chart2Date1)) {
-        setChart2Date1(allDatesChart2[allDatesChart2.length - 1]);
+      const latest = allDatesChart2[allDatesChart2.length - 1];
+      const latestChanged = Boolean(latest && latest !== prevLatestChart2DateRef.current);
+      if (latest) prevLatestChart2DateRef.current = latest;
+
+      if (!chart2Date1 || !allDatesChart2.includes(chart2Date1) || latestChanged) {
+        setChart2Date1(latest);
       }
-      if (!chart2Date2 || !allDatesChart2.includes(chart2Date2)) {
+      if (!chart2Date2 || !allDatesChart2.includes(chart2Date2) || latestChanged) {
         const prevIdx = Math.max(0, allDatesChart2.length - 2);
         setChart2Date2(allDatesChart2[prevIdx]);
       }

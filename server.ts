@@ -3210,10 +3210,78 @@ app.get('/api/fetch-shared-database', async (req, res) => {
     const rawUrl = String(req.query.url || '').trim();
     const requestedFormat = String(req.query.format || '').toLowerCase() === 'csv' ? 'csv' : 'xlsx';
     const authHeader = req.headers.authorization || (req.query.token ? `Bearer ${req.query.token}` : '');
+    const scanAll = String(req.query.scanAll || '') === '1';
+    const metaOnly = String(req.query.metaOnly || '') === '1';
+
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+
+    if (scanAll) {
+      const p1Url = String(req.query.panel1Url || DEFAULT_PUBLIC_THREE_PANEL_LINKS.panel1Url);
+      const p2Url = String(req.query.panel2Url || DEFAULT_PUBLIC_THREE_PANEL_LINKS.panel2Url);
+      const p3Url = String(req.query.panel3Url || DEFAULT_PUBLIC_THREE_PANEL_LINKS.panel3Url);
+      const opUrl = String(req.query.opCondUrl || DEFAULT_PAGE26_OP_COND_FOLDER_URL);
+      const lcUrl = String(req.query.loadCurveUrl || DEFAULT_PAGE26_LOAD_CURVE_FOLDER_URL);
+
+      const [panel1, panel2, panel3, page26OpCond, page26LoadCurve] = await Promise.all([
+        scanSharedDriveFolderMetadata(p1Url, 'xlsx', authHeader),
+        scanSharedDriveFolderMetadata(p2Url, 'csv', authHeader),
+        scanSharedDriveFolderMetadata(p3Url, 'xlsx', authHeader),
+        scanSharedDriveFolderMetadata(opUrl, 'xlsx', authHeader),
+        scanSharedDriveFolderMetadata(lcUrl, 'xlsx', authHeader),
+      ]);
+
+      const folders = {
+        panel1: panel1
+          ? {
+              ...panel1,
+              latestDateInName: extractLatestDateFromFileName(panel1.fileName),
+            }
+          : null,
+        panel2: panel2
+          ? {
+              ...panel2,
+              latestDateInName: extractLatestDateFromFileName(panel2.fileName),
+            }
+          : null,
+        panel3: panel3
+          ? {
+              ...panel3,
+              latestDateInName: extractLatestDateFromFileName(panel3.fileName),
+            }
+          : null,
+        page26OpCond: page26OpCond
+          ? {
+              ...page26OpCond,
+              latestDateInName: extractLatestDateFromFileName(page26OpCond.fileName),
+            }
+          : null,
+        page26LoadCurve: page26LoadCurve
+          ? {
+              ...page26LoadCurve,
+              latestDateInName: extractLatestDateFromFileName(page26LoadCurve.fileName),
+            }
+          : null,
+      };
+
+      return res.json({
+        success: true,
+        scannedAt: new Date().toISOString(),
+        folders,
+        ...folders,
+      });
+    }
 
     // Always scan live folder/file metadata first so newly uploaded files or new versions are detected immediately
     const scannedMeta = await scanSharedDriveFolderMetadata(rawUrl, requestedFormat, authHeader);
     if (scannedMeta) {
+      if (metaOnly) {
+        return res.json({
+          success: true,
+          ...scannedMeta,
+          latestDateInName: extractLatestDateFromFileName(scannedMeta.fileName),
+        });
+      }
+
       const buffer = await downloadDriveFileWithCache(scannedMeta, authHeader);
       const contentType = scannedMeta.fileName.toLowerCase().endsWith('.csv')
         ? 'text/csv'
