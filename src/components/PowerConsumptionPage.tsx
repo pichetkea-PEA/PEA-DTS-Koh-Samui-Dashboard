@@ -55,6 +55,23 @@ import {
   DailyPowerDatabaseRecord,
   extractDailyPowerDatabaseRecord,
   formatDailyPowerDatabaseCsvRow,
+  OPERATING_CONDITION_CIRCUIT_SPECS,
+  OperatingConditionCircuitKey,
+  HourlyOperatingConditionRow,
+  DailyPowerOperatingConditionRecord,
+  formatHourPeriodLabel,
+  parseHourIndexFromLabel,
+  extractDailyPowerOperatingConditionRecord,
+  computeOperatingConditionSummaries,
+  buildPowerOperatingConditionWorkbook,
+  HOURLY_LOAD_CURVE_SHEET_NAME,
+  HourlyLoadCurveRow,
+  DailyHourlyLoadCurveRecord,
+  formatHalfHourPeriodLabel,
+  parseHalfHourIndexFromLabel,
+  extractDailyHourlyLoadCurveRecord,
+  computeHourlyLoadCurveSummaryStats,
+  buildHourlyLoadCurveWorkbook,
 } from '../services/powerConsumptionParser';
 import { DailyPeakLoadChart } from './DailyPeakLoadChart';
 import { PowerSubstationFoldersConfig } from './FolderSelector';
@@ -172,9 +189,47 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
     error?: string;
   } | null>(null);
 
-  // Option 1 vs Option 2 states
-  const [dbBuildMode, setDbBuildMode] = useState<'new' | 'update'>('new');
+  // Option 1 vs Option 2 vs Option 3 vs Option 4 states
+  const [dbBuildMode, setDbBuildMode] = useState<
+    'new' | 'update' | 'operating_condition' | 'hourly_load_curve'
+  >('new');
   const [updateEndDate, setUpdateEndDate] = useState<string>('');
+
+  // Option 3: Power Operating Condition Database states (Internal Option 1: new, Internal Option 2: update)
+  const [opCondInternalMode, setOpCondInternalMode] = useState<'new' | 'update'>('new');
+  const [opCondStartDate, setOpCondStartDate] = useState<string>('');
+  const [opCondEndDate, setOpCondEndDate] = useState<string>('');
+  const [opCondUpdateEndDate, setOpCondUpdateEndDate] = useState<string>('');
+  const [uploadedOpCondRecords, setUploadedOpCondRecords] = useState<Map<string, DailyPowerOperatingConditionRecord> | null>(null);
+  const [uploadedOpCondFileName, setUploadedOpCondFileName] = useState<string | null>(null);
+  const [uploadedOpCondStatus, setUploadedOpCondStatus] = useState<{
+    isUploading: boolean;
+    pct: number;
+    fileName: string;
+    message: string;
+    error?: string;
+  } | null>(null);
+  const [lastCompiledOpCondRecords, setLastCompiledOpCondRecords] = useState<Map<string, DailyPowerOperatingConditionRecord> | null>(null);
+
+  // Option 4: Hourly Load Curve Database states (Internal Option 1: new, Internal Option 2: update)
+  const [hourlyLoadInternalMode, setHourlyLoadInternalMode] = useState<'new' | 'update'>('new');
+  const [hourlyLoadStartDate, setHourlyLoadStartDate] = useState<string>('');
+  const [hourlyLoadEndDate, setHourlyLoadEndDate] = useState<string>('');
+  const [hourlyLoadUpdateEndDate, setHourlyLoadUpdateEndDate] = useState<string>('');
+  const [uploadedHourlyLoadRecords, setUploadedHourlyLoadRecords] = useState<
+    Map<string, DailyHourlyLoadCurveRecord> | null
+  >(null);
+  const [uploadedHourlyLoadFileName, setUploadedHourlyLoadFileName] = useState<string | null>(null);
+  const [uploadedHourlyLoadStatus, setUploadedHourlyLoadStatus] = useState<{
+    isUploading: boolean;
+    pct: number;
+    fileName: string;
+    message: string;
+    error?: string;
+  } | null>(null);
+  const [lastCompiledHourlyLoadRecords, setLastCompiledHourlyLoadRecords] = useState<
+    Map<string, DailyHourlyLoadCurveRecord> | null
+  >(null);
 
   const uploadedOldDbMaxDate = useMemo(() => {
     if (!uploadedOldDbRecords || uploadedOldDbRecords.size === 0) return '';
@@ -187,6 +242,30 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
     const dates = Array.from(uploadedOldDbRecords.keys()).sort();
     return dates[0] || '';
   }, [uploadedOldDbRecords]);
+
+  const uploadedOpCondMaxDate = useMemo(() => {
+    if (!uploadedOpCondRecords || uploadedOpCondRecords.size === 0) return '';
+    const dates = Array.from(uploadedOpCondRecords.keys()).sort();
+    return dates[dates.length - 1] || '';
+  }, [uploadedOpCondRecords]);
+
+  const uploadedOpCondFirstDate = useMemo(() => {
+    if (!uploadedOpCondRecords || uploadedOpCondRecords.size === 0) return '';
+    const dates = Array.from(uploadedOpCondRecords.keys()).sort();
+    return dates[0] || '';
+  }, [uploadedOpCondRecords]);
+
+  const uploadedHourlyLoadMaxDate = useMemo(() => {
+    if (!uploadedHourlyLoadRecords || uploadedHourlyLoadRecords.size === 0) return '';
+    const dates = Array.from(uploadedHourlyLoadRecords.keys()).sort();
+    return dates[dates.length - 1] || '';
+  }, [uploadedHourlyLoadRecords]);
+
+  const uploadedHourlyLoadFirstDate = useMemo(() => {
+    if (!uploadedHourlyLoadRecords || uploadedHourlyLoadRecords.size === 0) return '';
+    const dates = Array.from(uploadedHourlyLoadRecords.keys()).sort();
+    return dates[0] || '';
+  }, [uploadedHourlyLoadRecords]);
 
   const availableDatesList = useMemo(() => {
     const set = new Set<string>();
@@ -234,6 +313,54 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
     return Array.from(optionSet).sort();
   }, [availableDatesList, uploadedOldDbMaxDate]);
 
+  const opCondUpdateEndDateOptions = useMemo(() => {
+    const optionSet = new Set<string>();
+    if (!uploadedOpCondMaxDate) {
+      availableDatesList.forEach((d) => optionSet.add(d));
+      return Array.from(optionSet).sort();
+    }
+    availableDatesList.forEach((d) => {
+      if (d >= uploadedOpCondMaxDate) optionSet.add(d);
+    });
+    const folderMax = availableDatesList[availableDatesList.length - 1] || '';
+    const baseMs = new Date(`${uploadedOpCondMaxDate}T00:00:00Z`).getTime();
+    if (!isNaN(baseMs)) {
+      const targetMaxMs =
+        folderMax && folderMax > uploadedOpCondMaxDate
+          ? new Date(`${folderMax}T00:00:00Z`).getTime()
+          : baseMs + 30 * 86400000;
+      for (let curMs = baseMs; curMs <= targetMaxMs; curMs += 86400000) {
+        optionSet.add(new Date(curMs).toISOString().slice(0, 10));
+      }
+    }
+    optionSet.add(uploadedOpCondMaxDate);
+    return Array.from(optionSet).sort();
+  }, [availableDatesList, uploadedOpCondMaxDate]);
+
+  const hourlyLoadUpdateEndDateOptions = useMemo(() => {
+    const optionSet = new Set<string>();
+    if (!uploadedHourlyLoadMaxDate) {
+      availableDatesList.forEach((d) => optionSet.add(d));
+      return Array.from(optionSet).sort();
+    }
+    availableDatesList.forEach((d) => {
+      if (d >= uploadedHourlyLoadMaxDate) optionSet.add(d);
+    });
+    const folderMax = availableDatesList[availableDatesList.length - 1] || '';
+    const baseMs = new Date(`${uploadedHourlyLoadMaxDate}T00:00:00Z`).getTime();
+    if (!isNaN(baseMs)) {
+      const targetMaxMs =
+        folderMax && folderMax > uploadedHourlyLoadMaxDate
+          ? new Date(`${folderMax}T00:00:00Z`).getTime()
+          : baseMs + 30 * 86400000;
+      for (let curMs = baseMs; curMs <= targetMaxMs; curMs += 86400000) {
+        optionSet.add(new Date(curMs).toISOString().slice(0, 10));
+      }
+    }
+    optionSet.add(uploadedHourlyLoadMaxDate);
+    return Array.from(optionSet).sort();
+  }, [availableDatesList, uploadedHourlyLoadMaxDate]);
+
   // Keep updateEndDate synchronized whenever a file is uploaded or availableDatesList updates
   useEffect(() => {
     if (updateEndDateOptions.length > 0) {
@@ -249,9 +376,61 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
   }, [updateEndDateOptions, uploadedOldDbMaxDate, availableDatesList, updateEndDate]);
 
   useEffect(() => {
+    if (opCondUpdateEndDateOptions.length > 0) {
+      if (
+        !opCondUpdateEndDate ||
+        !opCondUpdateEndDateOptions.includes(opCondUpdateEndDate) ||
+        opCondUpdateEndDate < uploadedOpCondMaxDate
+      ) {
+        const folderLatest = availableDatesList[availableDatesList.length - 1];
+        if (
+          folderLatest &&
+          folderLatest >= uploadedOpCondMaxDate &&
+          opCondUpdateEndDateOptions.includes(folderLatest)
+        ) {
+          setOpCondUpdateEndDate(folderLatest);
+        } else {
+          setOpCondUpdateEndDate(opCondUpdateEndDateOptions[opCondUpdateEndDateOptions.length - 1]);
+        }
+      }
+    }
+  }, [opCondUpdateEndDateOptions, uploadedOpCondMaxDate, availableDatesList, opCondUpdateEndDate]);
+
+  useEffect(() => {
+    if (hourlyLoadUpdateEndDateOptions.length > 0) {
+      if (
+        !hourlyLoadUpdateEndDate ||
+        !hourlyLoadUpdateEndDateOptions.includes(hourlyLoadUpdateEndDate) ||
+        hourlyLoadUpdateEndDate < uploadedHourlyLoadMaxDate
+      ) {
+        const folderLatest = availableDatesList[availableDatesList.length - 1];
+        if (
+          folderLatest &&
+          folderLatest >= uploadedHourlyLoadMaxDate &&
+          hourlyLoadUpdateEndDateOptions.includes(folderLatest)
+        ) {
+          setHourlyLoadUpdateEndDate(folderLatest);
+        } else {
+          setHourlyLoadUpdateEndDate(
+            hourlyLoadUpdateEndDateOptions[hourlyLoadUpdateEndDateOptions.length - 1]
+          );
+        }
+      }
+    }
+  }, [hourlyLoadUpdateEndDateOptions, uploadedHourlyLoadMaxDate, availableDatesList, hourlyLoadUpdateEndDate]);
+
+  useEffect(() => {
     if (availableDatesList.length > 0 && (!dbExportStartDate || !dbExportEndDate)) {
       setDbExportStartDate(availableDatesList[0]);
       setDbExportEndDate(availableDatesList[availableDatesList.length - 1]);
+    }
+    if (availableDatesList.length > 0 && (!opCondStartDate || !opCondEndDate)) {
+      setOpCondStartDate(availableDatesList[0]);
+      setOpCondEndDate(availableDatesList[availableDatesList.length - 1]);
+    }
+    if (availableDatesList.length > 0 && (!hourlyLoadStartDate || !hourlyLoadEndDate)) {
+      setHourlyLoadStartDate(availableDatesList[0]);
+      setHourlyLoadEndDate(availableDatesList[availableDatesList.length - 1]);
     }
   }, [availableDatesList]);
 
@@ -947,6 +1126,805 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
       setIsExportingDb(false);
     }
   };
+
+  // ============================================================================
+  // OPTION 3 HANDLERS: POWER OPERATING CONDITION DATABASE (4 SHEETS FOR 4 CIRCUITS)
+  // ============================================================================
+
+  const handleGenerateOpCondDatabaseXlsx = async () => {
+    if (!opCondStartDate || !opCondEndDate) {
+      showNotification('error', 'Please select valid Start and End dates.');
+      return;
+    }
+    const [loDate, hiDate] =
+      opCondStartDate <= opCondEndDate
+        ? [opCondStartDate, opCondEndDate]
+        : [opCondEndDate, opCondStartDate];
+
+    setIsExportingDb(true);
+    setDbExportCurrentStep(0);
+    setDbExportTotalSteps(0);
+    setDbExportProgressMessage('Initializing Power Operating Condition Database (4 Circuits)...');
+
+    try {
+      const datesInRange = availableDatesList.filter((d) => d >= loDate && d <= hiDate);
+      if (datesInRange.length === 0) {
+        showNotification('error', 'No power records found in the selected date range.');
+        setIsExportingDb(false);
+        return;
+      }
+
+      setDbExportTotalSteps(datesInRange.length);
+      const recordsMap = new Map<string, DailyPowerOperatingConditionRecord>();
+
+      let idx = 0;
+      for (const d of datesInRange) {
+        idx++;
+        setDbExportCurrentStep(idx);
+        setDbExportProgressMessage(
+          `Summarizing 4-circuit operating conditions for ${d} (${idx} of ${datesInRange.length})...`
+        );
+
+        let summary = externalSummaries?.get(d) || allLoadedSummaries.get(d);
+        if (summary && isSyntheticPowerSummary(summary)) {
+          summary = undefined;
+        }
+        if (!summary && ensurePowerSummaryForDate) {
+          summary = (await ensurePowerSummaryForDate(d, true)) || undefined;
+        }
+
+        const opRecord = extractDailyPowerOperatingConditionRecord(d, summary);
+        recordsMap.set(d, opRecord);
+
+        await new Promise((r) => setTimeout(r, 5));
+      }
+
+      setLastCompiledOpCondRecords(recordsMap);
+      setDbExportProgressMessage('Building 4-Sheet Excel (.xlsx) Operating Condition Database...');
+      const wb = buildPowerOperatingConditionWorkbook(recordsMap);
+      XLSX.writeFile(
+        wb,
+        `Power_Operating_Condition_Database_${loDate}_to_${hiDate}.xlsx`
+      );
+
+      showNotification(
+        'success',
+        `Power Operating Condition Database (.xlsx) with 4 circuit sheets generated for ${datesInRange.length} days (${datesInRange.length * 24} hourly intervals/circuit) and downloaded!`
+      );
+    } catch (err: any) {
+      showNotification(
+        'error',
+        err?.message || 'Failed to generate Power Operating Condition Database (.xlsx)'
+      );
+    } finally {
+      setIsExportingDb(false);
+    }
+  };
+
+  const handleUploadExistingOpCondFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadedOpCondStatus({
+      isUploading: true,
+      pct: 20,
+      fileName: file.name,
+      message: `Uploading "${file.name}" (20%)...`,
+    });
+
+    try {
+      const buffer = await file.arrayBuffer();
+      setUploadedOpCondStatus({
+        isUploading: true,
+        pct: 60,
+        fileName: file.name,
+        message: `Parsing 4 circuit sheets from "${file.name}" (60%)...`,
+      });
+
+      const wb = XLSX.read(buffer, { type: 'array' });
+      if (!wb.SheetNames || wb.SheetNames.length === 0) {
+        throw new Error('The uploaded Excel file contains no worksheets.');
+      }
+
+      // Match each of the 4 circuits to its worksheet by name keywords or fallback index
+      const matchSheetNameForCircuit = (
+        specKey: OperatingConditionCircuitKey,
+        fallbackIndex: number
+      ): string | null => {
+        const names = wb.SheetNames;
+        if (specKey === 'ckt3') {
+          const m = names.find((n) => {
+            const ln = n.toLowerCase();
+            return ln.includes('ckt#3') || ln.includes('ckt 3') || ln.includes('ckt3') || ln.includes('kmb');
+          });
+          if (m) return m;
+        } else if (specKey === 'ckt2') {
+          const m = names.find((n) => {
+            const ln = n.toLowerCase();
+            return ln.includes('ckt#2') || ln.includes('ckt 2') || ln.includes('ckt2') || ln.includes('kma');
+          });
+          if (m) return m;
+        } else if (specKey === 'nkt33') {
+          const m = names.find((n) => {
+            const ln = n.toLowerCase();
+            return ln.includes('nkt') || ln.includes('07wb01');
+          });
+          if (m) return m;
+        } else if (specKey === 'oil33') {
+          const m = names.find((n) => {
+            const ln = n.toLowerCase();
+            return ln.includes('oil') || ln.includes('10wb01');
+          });
+          if (m) return m;
+        }
+        return names[fallbackIndex] || names[0] || null;
+      };
+
+      const parsedByDate = new Map<string, DailyPowerOperatingConditionRecord>();
+
+      const ensureDateEntry = (isoDate: string): DailyPowerOperatingConditionRecord => {
+        let existing = parsedByDate.get(isoDate);
+        if (!existing) {
+          const emptyByCircuit: Record<OperatingConditionCircuitKey, HourlyOperatingConditionRow[]> = {
+            ckt3: Array.from({ length: 24 }, (_, h) => ({
+              date: isoDate,
+              hourly: formatHourPeriodLabel(h),
+              hourIndex: h,
+              normalMin: 60,
+              emergencyMin: 0,
+              criticalMin: 0,
+              overloadMin: 0,
+            })),
+            ckt2: Array.from({ length: 24 }, (_, h) => ({
+              date: isoDate,
+              hourly: formatHourPeriodLabel(h),
+              hourIndex: h,
+              normalMin: 60,
+              emergencyMin: 0,
+              criticalMin: 0,
+              overloadMin: 0,
+            })),
+            nkt33: Array.from({ length: 24 }, (_, h) => ({
+              date: isoDate,
+              hourly: formatHourPeriodLabel(h),
+              hourIndex: h,
+              normalMin: 60,
+              emergencyMin: 0,
+              criticalMin: 0,
+              overloadMin: 0,
+            })),
+            oil33: Array.from({ length: 24 }, (_, h) => ({
+              date: isoDate,
+              hourly: formatHourPeriodLabel(h),
+              hourIndex: h,
+              normalMin: 60,
+              emergencyMin: 0,
+              criticalMin: 0,
+              overloadMin: 0,
+            })),
+          };
+          existing = { date: isoDate, byCircuit: emptyByCircuit };
+          parsedByDate.set(isoDate, existing);
+        }
+        return existing;
+      };
+
+      const parseNumVal = (rawVal: any): number => {
+        if (typeof rawVal === 'number') return isFinite(rawVal) ? rawVal : 0;
+        const cleaned = String(rawVal ?? '').replace(/,/g, '').replace(/%/g, '').trim();
+        const n = parseFloat(cleaned);
+        return isFinite(n) ? n : 0;
+      };
+
+      OPERATING_CONDITION_CIRCUIT_SPECS.forEach((spec, specIdx) => {
+        const sheetName = matchSheetNameForCircuit(spec.key, specIdx);
+        if (!sheetName) return;
+        const ws = wb.Sheets[sheetName];
+        if (!ws) return;
+
+        const rows = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, defval: '' });
+        if (rows.length < 2) return;
+
+        // Locate header row in first 5 rows
+        let headerRowIdx = 0;
+        for (let r = 0; r < Math.min(5, rows.length); r++) {
+          const lineStr = (rows[r] || []).map((c) => String(c || '').toLowerCase()).join(' ');
+          if (lineStr.includes('date') || lineStr.includes('normal') || lineStr.includes('hourly')) {
+            headerRowIdx = r;
+            break;
+          }
+        }
+
+        const headerCells = (rows[headerRowIdx] || []).map((c) =>
+          String(c || '').trim().toLowerCase()
+        );
+
+        let dateCol = headerCells.findIndex((h) => h.includes('date') || h.includes('day'));
+        let hourlyCol = headerCells.findIndex((h) => h.includes('hour') || h.includes('time'));
+        let normMinCol = headerCells.findIndex(
+          (h) => h.includes('normal') && !h.includes('%') && !h.includes('pct') && !h.includes('percent')
+        );
+        let emergMinCol = headerCells.findIndex(
+          (h) => h.includes('emerg') && !h.includes('%') && !h.includes('pct') && !h.includes('percent')
+        );
+        let critMinCol = headerCells.findIndex(
+          (h) => h.includes('crit') && !h.includes('%') && !h.includes('pct') && !h.includes('percent')
+        );
+        let overMinCol = headerCells.findIndex(
+          (h) => h.includes('overload') && !h.includes('%') && !h.includes('pct') && !h.includes('percent')
+        );
+
+        if (dateCol === -1) dateCol = 0;
+        if (hourlyCol === -1) hourlyCol = 1;
+        if (normMinCol === -1) normMinCol = 2;
+        if (emergMinCol === -1) emergMinCol = 3;
+        if (critMinCol === -1) critMinCol = 4;
+        if (overMinCol === -1) overMinCol = 5;
+
+        const hourCounterPerDate = new Map<string, number>();
+
+        for (let r = headerRowIdx + 1; r < rows.length; r++) {
+          const row = rows[r];
+          if (!row || row.length === 0) continue;
+
+          const isoDate = normalizeDateStringToIso(row[dateCol]);
+          if (!isoDate) continue;
+
+          const curCount = hourCounterPerDate.get(isoDate) || 0;
+          const hIdx = parseHourIndexFromLabel(row[hourlyCol], curCount % 24);
+          hourCounterPerDate.set(isoDate, curCount + 1);
+
+          const normalMin = Math.max(0, Math.round(parseNumVal(row[normMinCol])));
+          const emergencyMin = Math.max(0, Math.round(parseNumVal(row[emergMinCol])));
+          const criticalMin = Math.max(0, Math.round(parseNumVal(row[critMinCol])));
+          const overloadMin = Math.max(0, Math.round(parseNumVal(row[overMinCol])));
+
+          const dateEntry = ensureDateEntry(isoDate);
+          dateEntry.byCircuit[spec.key][hIdx] = {
+            date: isoDate,
+            hourly: formatHourPeriodLabel(hIdx),
+            hourIndex: hIdx,
+            normalMin,
+            emergencyMin,
+            criticalMin,
+            overloadMin,
+          };
+        }
+      });
+
+      if (parsedByDate.size === 0) {
+        setUploadedOpCondStatus({
+          isUploading: false,
+          pct: 0,
+          fileName: file.name,
+          message: `Could not find valid date & hourly operating condition records in "${file.name}".`,
+          error: `Could not find valid date & hourly operating condition records in "${file.name}".`,
+        });
+        showNotification(
+          'error',
+          `Could not recognize valid date & hourly records in "${file.name}".`
+        );
+        return;
+      }
+
+      const sortedDates = Array.from(parsedByDate.keys()).sort();
+      const firstDate = sortedDates[0];
+      const maxDate = sortedDates[sortedDates.length - 1];
+
+      setUploadedOpCondRecords(parsedByDate);
+      setUploadedOpCondFileName(file.name);
+      setLastCompiledOpCondRecords(parsedByDate);
+
+      const candidateDates = availableDatesList.filter((d) => d > maxDate);
+      if (candidateDates.length > 0) {
+        setOpCondUpdateEndDate(candidateDates[candidateDates.length - 1]);
+      } else if (
+        availableDatesList.length > 0 &&
+        availableDatesList[availableDatesList.length - 1] >= maxDate
+      ) {
+        setOpCondUpdateEndDate(availableDatesList[availableDatesList.length - 1]);
+      } else {
+        const nextMonthMs = new Date(`${maxDate}T00:00:00Z`).getTime() + 30 * 86400000;
+        setOpCondUpdateEndDate(
+          !isNaN(nextMonthMs) ? new Date(nextMonthMs).toISOString().slice(0, 10) : maxDate
+        );
+      }
+
+      setUploadedOpCondStatus({
+        isUploading: false,
+        pct: 100,
+        fileName: file.name,
+        message: `Upload Complete (100%): Loaded ${parsedByDate.size.toLocaleString()} days (${(
+          parsedByDate.size * 24
+        ).toLocaleString()} hourly rows/circuit • ${firstDate} → ${maxDate}). Ready to update!`,
+      });
+
+      showNotification(
+        'success',
+        `Successfully loaded Power Operating Condition Database "${file.name}" (${parsedByDate.size} days: ${firstDate} to ${maxDate}).`
+      );
+    } catch (err: any) {
+      setUploadedOpCondStatus({
+        isUploading: false,
+        pct: 0,
+        fileName: file.name,
+        message: 'Failed to parse Operating Condition Excel file: ' + (err?.message || err),
+        error: 'Failed to parse Operating Condition Excel file: ' + (err?.message || err),
+      });
+      showNotification(
+        'error',
+        'Failed to parse Operating Condition Excel file: ' + (err?.message || err)
+      );
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleUpdateExistingOpCondDatabase = async () => {
+    if (!uploadedOpCondRecords || uploadedOpCondRecords.size === 0) {
+      showNotification(
+        'error',
+        'Please upload your existing Power Operating Condition Database (.xlsx) file first.'
+      );
+      return;
+    }
+
+    const targetEnd =
+      opCondUpdateEndDate ||
+      opCondUpdateEndDateOptions[opCondUpdateEndDateOptions.length - 1] ||
+      uploadedOpCondMaxDate;
+    if (!targetEnd) {
+      showNotification('error', 'Please select a desired End Date for updating.');
+      return;
+    }
+
+    const dateSet = new Set<string>();
+    availableDatesList.forEach((d) => {
+      if (d > uploadedOpCondMaxDate && d <= targetEnd) {
+        dateSet.add(d);
+      }
+    });
+
+    if (dateSet.size === 0 && targetEnd > uploadedOpCondMaxDate) {
+      const startMs = new Date(`${uploadedOpCondMaxDate}T00:00:00Z`).getTime() + 86400000;
+      const endMs = new Date(`${targetEnd}T00:00:00Z`).getTime();
+      if (!isNaN(startMs) && !isNaN(endMs) && endMs >= startMs) {
+        for (let cur = startMs; cur <= endMs; cur += 86400000) {
+          dateSet.add(new Date(cur).toISOString().slice(0, 10));
+        }
+      }
+    }
+
+    const datesToFetch = Array.from(dateSet).sort();
+
+    setIsExportingDb(true);
+    setDbExportCurrentStep(0);
+    setDbExportTotalSteps(Math.max(1, datesToFetch.length));
+    setDbExportProgressMessage(
+      `Updating Operating Condition Database from ${uploadedOpCondMaxDate} to ${targetEnd}...`
+    );
+
+    try {
+      const mergedMap = new Map(uploadedOpCondRecords);
+
+      let idx = 0;
+      for (const d of datesToFetch) {
+        idx++;
+        setDbExportCurrentStep(idx);
+        setDbExportProgressMessage(
+          `Reading 4-circuit operating conditions for ${d} (${idx} of ${datesToFetch.length})...`
+        );
+
+        let summary = externalSummaries?.get(d) || allLoadedSummaries.get(d);
+        if (summary && isSyntheticPowerSummary(summary)) {
+          summary = undefined;
+        }
+        if (!summary && ensurePowerSummaryForDate) {
+          summary = (await ensurePowerSummaryForDate(d, true)) || undefined;
+        }
+
+        const newRecord = extractDailyPowerOperatingConditionRecord(d, summary);
+        mergedMap.set(d, newRecord);
+        await new Promise((r) => setTimeout(r, 5));
+      }
+
+      setLastCompiledOpCondRecords(mergedMap);
+      setUploadedOpCondRecords(mergedMap);
+
+      setDbExportProgressMessage(
+        'Recalculating percentages and generating updated 4-Sheet Excel (.xlsx) file...'
+      );
+      const allSortedDates = Array.from(mergedMap.keys()).sort();
+      const wb = buildPowerOperatingConditionWorkbook(mergedMap);
+      XLSX.writeFile(
+        wb,
+        `Power_Operating_Condition_Database_Updated_${uploadedOpCondMaxDate}_to_${targetEnd}.xlsx`
+      );
+
+      showNotification(
+        'success',
+        `Successfully updated Power Operating Condition Database! Added ${datesToFetch.length} new days (Total ${allSortedDates.length} days across 4 circuit sheets) and downloaded.`
+      );
+    } catch (err: any) {
+      showNotification(
+        'error',
+        err?.message || 'Failed to update Power Operating Condition Database'
+      );
+    } finally {
+      setIsExportingDb(false);
+    }
+  };
+
+  const opCondPreviewSummaries = useMemo(() => {
+    const sourceMap = lastCompiledOpCondRecords || uploadedOpCondRecords;
+    if (!sourceMap || sourceMap.size === 0) return null;
+    return computeOperatingConditionSummaries(sourceMap);
+  }, [lastCompiledOpCondRecords, uploadedOpCondRecords]);
+
+  // ============================================================================
+  // OPTION 4 HANDLERS: HOURLY LOAD CURVE DATABASE (1 SHEET FOR ALL 4 CIRCUITS)
+  // ============================================================================
+
+  const handleGenerateHourlyLoadCurveXlsx = async () => {
+    if (!hourlyLoadStartDate || !hourlyLoadEndDate) {
+      showNotification('error', 'Please select valid Start and End dates.');
+      return;
+    }
+    const [loDate, hiDate] =
+      hourlyLoadStartDate <= hourlyLoadEndDate
+        ? [hourlyLoadStartDate, hourlyLoadEndDate]
+        : [hourlyLoadEndDate, hourlyLoadStartDate];
+
+    setIsExportingDb(true);
+    setDbExportCurrentStep(0);
+    setDbExportTotalSteps(0);
+    setDbExportProgressMessage('Initializing Hourly Load Curve Database (All 4 Circuits)...');
+
+    try {
+      const datesInRange = availableDatesList.filter((d) => d >= loDate && d <= hiDate);
+      if (datesInRange.length === 0) {
+        showNotification('error', 'No power records found in the selected date range.');
+        setIsExportingDb(false);
+        return;
+      }
+
+      setDbExportTotalSteps(datesInRange.length);
+      const recordsMap = new Map<string, DailyHourlyLoadCurveRecord>();
+
+      let idx = 0;
+      for (const d of datesInRange) {
+        idx++;
+        setDbExportCurrentStep(idx);
+        setDbExportProgressMessage(
+          `Extracting 30-minute maximum power for all 4 circuits on ${d} (${idx} of ${datesInRange.length})...`
+        );
+
+        let summary = externalSummaries?.get(d) || allLoadedSummaries.get(d);
+        if (summary && isSyntheticPowerSummary(summary)) {
+          summary = undefined;
+        }
+        if (!summary && ensurePowerSummaryForDate) {
+          summary = (await ensurePowerSummaryForDate(d, true)) || undefined;
+        }
+
+        const hourlyRecord = extractDailyHourlyLoadCurveRecord(d, summary);
+        recordsMap.set(d, hourlyRecord);
+
+        await new Promise((r) => setTimeout(r, 5));
+      }
+
+      setLastCompiledHourlyLoadRecords(recordsMap);
+      setDbExportProgressMessage('Building 1-Sheet Excel (.xlsx) Hourly Load Curve Database (Every 30 Minutes)...');
+      const wb = buildHourlyLoadCurveWorkbook(recordsMap);
+      XLSX.writeFile(wb, `Hourly_Load_Curve_Database_${loDate}_to_${hiDate}.xlsx`);
+
+      showNotification(
+        'success',
+        `Hourly Load Curve Database (.xlsx) generated in 1 sheet for ${datesInRange.length} days (${
+          datesInRange.length * 48
+        } 30-min records across all 4 circuits) and downloaded!`
+      );
+    } catch (err: any) {
+      showNotification(
+        'error',
+        err?.message || 'Failed to generate Hourly Load Curve Database (.xlsx)'
+      );
+    } finally {
+      setIsExportingDb(false);
+    }
+  };
+
+  const handleUploadExistingHourlyLoadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadedHourlyLoadStatus({
+      isUploading: true,
+      pct: 20,
+      fileName: file.name,
+      message: `Uploading "${file.name}" (20%)...`,
+    });
+
+    try {
+      const buffer = await file.arrayBuffer();
+      setUploadedHourlyLoadStatus({
+        isUploading: true,
+        pct: 60,
+        fileName: file.name,
+        message: `Parsing 4-circuit 30-minute load curve records from "${file.name}" (60%)...`,
+      });
+
+      const wb = XLSX.read(buffer, { type: 'array' });
+      if (!wb.SheetNames || wb.SheetNames.length === 0) {
+        throw new Error('The uploaded file contains no worksheets.');
+      }
+
+      const parsedByDate = new Map<string, DailyHourlyLoadCurveRecord>();
+
+      const ensureDateEntry = (isoDate: string): DailyHourlyLoadCurveRecord => {
+        let existing = parsedByDate.get(isoDate);
+        if (!existing) {
+          existing = {
+            date: isoDate,
+            hours: Array.from({ length: 48 }, (_, s) => ({
+              date: isoDate,
+              hourly: formatHalfHourPeriodLabel(s),
+              hourIndex: s,
+              ckt3MaxMW: 0,
+              ckt2MaxMW: 0,
+              nkt33MaxMW: 0,
+              oil33MaxMW: 0,
+            })),
+          };
+          parsedByDate.set(isoDate, existing);
+        }
+        return existing;
+      };
+
+      const parseNumVal = (rawVal: any): number => {
+        if (typeof rawVal === 'number') return isFinite(rawVal) ? rawVal : 0;
+        const cleaned = String(rawVal ?? '').replace(/,/g, '').trim();
+        const n = parseFloat(cleaned);
+        return isFinite(n) ? n : 0;
+      };
+
+      const sheetName = wb.SheetNames[0];
+      const ws = wb.Sheets[sheetName];
+      const rows = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, defval: '' });
+
+      if (rows.length >= 2) {
+        let headerRowIdx = 0;
+        for (let r = 0; r < Math.min(5, rows.length); r++) {
+          const lineStr = (rows[r] || []).map((c) => String(c || '').toLowerCase()).join(' ');
+          if (lineStr.includes('date') || lineStr.includes('ckt') || lineStr.includes('hour')) {
+            headerRowIdx = r;
+            break;
+          }
+        }
+
+        const headerCells = (rows[headerRowIdx] || []).map((c) =>
+          String(c || '').trim().toLowerCase()
+        );
+
+        let dateCol = headerCells.findIndex((h) => h.includes('date') || h.includes('day'));
+        let hourlyCol = headerCells.findIndex((h) => h.includes('hour') || h.includes('time'));
+        let ckt3Col = headerCells.findIndex(
+          (h) => h.includes('ckt3') || h.includes('ckt#3') || h.includes('ckt 3') || h.includes('kmb')
+        );
+        let ckt2Col = headerCells.findIndex(
+          (h) => h.includes('ckt2') || h.includes('ckt#2') || h.includes('ckt 2') || h.includes('kma')
+        );
+        let nktCol = headerCells.findIndex((h) => h.includes('nkt') || h.includes('07wb01'));
+        let oilCol = headerCells.findIndex((h) => h.includes('oil') || h.includes('10wb01'));
+
+        if (dateCol === -1) dateCol = 0;
+        if (hourlyCol === -1) hourlyCol = 1;
+        if (ckt3Col === -1) ckt3Col = 2;
+        if (ckt2Col === -1) ckt2Col = 3;
+        if (nktCol === -1) nktCol = 4;
+        if (oilCol === -1) oilCol = 5;
+
+        const slotCounterPerDate = new Map<string, number>();
+
+        for (let r = headerRowIdx + 1; r < rows.length; r++) {
+          const row = rows[r];
+          if (!row || row.length === 0) continue;
+
+          const isoDate = normalizeDateStringToIso(row[dateCol]);
+          if (!isoDate) continue;
+
+          const curCount = slotCounterPerDate.get(isoDate) || 0;
+          const slotIdx = parseHalfHourIndexFromLabel(row[hourlyCol], curCount % 48);
+          slotCounterPerDate.set(isoDate, curCount + 1);
+
+          const ckt3MaxMW = Number(Math.max(0, parseNumVal(row[ckt3Col])).toFixed(2));
+          const ckt2MaxMW = Number(Math.max(0, parseNumVal(row[ckt2Col])).toFixed(2));
+          const nkt33MaxMW = Number(Math.max(0, parseNumVal(row[nktCol])).toFixed(2));
+          const oil33MaxMW = Number(Math.max(0, parseNumVal(row[oilCol])).toFixed(2));
+
+          const dateEntry = ensureDateEntry(isoDate);
+          dateEntry.hours[slotIdx] = {
+            date: isoDate,
+            hourly: formatHalfHourPeriodLabel(slotIdx),
+            hourIndex: slotIdx,
+            ckt3MaxMW,
+            ckt2MaxMW,
+            nkt33MaxMW,
+            oil33MaxMW,
+          };
+        }
+      }
+
+      if (parsedByDate.size === 0) {
+        setUploadedHourlyLoadStatus({
+          isUploading: false,
+          pct: 0,
+          fileName: file.name,
+          message: `Could not find valid date & load curve records in "${file.name}".`,
+          error: `Could not find valid date & load curve records in "${file.name}".`,
+        });
+        showNotification(
+          'error',
+          `Could not recognize valid date & load curve records in "${file.name}".`
+        );
+        return;
+      }
+
+      const sortedDates = Array.from(parsedByDate.keys()).sort();
+      const firstDate = sortedDates[0];
+      const maxDate = sortedDates[sortedDates.length - 1];
+
+      setUploadedHourlyLoadRecords(parsedByDate);
+      setUploadedHourlyLoadFileName(file.name);
+      setLastCompiledHourlyLoadRecords(parsedByDate);
+
+      const candidateDates = availableDatesList.filter((d) => d > maxDate);
+      if (candidateDates.length > 0) {
+        setHourlyLoadUpdateEndDate(candidateDates[candidateDates.length - 1]);
+      } else if (
+        availableDatesList.length > 0 &&
+        availableDatesList[availableDatesList.length - 1] >= maxDate
+      ) {
+        setHourlyLoadUpdateEndDate(availableDatesList[availableDatesList.length - 1]);
+      } else {
+        const nextMonthMs = new Date(`${maxDate}T00:00:00Z`).getTime() + 30 * 86400000;
+        setHourlyLoadUpdateEndDate(
+          !isNaN(nextMonthMs) ? new Date(nextMonthMs).toISOString().slice(0, 10) : maxDate
+        );
+      }
+
+      setUploadedHourlyLoadStatus({
+        isUploading: false,
+        pct: 100,
+        fileName: file.name,
+        message: `Upload Complete (100%): Loaded ${parsedByDate.size.toLocaleString()} days (${(
+          parsedByDate.size * 48
+        ).toLocaleString()} 30-min rows • ${firstDate} → ${maxDate}). Ready to update!`,
+      });
+
+      showNotification(
+        'success',
+        `Successfully loaded Hourly Load Curve Database "${file.name}" (${parsedByDate.size} days: ${firstDate} to ${maxDate}).`
+      );
+    } catch (err: any) {
+      setUploadedHourlyLoadStatus({
+        isUploading: false,
+        pct: 0,
+        fileName: file.name,
+        message: 'Failed to parse Hourly Load Curve file: ' + (err?.message || err),
+        error: 'Failed to parse Hourly Load Curve file: ' + (err?.message || err),
+      });
+      showNotification(
+        'error',
+        'Failed to parse Hourly Load Curve file: ' + (err?.message || err)
+      );
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleUpdateExistingHourlyLoadDatabase = async () => {
+    if (!uploadedHourlyLoadRecords || uploadedHourlyLoadRecords.size === 0) {
+      showNotification(
+        'error',
+        'Please upload your existing Hourly Load Curve Database (.xlsx) file first.'
+      );
+      return;
+    }
+
+    const targetEnd =
+      hourlyLoadUpdateEndDate ||
+      hourlyLoadUpdateEndDateOptions[hourlyLoadUpdateEndDateOptions.length - 1] ||
+      uploadedHourlyLoadMaxDate;
+    if (!targetEnd) {
+      showNotification('error', 'Please select a desired End Date for updating.');
+      return;
+    }
+
+    const dateSet = new Set<string>();
+    availableDatesList.forEach((d) => {
+      if (d > uploadedHourlyLoadMaxDate && d <= targetEnd) {
+        dateSet.add(d);
+      }
+    });
+
+    if (dateSet.size === 0 && targetEnd > uploadedHourlyLoadMaxDate) {
+      const startMs = new Date(`${uploadedHourlyLoadMaxDate}T00:00:00Z`).getTime() + 86400000;
+      const endMs = new Date(`${targetEnd}T00:00:00Z`).getTime();
+      if (!isNaN(startMs) && !isNaN(endMs) && endMs >= startMs) {
+        for (let cur = startMs; cur <= endMs; cur += 86400000) {
+          dateSet.add(new Date(cur).toISOString().slice(0, 10));
+        }
+      }
+    }
+
+    const datesToFetch = Array.from(dateSet).sort();
+
+    setIsExportingDb(true);
+    setDbExportCurrentStep(0);
+    setDbExportTotalSteps(Math.max(1, datesToFetch.length));
+    setDbExportProgressMessage(
+      `Updating Hourly Load Curve Database from ${uploadedHourlyLoadMaxDate} to ${targetEnd}...`
+    );
+
+    try {
+      const mergedMap = new Map(uploadedHourlyLoadRecords);
+
+      let idx = 0;
+      for (const d of datesToFetch) {
+        idx++;
+        setDbExportCurrentStep(idx);
+        setDbExportProgressMessage(
+          `Extracting 30-minute maximum power for all 4 circuits on ${d} (${idx} of ${datesToFetch.length})...`
+        );
+
+        let summary = externalSummaries?.get(d) || allLoadedSummaries.get(d);
+        if (summary && isSyntheticPowerSummary(summary)) {
+          summary = undefined;
+        }
+        if (!summary && ensurePowerSummaryForDate) {
+          summary = (await ensurePowerSummaryForDate(d, true)) || undefined;
+        }
+
+        const newRecord = extractDailyHourlyLoadCurveRecord(d, summary);
+        mergedMap.set(d, newRecord);
+        await new Promise((r) => setTimeout(r, 5));
+      }
+
+      setLastCompiledHourlyLoadRecords(mergedMap);
+      setUploadedHourlyLoadRecords(mergedMap);
+
+      setDbExportProgressMessage(
+        'Generating updated 1-Sheet Excel (.xlsx) Hourly Load Curve Database (Every 30 Minutes)...'
+      );
+      const allSortedDates = Array.from(mergedMap.keys()).sort();
+      const wb = buildHourlyLoadCurveWorkbook(mergedMap);
+      XLSX.writeFile(
+        wb,
+        `Hourly_Load_Curve_Database_Updated_${uploadedHourlyLoadMaxDate}_to_${targetEnd}.xlsx`
+      );
+
+      showNotification(
+        'success',
+        `Successfully updated Hourly Load Curve Database! Added ${datesToFetch.length} new days (Total ${allSortedDates.length} days • ${
+          allSortedDates.length * 48
+        } 30-min rows in 1 sheet) and downloaded.`
+      );
+    } catch (err: any) {
+      showNotification(
+        'error',
+        err?.message || 'Failed to update Hourly Load Curve Database'
+      );
+    } finally {
+      setIsExportingDb(false);
+    }
+  };
+
+  const hourlyLoadPreviewStats = useMemo(() => {
+    const sourceMap = lastCompiledHourlyLoadRecords || uploadedHourlyLoadRecords;
+    if (!sourceMap || sourceMap.size === 0) return null;
+    return computeHourlyLoadCurveSummaryStats(sourceMap);
+  }, [lastCompiledHourlyLoadRecords, uploadedHourlyLoadRecords]);
 
   // Save selected folder to localStorage automatically
   const handleUpdateTargetFolder = (folder: DriveFolder) => {
@@ -2222,12 +3200,12 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
           </div>
         </div>
 
-        {/* Option Selector Tabs */}
-        <div className="flex rounded-2xl bg-slate-100 p-1 border border-slate-200">
+        {/* Option Selector Tabs (Option 1, Option 2, Option 3, Option 4) */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-1.5 rounded-2xl bg-slate-100 p-1.5 border border-slate-200">
           <button
             type="button"
             onClick={() => setDbBuildMode('new')}
-            className={`flex-1 py-2 px-4 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+            className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer ${
               dbBuildMode === 'new'
                 ? 'bg-white text-blue-600 shadow-xs'
                 : 'text-slate-600 hover:text-slate-900'
@@ -2238,7 +3216,7 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
           <button
             type="button"
             onClick={() => setDbBuildMode('update')}
-            className={`flex-1 py-2 px-4 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+            className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer ${
               dbBuildMode === 'update'
                 ? 'bg-white text-blue-600 shadow-xs'
                 : 'text-slate-600 hover:text-slate-900'
@@ -2246,41 +3224,182 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
           >
             Option 2: Updating Existing CSV database
           </button>
+          <button
+            type="button"
+            onClick={() => setDbBuildMode('operating_condition')}
+            className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+              dbBuildMode === 'operating_condition'
+                ? 'bg-white text-indigo-600 shadow-xs ring-1 ring-indigo-500/20'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+            <span>Option 3: Power Operating Condition Database</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setDbBuildMode('hourly_load_curve')}
+            className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+              dbBuildMode === 'hourly_load_curve'
+                ? 'bg-white text-violet-600 shadow-xs ring-1 ring-violet-500/20'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <TrendingUp className="w-3.5 h-3.5 text-violet-600 shrink-0" />
+            <span>Option 4: Hourly Load Curve Database</span>
+          </button>
         </div>
 
-        {/* 16-Column (A to P) Schema Specification Banner */}
-        <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/80 text-[11px] text-slate-600 space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="font-bold text-slate-800">
-              16-Column Database Structure (Columns A to P) — 15-Min Interval Coincident Peak &amp; Worst-Case Individual Circuit Peaks:
-            </span>
-            <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-blue-100 text-blue-800 font-bold">
-              Col F = Col B + Col C + Col D + Col E (Simultaneous 15-Min Peak)
-            </span>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
-            <div className="bg-white rounded-xl p-2.5 border border-slate-200/70">
-              <div className="font-bold text-blue-700 mb-1">
-                Columns A–H: Actual Coincident 15-Min Daily Island Peak
-              </div>
-              <ul className="space-y-0.5 text-slate-600 font-mono text-[10px]">
-                <li>• <strong>Col A:</strong> Date (YYYY-MM-DD)</li>
-                <li>• <strong>Col B–E:</strong> Power value at time of daily peak for each circuit (Ckt3, Ckt2, 33kV NKT, 33kV Oil)</li>
-                <li>• <strong>Col F:</strong> Total Island Max MW (Summation of Col B to E at 15-min peak)</li>
-                <li>• <strong>Col G–H:</strong> Time of peak (Col G) &amp; File Source reference (Col H)</li>
-              </ul>
+        {/* Schema Specification Banner (Adapts to Option 1/2 vs Option 3 vs Option 4) */}
+        {dbBuildMode === 'new' || dbBuildMode === 'update' ? (
+          <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/80 text-[11px] text-slate-600 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-bold text-slate-800">
+                16-Column Database Structure (Columns A to P) — 15-Min Interval Coincident Peak &amp; Worst-Case Individual Circuit Peaks:
+              </span>
+              <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-blue-100 text-blue-800 font-bold">
+                Col F = Col B + Col C + Col D + Col E (Simultaneous 15-Min Peak)
+              </span>
             </div>
-            <div className="bg-white rounded-xl p-2.5 border border-slate-200/70">
-              <div className="font-bold text-amber-700 mb-1">
-                Columns I–P: Time-Independent Individual Circuit Daily Peaks (Worst-Case)
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
+              <div className="bg-white rounded-xl p-2.5 border border-slate-200/70">
+                <div className="font-bold text-blue-700 mb-1">
+                  Columns A–H: Actual Coincident 15-Min Daily Island Peak
+                </div>
+                <ul className="space-y-0.5 text-slate-600 font-mono text-[10px]">
+                  <li>• <strong>Col A:</strong> Date (YYYY-MM-DD)</li>
+                  <li>• <strong>Col B–E:</strong> Power value at time of daily peak for each circuit (Ckt3, Ckt2, 33kV NKT, 33kV Oil)</li>
+                  <li>• <strong>Col F:</strong> Total Island Max MW (Summation of Col B to E at 15-min peak)</li>
+                  <li>• <strong>Col G–H:</strong> Time of peak (Col G) &amp; File Source reference (Col H)</li>
+                </ul>
               </div>
-              <ul className="space-y-0.5 text-slate-600 font-mono text-[10px]">
-                <li>• <strong>Col I–L:</strong> Daily peak power value of each circuit (Ckt3, Ckt2, 33kV NKT, 33kV Oil)</li>
-                <li>• <strong>Col M–P:</strong> Time of peak for each individual circuit daily peak</li>
-              </ul>
+              <div className="bg-white rounded-xl p-2.5 border border-slate-200/70">
+                <div className="font-bold text-amber-700 mb-1">
+                  Columns I–P: Time-Independent Individual Circuit Daily Peaks (Worst-Case)
+                </div>
+                <ul className="space-y-0.5 text-slate-600 font-mono text-[10px]">
+                  <li>• <strong>Col I–L:</strong> Daily peak power value of each circuit (Ckt3, Ckt2, 33kV NKT, 33kV Oil)</li>
+                  <li>• <strong>Col M–P:</strong> Time of peak for each individual circuit daily peak</li>
+                </ul>
+              </div>
             </div>
           </div>
-        </div>
+        ) : dbBuildMode === 'operating_condition' ? (
+          <div className="bg-indigo-50/50 rounded-2xl p-4 border border-indigo-200/80 text-[11px] text-slate-700 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold text-indigo-950 text-xs">
+                  Option 3: Power Operating Condition Database (.xlsx) — 4 Circuit Worksheets &amp; Hourly Operation Minutes:
+                </span>
+              </div>
+              <span className="font-mono text-[10px] px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-800 border border-indigo-200 font-bold">
+                Source: Target Folder 2 · 4-Circuit Power Consumption (KMB, KMA, KNA)
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              {/* Left Card: 4 Sheets & Operating Condition MW Thresholds */}
+              <div className="bg-white rounded-xl p-3 border border-indigo-100 shadow-2xs space-y-2">
+                <div className="font-bold text-indigo-800 flex items-center justify-between">
+                  <span>1. 4 Worksheets of 4 Circuits &amp; MW Condition Ranges</span>
+                  <span className="text-[10px] font-mono text-slate-500">4 Sheets (.xlsx)</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[10px] font-mono border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500 text-left">
+                        <th className="py-1 pr-2">Worksheet (Circuit)</th>
+                        <th className="py-1 px-1.5 text-blue-700">Normal</th>
+                        <th className="py-1 px-1.5 text-amber-700">Emergency</th>
+                        <th className="py-1 px-1.5 text-red-600">Critical</th>
+                        <th className="py-1 pl-1.5 text-rose-900">Overload</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-slate-700">
+                      {OPERATING_CONDITION_CIRCUIT_SPECS.map((spec) => (
+                        <tr key={spec.key}>
+                          <td className="py-1 pr-2 font-bold text-slate-900">{spec.sheetName}</td>
+                          <td className="py-1 px-1.5 text-blue-700">{spec.criteriaLabels.normal}</td>
+                          <td className="py-1 px-1.5 text-amber-700">{spec.criteriaLabels.emergency}</td>
+                          <td className="py-1 px-1.5 text-red-600">{spec.criteriaLabels.critical}</td>
+                          <td className="py-1 pl-1.5 text-rose-900 font-bold">{spec.criteriaLabels.overload}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Right Card: Excel Columns & Percentage Summarization */}
+              <div className="bg-white rounded-xl p-3 border border-indigo-100 shadow-2xs space-y-1.5">
+                <div className="font-bold text-indigo-800">
+                  2. Excel Database Multi-Column Structure (Inside Each of the 4 Sheets)
+                </div>
+                <ul className="space-y-1 text-slate-600 font-mono text-[10px]">
+                  <li>
+                    • <strong>Col A (Date) &amp; Col B (Hourly):</strong> Date (<code className="text-indigo-700">YYYY-MM-DD</code>) and 24 hourly intervals (<code className="text-indigo-700">00:00-01:00</code> to <code className="text-indigo-700">23:00-24:00</code>)
+                  </li>
+                  <li>
+                    • <strong>Col C–F (Minutes of Operation Condition — 4 Columns):</strong> Operation minutes per hour (0–60 min) in <span className="text-blue-700 font-bold">Normal</span>, <span className="text-amber-700 font-bold">Emergency</span>, <span className="text-red-600 font-bold">Critical</span>, and <span className="text-rose-900 font-bold">Overload</span> condition
+                  </li>
+                  <li>
+                    • <strong>Col G–J (Percentage Summarize of Each Condition):</strong> Percentage of all operation time from the record (<code className="text-indigo-700">Condition Total Min ÷ All Operation Time Min × 100%</code>)
+                  </li>
+                  <li>
+                    • <strong>Col L–P (Executive Summary Table):</strong> Full-record summary table of Total Operation Minutes, Hours, and Percentage of All Operation Time
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-violet-50/50 rounded-2xl p-4 border border-violet-200/80 text-[11px] text-slate-700 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold text-violet-950 text-xs">
+                  Option 4: Hourly Load Curve Database (.xlsx) — 1 Sheet Containing All 4-Circuit 30-Minute Maximum Power Records:
+                </span>
+              </div>
+              <span className="font-mono text-[10px] px-2.5 py-0.5 rounded-full bg-violet-100 text-violet-800 border border-violet-200 font-bold">
+                Source: Target Folder 2 · 4-Circuit Power Consumption (KMB, KMA, KNA)
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <div className="bg-white rounded-xl p-3 border border-violet-100 shadow-2xs space-y-1.5">
+                <div className="font-bold text-violet-800 flex items-center justify-between">
+                  <span>1. Single Worksheet Architecture (All 4 Circuits Combined)</span>
+                  <span className="text-[10px] font-mono text-slate-500">1 Sheet (.xlsx)</span>
+                </div>
+                <ul className="space-y-1 text-slate-600 font-mono text-[10px]">
+                  <li>
+                    • <strong>Worksheet Name:</strong> <code className="text-violet-700 font-bold">{HOURLY_LOAD_CURVE_SHEET_NAME}</code>
+                  </li>
+                  <li>
+                    • <strong>Daily Resolution (Every 30 Minutes):</strong> 48 rows per day (<code className="text-violet-700">00:00-00:30</code>, <code className="text-violet-700">00:30-01:00</code> through <code className="text-violet-700">23:30-24:00</code>)
+                  </li>
+                  <li>
+                    • <strong>30-Minute Peak Extraction:</strong> Evaluates 15-minute SCADA intervals within each 30-minute window from Target Folder 2 and records the maximum MW for each of the 4 circuits.
+                  </li>
+                </ul>
+              </div>
+
+              <div className="bg-white rounded-xl p-3 border border-violet-100 shadow-2xs space-y-1.5">
+                <div className="font-bold text-violet-800">
+                  2. 6-Column Excel Database Structure (Columns A to F)
+                </div>
+                <ul className="space-y-1 text-slate-600 font-mono text-[10px]">
+                  <li>• <strong>Col A (Date):</strong> Record Date (<code className="text-violet-700">YYYY-MM-DD</code>)</li>
+                  <li>• <strong>Col B (Hourly):</strong> 30-Minute Period (<code className="text-violet-700">00:00-00:30</code> to <code className="text-violet-700">23:30-24:00</code>)</li>
+                  <li>• <strong>Col C (115kV_Ckt3_Max_MW):</strong> 30-min max power of 115kV Ckt#3 (KMB · 03YB01)</li>
+                  <li>• <strong>Col D (115kV_Ckt2_Max_MW):</strong> 30-min max power of 115kV Ckt#2 (KMA · 04YB01)</li>
+                  <li>• <strong>Col E (33kV_NKT_Max_MW):</strong> 30-min max power of 33kV NKT (KNA · 07WB01)</li>
+                  <li>• <strong>Col F (33kV_Oil_Max_MW):</strong> 30-min max power of 33kV Oil (KNA · 10WB01)</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
 
         {dbBuildMode === 'new' ? (
           /* Option 1: Building a new database */
@@ -2340,7 +3459,7 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
               </span>
             </div>
           </div>
-        ) : (
+        ) : dbBuildMode === 'update' ? (
           /* Option 2: Updating Existing CSV database */
           <div className="space-y-4 pt-2">
             <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 space-y-3">
@@ -2473,6 +3592,692 @@ export const PowerConsumptionPage: React.FC<PowerConsumptionPageProps> = ({
                   : 'Awaiting uploaded CSV file'}
               </span>
             </div>
+          </div>
+        ) : dbBuildMode === 'operating_condition' ? (
+          /* Option 3: Power Operating Condition Database (with 2 internal options: Create New & Update Existing) */
+          <div className="space-y-4 pt-2">
+            {/* Internal Option Selector inside Option 3 */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-indigo-950/5 p-2 rounded-2xl border border-indigo-200/80">
+              <div className="flex items-center gap-2 px-2">
+                <Gauge className="w-4 h-4 text-indigo-600 shrink-0" />
+                <span className="text-xs font-extrabold text-indigo-950">
+                  Option 3 Internal Mode:
+                </span>
+              </div>
+              <div className="flex flex-1 max-w-xl rounded-xl bg-white p-1 border border-indigo-200 shadow-2xs">
+                <button
+                  type="button"
+                  onClick={() => setOpCondInternalMode('new')}
+                  className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    opCondInternalMode === 'new'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-indigo-700'
+                  }`}
+                >
+                  3.1 Create New Database (.xlsx)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOpCondInternalMode('update')}
+                  className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    opCondInternalMode === 'update'
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-emerald-700'
+                  }`}
+                >
+                  3.2 Updating Existing Database (Upload File)
+                </button>
+              </div>
+            </div>
+
+            {opCondInternalMode === 'new' ? (
+              /* Internal Option 3.1: Create New Power Operating Condition Database (.xlsx) */
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Start Date (Target Folder 2)
+                    </label>
+                    <select
+                      value={opCondStartDate}
+                      onChange={(e) => setOpCondStartDate(e.target.value)}
+                      className="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      {availableDatesList.map((d) => (
+                        <option key={`opcond-start-${d}`} value={d}>
+                          {d}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      End Date (Target Folder 2)
+                    </label>
+                    <select
+                      value={opCondEndDate}
+                      onChange={(e) => setOpCondEndDate(e.target.value)}
+                      className="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      {availableDatesList.map((d) => (
+                        <option key={`opcond-end-${d}`} value={d}>
+                          {d}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <button
+                      type="button"
+                      onClick={handleGenerateOpCondDatabaseXlsx}
+                      disabled={isExportingDb || availableDatesList.length === 0}
+                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-indigo-600 via-blue-600 to-indigo-700 hover:from-indigo-700 hover:via-blue-700 hover:to-indigo-800 active:scale-[0.99] disabled:opacity-50 rounded-xl shadow-sm shadow-indigo-600/25 transition-all cursor-pointer"
+                    >
+                      <Download className="w-4 h-4 text-indigo-200" />
+                      <span>
+                        {isExportingDb
+                          ? 'Compiling 4-Sheet Database...'
+                          : 'Create & Download Operating Condition DB (.xlsx)'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200/80 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    💡 <strong>Internal Option 3.1 Workflow:</strong> Reads 15-minute SCADA power records from Target Folder 2 (KMB, KMA, KNA), calculates hourly operation minutes across all 4 conditions (Normal, Emergency, Critical, Overload) and overall record percentages, and exports a 4-sheet Excel (<code>.xlsx</code>) database.
+                  </span>
+                  <span className="font-mono text-indigo-700 font-bold">
+                    Range: {opCondStartDate || '---'} to {opCondEndDate || '---'}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              /* Internal Option 3.2: Updating Existing Power Operating Condition Database (.xlsx) */
+              <div className="space-y-4">
+                <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                        <span>Upload Existing Power Operating Condition Database (.xlsx)</span>
+                      </h4>
+                      <p className="text-[11px] text-slate-500">
+                        Upload your existing 4-sheet Excel Operating Condition Database file. The system will read all 4 circuit sheets, detect the final recorded date, append new dates from Target Folder 2, and recalculate the overall condition percentages.
+                      </p>
+                    </div>
+                    {uploadedOpCondFileName && (
+                      <span className="text-xs font-mono px-2.5 py-1 rounded-xl bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>
+                          Loaded: {uploadedOpCondFileName} ({uploadedOpCondRecords?.size || 0} days • {uploadedOpCondFirstDate} → {uploadedOpCondMaxDate})
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUploadedOpCondRecords(null);
+                            setUploadedOpCondFileName(null);
+                            setUploadedOpCondStatus(null);
+                            showNotification('success', 'Cleared uploaded Operating Condition database.');
+                          }}
+                          className="text-emerald-900 hover:text-red-600 font-bold ml-1 cursor-pointer"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-xl shadow-2xs cursor-pointer transition-colors">
+                      <Upload className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>
+                        {uploadedOpCondFileName
+                          ? 'Replace Operating Condition Excel File...'
+                          : 'Choose Existing Operating Condition DB (.xlsx)...'}
+                      </span>
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={handleUploadExistingOpCondFile}
+                        className="hidden"
+                      />
+                    </label>
+                    <span className="text-[11px] text-slate-600 font-mono font-semibold">
+                      {uploadedOpCondMaxDate
+                        ? `✓ Final date in uploaded file: ${uploadedOpCondMaxDate} (${uploadedOpCondRecords?.size || 0} days • ${(uploadedOpCondRecords?.size || 0) * 24} hourly rows/sheet)`
+                        : 'Please upload existing 4-sheet Operating Condition (.xlsx) file first'}
+                    </span>
+                  </div>
+
+                  {uploadedOpCondStatus && (
+                    <div
+                      className={`p-3 rounded-xl border text-xs font-mono space-y-1.5 ${
+                        uploadedOpCondStatus.error
+                          ? 'bg-rose-50 border-rose-200 text-rose-800'
+                          : 'bg-emerald-50/80 border-emerald-200 text-emerald-900'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 font-bold">
+                        <span>{uploadedOpCondStatus.message}</span>
+                        <span>{uploadedOpCondStatus.pct}%</span>
+                      </div>
+                      <div className="w-full h-2 bg-white rounded-full overflow-hidden border border-emerald-200">
+                        <div
+                          className={`h-full transition-all duration-200 ${
+                            uploadedOpCondStatus.error ? 'bg-rose-500' : 'bg-emerald-500'
+                          }`}
+                          style={{ width: `${uploadedOpCondStatus.pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Desired End Date (from Target Folder 2)
+                    </label>
+                    <select
+                      value={opCondUpdateEndDate || uploadedOpCondMaxDate}
+                      onChange={(e) => setOpCondUpdateEndDate(e.target.value)}
+                      disabled={!uploadedOpCondRecords || opCondUpdateEndDateOptions.length === 0}
+                      className="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
+                    >
+                      {opCondUpdateEndDateOptions.length > 0 ? (
+                        opCondUpdateEndDateOptions.map((d) => (
+                          <option key={`opcond-update-end-${d}`} value={d}>
+                            {d}{' '}
+                            {d === availableDatesList[availableDatesList.length - 1]
+                              ? '(Latest in Folder 2)'
+                              : d === uploadedOpCondMaxDate
+                              ? '(Uploaded File Final Date)'
+                              : ''}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">
+                          {!uploadedOpCondRecords
+                            ? 'Please upload existing .xlsx file first'
+                            : 'Select Update End Date'}
+                        </option>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <button
+                      type="button"
+                      onClick={handleUpdateExistingOpCondDatabase}
+                      disabled={isExportingDb || !uploadedOpCondRecords}
+                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-700 hover:via-teal-700 hover:to-emerald-800 active:scale-[0.99] disabled:opacity-50 rounded-xl shadow-sm shadow-emerald-600/25 transition-all cursor-pointer"
+                    >
+                      <Download className="w-4 h-4 text-emerald-200" />
+                      <span>
+                        {isExportingDb
+                          ? 'Updating 4-Sheet Database...'
+                          : 'Update & Download Operating Condition DB (.xlsx)'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200/80 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    💡 <strong>Internal Option 3.2 Workflow:</strong> Reads new dates from Target Folder 2 after your uploaded file&apos;s final date, appends the 24 hourly rows per day to all 4 circuit sheets, recalculates the overall condition percentages across the entire combined record, and downloads the updated <code>.xlsx</code> workbook.
+                  </span>
+                  <span className="font-mono text-emerald-700 font-bold">
+                    {uploadedOpCondRecords && uploadedOpCondMaxDate
+                      ? `Ready: Updating from ${uploadedOpCondMaxDate} → ${opCondUpdateEndDate || uploadedOpCondMaxDate} (${uploadedOpCondRecords.size} existing days)`
+                      : 'Awaiting uploaded .xlsx file'}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Progress Bar during compilation / update */}
+            {isExportingDb && (
+              <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-3.5 text-xs font-mono text-indigo-950 space-y-1.5">
+                <div className="flex items-center justify-between font-bold">
+                  <span>{dbExportProgressMessage}</span>
+                  {dbExportTotalSteps > 0 && (
+                    <span>
+                      {dbExportCurrentStep} / {dbExportTotalSteps} (
+                      {Math.round((dbExportCurrentStep / Math.max(1, dbExportTotalSteps)) * 100)}%)
+                    </span>
+                  )}
+                </div>
+                {dbExportTotalSteps > 0 && (
+                  <div className="w-full h-2 bg-white rounded-full overflow-hidden border border-indigo-200">
+                    <div
+                      className="h-full bg-indigo-600 transition-all duration-150"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          Math.round((dbExportCurrentStep / Math.max(1, dbExportTotalSteps)) * 100)
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Live 4-Circuit Operating Condition Summary Preview (When compiled or uploaded) */}
+            {opCondPreviewSummaries && (
+              <div className="bg-white rounded-2xl border border-indigo-200/90 p-4 shadow-2xs space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    <span className="text-xs font-extrabold text-slate-900">
+                      4-Circuit Operating Condition Summary (Minutes &amp; Percentage of All Operation Time)
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-lg border border-indigo-200 font-bold">
+                    {opCondPreviewSummaries.ckt3.totalDays.toLocaleString()} Days •{' '}
+                    {opCondPreviewSummaries.ckt3.totalHours.toLocaleString()} Hours •{' '}
+                    {opCondPreviewSummaries.ckt3.totalOperationMin.toLocaleString()} Total Min / Circuit
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs font-mono border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase text-slate-600 font-bold">
+                        <th className="py-2 px-3">Worksheet / Circuit</th>
+                        <th className="py-2 px-3 text-blue-700">Normal (Min / %)</th>
+                        <th className="py-2 px-3 text-amber-700">Emergency (Min / %)</th>
+                        <th className="py-2 px-3 text-red-600">Critical (Min / %)</th>
+                        <th className="py-2 px-3 text-rose-900">Overload (Min / %)</th>
+                        <th className="py-2 px-3 text-slate-800">Total Operation Time</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {OPERATING_CONDITION_CIRCUIT_SPECS.map((spec) => {
+                        const st = opCondPreviewSummaries[spec.key];
+                        return (
+                          <tr key={spec.key} className="hover:bg-slate-50/80">
+                            <td className="py-2 px-3 font-bold text-slate-900">{spec.sheetName}</td>
+                            <td className="py-2 px-3 text-blue-700">
+                              <span className="font-bold">{st.normalMin.toLocaleString()} min</span>{' '}
+                              <span className="text-[10px] bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 font-extrabold">
+                                {st.normalPct.toFixed(2)}%
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-amber-700">
+                              <span className="font-bold">{st.emergencyMin.toLocaleString()} min</span>{' '}
+                              <span className="text-[10px] bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 font-extrabold">
+                                {st.emergencyPct.toFixed(2)}%
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-red-600">
+                              <span className="font-bold">{st.criticalMin.toLocaleString()} min</span>{' '}
+                              <span className="text-[10px] bg-red-50 px-1.5 py-0.5 rounded border border-red-200 font-extrabold">
+                                {st.criticalPct.toFixed(2)}%
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-rose-900">
+                              <span className="font-bold">{st.overloadMin.toLocaleString()} min</span>{' '}
+                              <span className="text-[10px] bg-rose-50 px-1.5 py-0.5 rounded border border-rose-200 font-extrabold">
+                                {st.overloadPct.toFixed(2)}%
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-slate-700 font-bold">
+                              {st.totalOperationMin.toLocaleString()} min ({st.totalHours.toLocaleString()} hrs)
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* Option 4: Hourly Load Curve Database (1 Sheet for All 4 Circuits, with 2 internal options: Create New & Update Existing) */
+          <div className="space-y-4 pt-2">
+            {/* Internal Option Selector inside Option 4 */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-violet-950/5 p-2 rounded-2xl border border-violet-200/80">
+              <div className="flex items-center gap-2 px-2">
+                <TrendingUp className="w-4 h-4 text-violet-600 shrink-0" />
+                <span className="text-xs font-extrabold text-violet-950">
+                  Option 4 Internal Mode:
+                </span>
+              </div>
+              <div className="flex flex-1 max-w-xl rounded-xl bg-white p-1 border border-violet-200 shadow-2xs">
+                <button
+                  type="button"
+                  onClick={() => setHourlyLoadInternalMode('new')}
+                  className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    hourlyLoadInternalMode === 'new'
+                      ? 'bg-violet-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-violet-700'
+                  }`}
+                >
+                  4.1 Create New Database (.xlsx)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHourlyLoadInternalMode('update')}
+                  className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    hourlyLoadInternalMode === 'update'
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-emerald-700'
+                  }`}
+                >
+                  4.2 Updating Existing Database (Upload File)
+                </button>
+              </div>
+            </div>
+
+            {hourlyLoadInternalMode === 'new' ? (
+              /* Internal Option 4.1: Create New Hourly Load Curve Database (.xlsx) */
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Start Date (Target Folder 2)
+                    </label>
+                    <select
+                      value={hourlyLoadStartDate}
+                      onChange={(e) => setHourlyLoadStartDate(e.target.value)}
+                      className="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                    >
+                      {availableDatesList.map((d) => (
+                        <option key={`hourlyload-start-${d}`} value={d}>
+                          {d}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      End Date (Target Folder 2)
+                    </label>
+                    <select
+                      value={hourlyLoadEndDate}
+                      onChange={(e) => setHourlyLoadEndDate(e.target.value)}
+                      className="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                    >
+                      {availableDatesList.map((d) => (
+                        <option key={`hourlyload-end-${d}`} value={d}>
+                          {d}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <button
+                      type="button"
+                      onClick={handleGenerateHourlyLoadCurveXlsx}
+                      disabled={isExportingDb || availableDatesList.length === 0}
+                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-700 hover:from-violet-700 hover:via-purple-700 hover:to-indigo-800 active:scale-[0.99] disabled:opacity-50 rounded-xl shadow-sm shadow-violet-600/25 transition-all cursor-pointer"
+                    >
+                      <Download className="w-4 h-4 text-violet-200" />
+                      <span>
+                        {isExportingDb
+                          ? 'Compiling Hourly Load Curve DB...'
+                          : 'Create & Download Hourly Load Curve DB (.xlsx)'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200/80 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    💡 <strong>Internal Option 4.1 Workflow:</strong> Reads 15-minute SCADA power records from Target Folder 2 (KMB, KMA, KNA), extracts the maximum power (MW) for each of the 4 circuits every 30 minutes (48 rows per day), and exports a single-sheet Excel (<code>.xlsx</code>) database.
+                  </span>
+                  <span className="font-mono text-violet-700 font-bold">
+                    Range: {hourlyLoadStartDate || '---'} to {hourlyLoadEndDate || '---'}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              /* Internal Option 4.2: Updating Existing Hourly Load Curve Database (.xlsx) */
+              <div className="space-y-4">
+                <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                        <span>Upload Existing Hourly Load Curve Database (.xlsx / .csv)</span>
+                      </h4>
+                      <p className="text-[11px] text-slate-500">
+                        Upload your existing Hourly Load Curve Database file. The system will read the recorded dates and 48 every-30-minute rows per day, detect the final recorded date, and append new dates from Target Folder 2.
+                      </p>
+                    </div>
+                    {uploadedHourlyLoadFileName && (
+                      <span className="text-xs font-mono px-2.5 py-1 rounded-xl bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>
+                          Loaded: {uploadedHourlyLoadFileName} ({uploadedHourlyLoadRecords?.size || 0} days • {uploadedHourlyLoadFirstDate} → {uploadedHourlyLoadMaxDate})
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUploadedHourlyLoadRecords(null);
+                            setUploadedHourlyLoadFileName(null);
+                            setUploadedHourlyLoadStatus(null);
+                            showNotification('success', 'Cleared uploaded Hourly Load Curve database.');
+                          }}
+                          className="text-emerald-900 hover:text-red-600 font-bold ml-1 cursor-pointer"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-xl shadow-2xs cursor-pointer transition-colors">
+                      <Upload className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>
+                        {uploadedHourlyLoadFileName
+                          ? 'Replace Hourly Load Curve File...'
+                          : 'Choose Existing Hourly Load Curve DB (.xlsx)...'}
+                      </span>
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls,.csv"
+                        onChange={handleUploadExistingHourlyLoadFile}
+                        className="hidden"
+                      />
+                    </label>
+                    <span className="text-[11px] text-slate-600 font-mono font-semibold">
+                      {uploadedHourlyLoadMaxDate
+                        ? `✓ Final date in uploaded file: ${uploadedHourlyLoadMaxDate} (${uploadedHourlyLoadRecords?.size || 0} days • ${(uploadedHourlyLoadRecords?.size || 0) * 48} 30-min rows)`
+                        : 'Please upload existing Hourly Load Curve (.xlsx) file first'}
+                    </span>
+                  </div>
+
+                  {uploadedHourlyLoadStatus && (
+                    <div
+                      className={`p-3 rounded-xl border text-xs font-mono space-y-1.5 ${
+                        uploadedHourlyLoadStatus.error
+                          ? 'bg-rose-50 border-rose-200 text-rose-800'
+                          : 'bg-emerald-50/80 border-emerald-200 text-emerald-900'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 font-bold">
+                        <span>{uploadedHourlyLoadStatus.message}</span>
+                        <span>{uploadedHourlyLoadStatus.pct}%</span>
+                      </div>
+                      <div className="w-full h-2 bg-white rounded-full overflow-hidden border border-emerald-200">
+                        <div
+                          className={`h-full transition-all duration-200 ${
+                            uploadedHourlyLoadStatus.error ? 'bg-rose-500' : 'bg-emerald-500'
+                          }`}
+                          style={{ width: `${uploadedHourlyLoadStatus.pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Desired End Date (from Target Folder 2)
+                    </label>
+                    <select
+                      value={hourlyLoadUpdateEndDate || uploadedHourlyLoadMaxDate}
+                      onChange={(e) => setHourlyLoadUpdateEndDate(e.target.value)}
+                      disabled={!uploadedHourlyLoadRecords || hourlyLoadUpdateEndDateOptions.length === 0}
+                      className="w-full text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
+                    >
+                      {hourlyLoadUpdateEndDateOptions.length > 0 ? (
+                        hourlyLoadUpdateEndDateOptions.map((d) => (
+                          <option key={`hourlyload-update-end-${d}`} value={d}>
+                            {d}{' '}
+                            {d === availableDatesList[availableDatesList.length - 1]
+                              ? '(Latest in Folder 2)'
+                              : d === uploadedHourlyLoadMaxDate
+                              ? '(Uploaded File Final Date)'
+                              : ''}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">
+                          {!uploadedHourlyLoadRecords
+                            ? 'Please upload existing .xlsx file first'
+                            : 'Select Update End Date'}
+                        </option>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <button
+                      type="button"
+                      onClick={handleUpdateExistingHourlyLoadDatabase}
+                      disabled={isExportingDb || !uploadedHourlyLoadRecords}
+                      className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-700 hover:via-teal-700 hover:to-emerald-800 active:scale-[0.99] disabled:opacity-50 rounded-xl shadow-sm shadow-emerald-600/25 transition-all cursor-pointer"
+                    >
+                      <Download className="w-4 h-4 text-emerald-200" />
+                      <span>
+                        {isExportingDb
+                          ? 'Updating Hourly Load Curve DB...'
+                          : 'Update & Download Hourly Load Curve DB (.xlsx)'}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 rounded-2xl p-3 border border-slate-200/80 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    💡 <strong>Internal Option 4.2 Workflow:</strong> Reads new dates from Target Folder 2 after your uploaded file&apos;s final date, appends 48 every-30-minute maximum power rows per day for all 4 circuits into the single worksheet, and downloads the updated <code>.xlsx</code> database.
+                  </span>
+                  <span className="font-mono text-emerald-700 font-bold">
+                    {uploadedHourlyLoadRecords && uploadedHourlyLoadMaxDate
+                      ? `Ready: Updating from ${uploadedHourlyLoadMaxDate} → ${hourlyLoadUpdateEndDate || uploadedHourlyLoadMaxDate} (${uploadedHourlyLoadRecords.size} existing days)`
+                      : 'Awaiting uploaded .xlsx file'}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Progress Bar during compilation / update */}
+            {isExportingDb && (
+              <div className="bg-violet-50 border border-violet-200 rounded-2xl p-3.5 text-xs font-mono text-violet-950 space-y-1.5">
+                <div className="flex items-center justify-between font-bold">
+                  <span>{dbExportProgressMessage}</span>
+                  {dbExportTotalSteps > 0 && (
+                    <span>
+                      {dbExportCurrentStep} / {dbExportTotalSteps} (
+                      {Math.round((dbExportCurrentStep / Math.max(1, dbExportTotalSteps)) * 100)}%)
+                    </span>
+                  )}
+                </div>
+                {dbExportTotalSteps > 0 && (
+                  <div className="w-full h-2 bg-white rounded-full overflow-hidden border border-violet-200">
+                    <div
+                      className="h-full bg-violet-600 transition-all duration-150"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          Math.round((dbExportCurrentStep / Math.max(1, dbExportTotalSteps)) * 100)
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Live 4-Circuit Hourly Load Curve Summary Preview (When compiled or uploaded) */}
+            {hourlyLoadPreviewStats && (
+              <div className="bg-white rounded-2xl border border-violet-200/90 p-4 shadow-2xs space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    <span className="text-xs font-extrabold text-slate-900">
+                      1-Sheet Hourly Load Curve Database Summary (All 4 Circuits · Every 30 Minutes)
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-violet-700 bg-violet-50 px-2.5 py-0.5 rounded-lg border border-violet-200 font-bold">
+                    Sheet: {HOURLY_LOAD_CURVE_SHEET_NAME} •{' '}
+                    {hourlyLoadPreviewStats.totalDays.toLocaleString()} Days •{' '}
+                    {hourlyLoadPreviewStats.totalHours.toLocaleString()} 30-Min Rows
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs font-mono">
+                  <div className="bg-violet-50/70 border border-violet-200 rounded-xl p-3">
+                    <div className="text-[10px] font-bold text-violet-700 uppercase">
+                      Col C · 115kV Ckt#3 (KMB)
+                    </div>
+                    <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                      Peak: {hourlyLoadPreviewStats.ckt3PeakMW.toFixed(2)} MW
+                    </div>
+                    <div className="text-[11px] text-slate-600">
+                      Avg Hourly Max: {hourlyLoadPreviewStats.ckt3AvgHourlyMaxMW.toFixed(2)} MW
+                    </div>
+                  </div>
+
+                  <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3">
+                    <div className="text-[10px] font-bold text-blue-700 uppercase">
+                      Col D · 115kV Ckt#2 (KMA)
+                    </div>
+                    <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                      Peak: {hourlyLoadPreviewStats.ckt2PeakMW.toFixed(2)} MW
+                    </div>
+                    <div className="text-[11px] text-slate-600">
+                      Avg Hourly Max: {hourlyLoadPreviewStats.ckt2AvgHourlyMaxMW.toFixed(2)} MW
+                    </div>
+                  </div>
+
+                  <div className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-3">
+                    <div className="text-[10px] font-bold text-emerald-700 uppercase">
+                      Col E · 33kV NKT (KNA)
+                    </div>
+                    <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                      Peak: {hourlyLoadPreviewStats.nkt33PeakMW.toFixed(2)} MW
+                    </div>
+                    <div className="text-[11px] text-slate-600">
+                      Avg Hourly Max: {hourlyLoadPreviewStats.nkt33AvgHourlyMaxMW.toFixed(2)} MW
+                    </div>
+                  </div>
+
+                  <div className="bg-amber-50/70 border border-amber-200 rounded-xl p-3">
+                    <div className="text-[10px] font-bold text-amber-700 uppercase">
+                      Col F · 33kV Oil (KNA)
+                    </div>
+                    <div className="text-sm font-extrabold text-slate-900 mt-0.5">
+                      Peak: {hourlyLoadPreviewStats.oil33PeakMW.toFixed(2)} MW
+                    </div>
+                    <div className="text-[11px] text-slate-600">
+                      Avg Hourly Max: {hourlyLoadPreviewStats.oil33AvgHourlyMaxMW.toFixed(2)} MW
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -2838,6 +2838,338 @@ app.get('/api/panel3-statistics-summary', (_req, res) => {
   }
 });
 
+// ============================================================================
+// PUBLIC DASHBOARD 2.6 DEDICATED 2 SHARED GOOGLE DRIVE FOLDERS
+// 1. Operation Condition Database: https://drive.google.com/drive/folders/1xGm5ZH9mkNQhTAuXmmBCsCnORL0un4nE?usp=sharing
+// 2. 30-Min Load Curve Database:   https://drive.google.com/drive/folders/1OCCulyWoTU5hnRltkH9J7ZcsNdXDbCeo?usp=sharing
+// ============================================================================
+const DEFAULT_PAGE26_OP_COND_FOLDER_URL =
+  'https://drive.google.com/drive/folders/1xGm5ZH9mkNQhTAuXmmBCsCnORL0un4nE?usp=sharing';
+const DEFAULT_PAGE26_LOAD_CURVE_FOLDER_URL =
+  'https://drive.google.com/drive/folders/1OCCulyWoTU5hnRltkH9J7ZcsNdXDbCeo?usp=sharing';
+
+const PAGE26_HALF_HOUR_SLOTS = Array.from({ length: 48 }, (_, idx) => {
+  const startTotalMin = idx * 30;
+  const endTotalMin = (idx + 1) * 30;
+  const sh = String(Math.floor(startTotalMin / 60)).padStart(2, '0');
+  const sm = String(startTotalMin % 60).padStart(2, '0');
+  const eh = String(Math.floor(endTotalMin / 60)).padStart(2, '0');
+  const em = String(endTotalMin % 60).padStart(2, '0');
+  return `${sh}:${sm}-${eh}:${em}`;
+});
+const PAGE26_SLOT_INDEX_MAP = new Map(PAGE26_HALF_HOUR_SLOTS.map((s, i) => [s, i]));
+
+let cachedPage26OpCondData: any = null;
+let cachedPage26LoadCurveData: any = null;
+let activePage26SyncPromise: Promise<any> | null = null;
+
+function hydratePage26CachesFromStaticBundle() {
+  try {
+    const opGzPath = path.join(STATIC_PUBLIC_DATA_DIR, 'page26_op_cond.json.gz');
+    const opJsonPath = path.join(STATIC_PUBLIC_DATA_DIR, 'page26_op_cond.json');
+    if (fs.existsSync(opGzPath)) {
+      const raw = zlib.gunzipSync(fs.readFileSync(opGzPath)).toString('utf-8');
+      cachedPage26OpCondData = JSON.parse(raw);
+    } else if (fs.existsSync(opJsonPath)) {
+      cachedPage26OpCondData = JSON.parse(fs.readFileSync(opJsonPath, 'utf-8'));
+    }
+
+    const lcGzPath = path.join(STATIC_PUBLIC_DATA_DIR, 'page26_load_curve.json.gz');
+    const lcJsonPath = path.join(STATIC_PUBLIC_DATA_DIR, 'page26_load_curve.json');
+    if (fs.existsSync(lcGzPath)) {
+      const raw = zlib.gunzipSync(fs.readFileSync(lcGzPath)).toString('utf-8');
+      cachedPage26LoadCurveData = JSON.parse(raw);
+    } else if (fs.existsSync(lcJsonPath)) {
+      cachedPage26LoadCurveData = JSON.parse(fs.readFileSync(lcJsonPath, 'utf-8'));
+    }
+  } catch (err) {
+    console.warn('Page 2.6 static cache hydration warning:', err);
+  }
+}
+
+hydratePage26CachesFromStaticBundle();
+
+function parsePage26OpCondWorkbookFast(
+  buf: Buffer,
+  meta: ScannedDriveFileMetadata,
+  folderUrl: string
+) {
+  const zip = openXlsxZipBuffer(buf);
+  const sharedStrings = parseXlsxSharedStrings(zip);
+  const wbXml = zip.readEntryText('xl/workbook.xml') || '';
+  const sheetNames: string[] = [];
+  const sheetNameRegex = /<sheet[^>]*name="([^"]+)"/gi;
+  let sm: RegExpExecArray | null;
+  while ((sm = sheetNameRegex.exec(wbXml)) !== null) {
+    sheetNames.push(sm[1]);
+  }
+
+  const opByDate: Record<string, number[][]> = {};
+  const datesSet = new Set<string>();
+
+  for (let s = 1; s <= 4; s++) {
+    const xml = zip.readEntryText(`xl/worksheets/sheet${s}.xml`);
+    if (!xml) continue;
+    const sheetTitle = sheetNames[s - 1] || `Sheet${s}`;
+    let cIdx = s - 1;
+    if (/Ckt#?3|KMB/i.test(sheetTitle)) cIdx = 0;
+    else if (/Ckt#?2|KMA/i.test(sheetTitle)) cIdx = 1;
+    else if (/NKT/i.test(sheetTitle)) cIdx = 2;
+    else if (/Oil/i.test(sheetTitle)) cIdx = 3;
+    if (cIdx < 0 || cIdx > 3) continue;
+
+    const { rows } = parseXlsxWorksheetRows(xml, sharedStrings);
+    for (const vals of rows) {
+      const dateStr = normalizeServerDateStr(vals[0] || '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
+      datesSet.add(dateStr);
+      if (!opByDate[dateStr]) {
+        opByDate[dateStr] = [
+          [0, 0, 0, 0],
+          [0, 0, 0, 0],
+          [0, 0, 0, 0],
+          [0, 0, 0, 0],
+        ];
+      }
+      opByDate[dateStr][cIdx][0] += Number(vals[2] || 0) || 0;
+      opByDate[dateStr][cIdx][1] += Number(vals[3] || 0) || 0;
+      opByDate[dateStr][cIdx][2] += Number(vals[4] || 0) || 0;
+      opByDate[dateStr][cIdx][3] += Number(vals[5] || 0) || 0;
+    }
+  }
+
+  const sortedDates = Array.from(datesSet).sort();
+  return {
+    folderUrl,
+    fileName: meta.fileName,
+    fileId: meta.fileId,
+    fileSize: buf.length,
+    versionSignature: `${meta.fileId}|${meta.fileName}|${buf.length}`,
+    updatedAt: new Date().toISOString(),
+    totalDates: sortedDates.length,
+    dateRange: {
+      firstDate: sortedDates[0] || '',
+      latestDate: sortedDates[sortedDates.length - 1] || '',
+    },
+    dates: sortedDates,
+    byDate: opByDate,
+  };
+}
+
+function parsePage26LoadCurveWorkbookFast(
+  buf: Buffer,
+  meta: ScannedDriveFileMetadata,
+  folderUrl: string
+) {
+  const zip = openXlsxZipBuffer(buf);
+  const sharedStrings = parseXlsxSharedStrings(zip);
+  const xml = zip.readEntryText('xl/worksheets/sheet1.xml');
+  const lcByDate: Record<string, number[][]> = {};
+  const datesSet = new Set<string>();
+
+  if (xml) {
+    const { rows } = parseXlsxWorksheetRows(xml, sharedStrings);
+    for (const vals of rows) {
+      const dateStr = normalizeServerDateStr(vals[0] || '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
+      const slotStr = String(vals[1] || '').trim();
+      let sIdx = PAGE26_SLOT_INDEX_MAP.get(slotStr);
+      if (sIdx === undefined) {
+        const m = slotStr.match(/^(\d{1,2}):(\d{2})/);
+        if (m) {
+          const hh = parseInt(m[1], 10);
+          const mm = parseInt(m[2], 10);
+          sIdx = hh * 2 + (mm >= 30 ? 1 : 0);
+        }
+      }
+      if (sIdx === undefined || sIdx < 0 || sIdx >= 48) continue;
+
+      datesSet.add(dateStr);
+      if (!lcByDate[dateStr]) {
+        lcByDate[dateStr] = Array.from({ length: 48 }, () => [0, 0, 0, 0]);
+      }
+      lcByDate[dateStr][sIdx] = [
+        Number((Number(vals[2] || 0) || 0).toFixed(2)),
+        Number((Number(vals[3] || 0) || 0).toFixed(2)),
+        Number((Number(vals[4] || 0) || 0).toFixed(2)),
+        Number((Number(vals[5] || 0) || 0).toFixed(2)),
+      ];
+    }
+  }
+
+  const sortedDates = Array.from(datesSet).sort();
+  return {
+    folderUrl,
+    fileName: meta.fileName,
+    fileId: meta.fileId,
+    fileSize: buf.length,
+    versionSignature: `${meta.fileId}|${meta.fileName}|${buf.length}`,
+    updatedAt: new Date().toISOString(),
+    totalDates: sortedDates.length,
+    dateRange: {
+      firstDate: sortedDates[0] || '',
+      latestDate: sortedDates[sortedDates.length - 1] || '',
+    },
+    slots: PAGE26_HALF_HOUR_SLOTS,
+    dates: sortedDates,
+    byDate: lcByDate,
+  };
+}
+
+async function scanAndSyncPage26SharedFolders(options?: {
+  opCondFolderUrl?: string;
+  loadCurveFolderUrl?: string;
+  authHeader?: string;
+  forceDownload?: boolean;
+}) {
+  if (activePage26SyncPromise) return activePage26SyncPromise;
+
+  activePage26SyncPromise = (async () => {
+    try {
+      const opCondFolderUrl = options?.opCondFolderUrl || DEFAULT_PAGE26_OP_COND_FOLDER_URL;
+      const loadCurveFolderUrl = options?.loadCurveFolderUrl || DEFAULT_PAGE26_LOAD_CURVE_FOLDER_URL;
+      const authHeader = options?.authHeader || '';
+      const forceDl = Boolean(options?.forceDownload);
+
+      const [scanOp, scanLc] = await Promise.all([
+        scanSharedDriveFolderMetadata(opCondFolderUrl, 'xlsx', authHeader),
+        scanSharedDriveFolderMetadata(loadCurveFolderUrl, 'xlsx', authHeader),
+      ]);
+
+      const opChanged =
+        forceDl ||
+        !cachedPage26OpCondData?.dates?.length ||
+        (scanOp &&
+          (scanOp.fileId !== cachedPage26OpCondData.fileId ||
+            scanOp.fileName !== cachedPage26OpCondData.fileName ||
+            (scanOp.fileSize > 0 &&
+              cachedPage26OpCondData.fileSize &&
+              scanOp.fileSize !== cachedPage26OpCondData.fileSize)));
+
+      const lcChanged =
+        forceDl ||
+        !cachedPage26LoadCurveData?.dates?.length ||
+        (scanLc &&
+          (scanLc.fileId !== cachedPage26LoadCurveData.fileId ||
+            scanLc.fileName !== cachedPage26LoadCurveData.fileName ||
+            (scanLc.fileSize > 0 &&
+              cachedPage26LoadCurveData.fileSize &&
+              scanLc.fileSize !== cachedPage26LoadCurveData.fileSize)));
+
+      let opUpdated = false;
+      let lcUpdated = false;
+
+      if (opChanged && scanOp) {
+        try {
+          const bufOp = await downloadDriveFileWithCache(scanOp, authHeader, forceDl);
+          const parsedOp = parsePage26OpCondWorkbookFast(bufOp, scanOp, opCondFolderUrl);
+          if (parsedOp.dates.length > 0) {
+            cachedPage26OpCondData = parsedOp;
+            opUpdated = true;
+            if (fs.existsSync(STATIC_PUBLIC_DATA_DIR)) {
+              const rawOp = JSON.stringify(parsedOp);
+              fs.writeFileSync(path.join(STATIC_PUBLIC_DATA_DIR, 'page26_op_cond.json'), rawOp, 'utf-8');
+              fs.writeFileSync(
+                path.join(STATIC_PUBLIC_DATA_DIR, 'page26_op_cond.json.gz'),
+                zlib.gzipSync(Buffer.from(rawOp, 'utf-8'))
+              );
+            }
+          }
+        } catch (err) {
+          console.warn('Page 2.6 OpCond folder sync warning:', err);
+        }
+      }
+
+      if (lcChanged && scanLc) {
+        try {
+          const bufLc = await downloadDriveFileWithCache(scanLc, authHeader, forceDl);
+          const parsedLc = parsePage26LoadCurveWorkbookFast(bufLc, scanLc, loadCurveFolderUrl);
+          if (parsedLc.dates.length > 0) {
+            cachedPage26LoadCurveData = parsedLc;
+            lcUpdated = true;
+            if (fs.existsSync(STATIC_PUBLIC_DATA_DIR)) {
+              const rawLc = JSON.stringify(parsedLc);
+              fs.writeFileSync(path.join(STATIC_PUBLIC_DATA_DIR, 'page26_load_curve.json'), rawLc, 'utf-8');
+              fs.writeFileSync(
+                path.join(STATIC_PUBLIC_DATA_DIR, 'page26_load_curve.json.gz'),
+                zlib.gzipSync(Buffer.from(rawLc, 'utf-8'))
+              );
+            }
+          }
+        } catch (err) {
+          console.warn('Page 2.6 LoadCurve folder sync warning:', err);
+        }
+      }
+
+      return {
+        success: true,
+        scannedAt: new Date().toISOString(),
+        changesDetected: opUpdated || lcUpdated,
+        opCond: {
+          changed: Boolean(opChanged),
+          updated: opUpdated,
+          fileName: cachedPage26OpCondData?.fileName || scanOp?.fileName || '',
+          fileId: cachedPage26OpCondData?.fileId || scanOp?.fileId || '',
+          totalDates: cachedPage26OpCondData?.totalDates || 0,
+          dateRange: cachedPage26OpCondData?.dateRange || { firstDate: '', latestDate: '' },
+        },
+        loadCurve: {
+          changed: Boolean(lcChanged),
+          updated: lcUpdated,
+          fileName: cachedPage26LoadCurveData?.fileName || scanLc?.fileName || '',
+          fileId: cachedPage26LoadCurveData?.fileId || scanLc?.fileId || '',
+          totalDates: cachedPage26LoadCurveData?.totalDates || 0,
+          dateRange: cachedPage26LoadCurveData?.dateRange || { firstDate: '', latestDate: '' },
+        },
+      };
+    } finally {
+      activePage26SyncPromise = null;
+    }
+  })();
+
+  return activePage26SyncPromise;
+}
+
+app.get('/api/page26-data', (_req, res) => {
+  try {
+    if (!cachedPage26OpCondData || !cachedPage26LoadCurveData) {
+      hydratePage26CachesFromStaticBundle();
+    }
+    return res.json({
+      success: true,
+      opCond: cachedPage26OpCondData,
+      loadCurve: cachedPage26LoadCurveData,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to get Page 2.6 data',
+    });
+  }
+});
+
+app.post('/api/page26-sync', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || (req.body?.token ? `Bearer ${req.body.token}` : '');
+    const syncRes = await scanAndSyncPage26SharedFolders({
+      opCondFolderUrl: req.body?.opCondFolderUrl,
+      loadCurveFolderUrl: req.body?.loadCurveFolderUrl,
+      authHeader,
+      forceDownload: Boolean(req.body?.force),
+    });
+    return res.json({
+      ...syncRes,
+      opCondData: cachedPage26OpCondData,
+      loadCurveData: cachedPage26LoadCurveData,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to sync Page 2.6 shared Google Drive folders',
+    });
+  }
+});
+
 // Proxy endpoint to fetch a shared Google Drive Folder, Google Drive File, Google Sheet, or Direct URL without CORS issues
 app.get('/api/fetch-shared-database', async (req, res) => {
   try {
@@ -2904,9 +3236,12 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    // Automatically scan the 3 shared Google Drive folders on startup and sync any updated database files
+    // Automatically scan the shared Google Drive folders on startup and sync any updated database files
     void scanAndSyncThreePublicSharedFolders().catch((err) => {
       console.warn('Initial background shared folder scan warning:', err);
+    });
+    void scanAndSyncPage26SharedFolders().catch((err) => {
+      console.warn('Initial background Page 2.6 shared folder scan warning:', err);
     });
   });
 }

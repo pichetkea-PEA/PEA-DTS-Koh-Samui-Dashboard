@@ -5,6 +5,8 @@
 // 3. 33 kV NKT Circuit (Target folder "KNA" - Column N "07WB01", already positive value - no conversion)
 // 4. 33 kV Oil filled Circuit (Target folder "KNA" - Column P "10WB01", already positive value - no conversion)
 
+import * as XLSX from 'xlsx';
+
 export type SubstationCode = 'KMA' | 'KMB' | 'KNA';
 
 export interface PowerCircuitDefinition {
@@ -1756,4 +1758,695 @@ export function formatDailyPowerDatabaseCsvRow(
     nktTime,
     oilTime,
   ].join(',');
+}
+
+// ============================================================================
+// OPTION 3: POWER OPERATING CONDITION DATABASE (4 SHEETS FOR 4 CIRCUITS)
+// ============================================================================
+
+export type OperatingConditionCircuitKey = 'ckt3' | 'ckt2' | 'nkt33' | 'oil33';
+
+export interface OperatingConditionCircuitSpec {
+  key: OperatingConditionCircuitKey;
+  circuitId: 'circuit_115kv_3' | 'circuit_115kv_2' | 'circuit_33kv_nkt' | 'circuit_33kv_oil';
+  sheetName: string;
+  label: string;
+  substation: SubstationCode;
+  columnTag: string;
+  thresholds: {
+    normalMax: number;
+    emergencyMax: number;
+    criticalMax: number;
+  };
+  criteriaLabels: {
+    normal: string;
+    emergency: string;
+    critical: string;
+    overload: string;
+  };
+}
+
+export const OPERATING_CONDITION_CIRCUIT_SPECS: OperatingConditionCircuitSpec[] = [
+  {
+    key: 'ckt3',
+    circuitId: 'circuit_115kv_3',
+    sheetName: '115kV Ckt#3 (KMB)',
+    label: '115kV Ckt#3 (KMB · 03YB01)',
+    substation: 'KMB',
+    columnTag: '03YB01',
+    thresholds: {
+      normalMax: 64.1,
+      emergencyMax: 68.11,
+      criticalMax: 80.13,
+    },
+    criteriaLabels: {
+      normal: '< 64.1 MW',
+      emergency: '64.1 - 68.11 MW',
+      critical: '68.11 - 80.13 MW',
+      overload: '> 80.13 MW',
+    },
+  },
+  {
+    key: 'ckt2',
+    circuitId: 'circuit_115kv_2',
+    sheetName: '115kV Ckt#2 (KMA)',
+    label: '115kV Ckt#2 (KMA · 04YB01)',
+    substation: 'KMA',
+    columnTag: '04YB01',
+    thresholds: {
+      normalMax: 53.64,
+      emergencyMax: 56.79,
+      criticalMax: 63.1,
+    },
+    criteriaLabels: {
+      normal: '< 53.64 MW',
+      emergency: '53.64 - 56.79 MW',
+      critical: '56.79 - 63.10 MW',
+      overload: '> 63.10 MW',
+    },
+  },
+  {
+    key: 'nkt33',
+    circuitId: 'circuit_33kv_nkt',
+    sheetName: '33kV NKT (KNA)',
+    label: '33kV NKT (KNA · 07WB01)',
+    substation: 'KNA',
+    columnTag: '07WB01',
+    thresholds: {
+      normalMax: 13.29,
+      emergencyMax: 14.08,
+      criticalMax: 15.64,
+    },
+    criteriaLabels: {
+      normal: '< 13.29 MW',
+      emergency: '13.29 - 14.08 MW',
+      critical: '14.08 - 15.64 MW',
+      overload: '> 15.64 MW',
+    },
+  },
+  {
+    key: 'oil33',
+    circuitId: 'circuit_33kv_oil',
+    sheetName: '33kV Oil (KNA)',
+    label: '33kV Oil (KNA · 10WB01)',
+    substation: 'KNA',
+    columnTag: '10WB01',
+    thresholds: {
+      normalMax: 12.9,
+      emergencyMax: 13.66,
+      criticalMax: 15.18,
+    },
+    criteriaLabels: {
+      normal: '< 12.90 MW',
+      emergency: '12.90 - 13.66 MW',
+      critical: '13.66 - 15.18 MW',
+      overload: '> 15.18 MW',
+    },
+  },
+];
+
+export interface HourlyOperatingConditionRow {
+  date: string; // YYYY-MM-DD
+  hourly: string; // e.g. '00:00-01:00' .. '23:00-24:00'
+  hourIndex: number; // 0..23
+  normalMin: number; // 0..60
+  emergencyMin: number; // 0..60
+  criticalMin: number; // 0..60
+  overloadMin: number; // 0..60
+}
+
+export interface DailyPowerOperatingConditionRecord {
+  date: string; // YYYY-MM-DD
+  byCircuit: Record<OperatingConditionCircuitKey, HourlyOperatingConditionRow[]>;
+}
+
+export interface CircuitOperatingConditionSummaryStats {
+  circuitKey: OperatingConditionCircuitKey;
+  totalDays: number;
+  totalHours: number;
+  totalOperationMin: number;
+  normalMin: number;
+  emergencyMin: number;
+  criticalMin: number;
+  overloadMin: number;
+  normalPct: number;
+  emergencyPct: number;
+  criticalPct: number;
+  overloadPct: number;
+}
+
+export function formatHourPeriodLabel(hourIdx: number): string {
+  const h0 = Math.max(0, Math.min(23, Math.floor(hourIdx)));
+  const h1 = h0 + 1;
+  return `${String(h0).padStart(2, '0')}:00-${String(h1).padStart(2, '0')}:00`;
+}
+
+export function parseHourIndexFromLabel(rawHourly: any, fallbackIdx = 0): number {
+  const s = String(rawHourly ?? '').trim();
+  if (!s) return Math.max(0, Math.min(23, fallbackIdx));
+  const m = s.match(/^(\d{1,2})[:.]/);
+  if (m) {
+    const h = parseInt(m[1], 10);
+    if (h >= 0 && h <= 23) return h;
+  }
+  const num = parseInt(s, 10);
+  if (!isNaN(num) && num >= 0 && num <= 23) return num;
+  return Math.max(0, Math.min(23, fallbackIdx));
+}
+
+export function classifyCircuitPowerCondition(
+  spec: OperatingConditionCircuitSpec,
+  mw: number
+): 'normal' | 'emergency' | 'critical' | 'overload' {
+  const val = Number.isFinite(mw) ? mw : 0;
+  if (val > spec.thresholds.criticalMax) return 'overload';
+  if (val >= spec.thresholds.emergencyMax) return 'critical';
+  if (val >= spec.thresholds.normalMax) return 'emergency';
+  return 'normal';
+}
+
+function getCircuitMwFromDataPoint(
+  pt: DailyPowerDataPoint,
+  circuitKey: OperatingConditionCircuitKey
+): number {
+  switch (circuitKey) {
+    case 'ckt3':
+      return pt.kmbCircuit3;
+    case 'ckt2':
+      return pt.kmaCircuit2;
+    case 'nkt33':
+      return pt.knaNkt;
+    case 'oil33':
+      return pt.knaOilFilled;
+  }
+}
+
+/**
+ * Extracts a 24-hour (00:00-01:00 to 23:00-24:00) operating condition record
+ * across all 4 circuits for a given date from Target Folder 2 DailyPowerSummary.
+ */
+export function extractDailyPowerOperatingConditionRecord(
+  dateKey: string,
+  summary?: DailyPowerSummary | null
+): DailyPowerOperatingConditionRecord {
+  const validSummary = summary && !isSyntheticPowerSummary(summary) ? summary : null;
+  const dataPoints = validSummary?.dataPoints || [];
+
+  const byCircuit: Record<OperatingConditionCircuitKey, HourlyOperatingConditionRow[]> = {
+    ckt3: [],
+    ckt2: [],
+    nkt33: [],
+    oil33: [],
+  };
+
+  for (const spec of OPERATING_CONDITION_CIRCUIT_SPECS) {
+    const rowsForCircuit: HourlyOperatingConditionRow[] = [];
+
+    for (let h = 0; h < 24; h++) {
+      const startMin = h * 60;
+      const endMin = (h + 1) * 60;
+      const ptsInHour = dataPoints.filter(
+        (p) => p.timeMinutes >= startMin && p.timeMinutes < endMin
+      );
+
+      let normalMin = 0;
+      let emergencyMin = 0;
+      let criticalMin = 0;
+      let overloadMin = 0;
+
+      if (ptsInHour.length > 0) {
+        const minPerSample = 60 / ptsInHour.length;
+        for (const pt of ptsInHour) {
+          const mw = getCircuitMwFromDataPoint(pt, spec.key);
+          const cond = classifyCircuitPowerCondition(spec, mw);
+          if (cond === 'overload') overloadMin += minPerSample;
+          else if (cond === 'critical') criticalMin += minPerSample;
+          else if (cond === 'emergency') emergencyMin += minPerSample;
+          else normalMin += minPerSample;
+        }
+        normalMin = Math.round(normalMin);
+        emergencyMin = Math.round(emergencyMin);
+        criticalMin = Math.round(criticalMin);
+        overloadMin = Math.round(overloadMin);
+
+        const sumMin = normalMin + emergencyMin + criticalMin + overloadMin;
+        if (sumMin !== 60 && sumMin > 0) {
+          const diff = 60 - sumMin;
+          if (normalMin >= emergencyMin && normalMin >= criticalMin && normalMin >= overloadMin) {
+            normalMin += diff;
+          } else if (emergencyMin >= criticalMin && emergencyMin >= overloadMin) {
+            emergencyMin += diff;
+          } else if (criticalMin >= overloadMin) {
+            criticalMin += diff;
+          } else {
+            overloadMin += diff;
+          }
+        }
+      } else {
+        normalMin = 60;
+      }
+
+      rowsForCircuit.push({
+        date: dateKey,
+        hourly: formatHourPeriodLabel(h),
+        hourIndex: h,
+        normalMin,
+        emergencyMin,
+        criticalMin,
+        overloadMin,
+      });
+    }
+
+    byCircuit[spec.key] = rowsForCircuit;
+  }
+
+  return {
+    date: dateKey,
+    byCircuit,
+  };
+}
+
+/**
+ * Computes cumulative operation minutes and percentages of all operation time
+ * across all recorded dates for each of the 4 circuits.
+ */
+export function computeOperatingConditionSummaries(
+  recordsMap: Map<string, DailyPowerOperatingConditionRecord>
+): Record<OperatingConditionCircuitKey, CircuitOperatingConditionSummaryStats> {
+  const sortedDates = Array.from(recordsMap.keys()).sort();
+  const result = {} as Record<OperatingConditionCircuitKey, CircuitOperatingConditionSummaryStats>;
+
+  for (const spec of OPERATING_CONDITION_CIRCUIT_SPECS) {
+    let normalMin = 0;
+    let emergencyMin = 0;
+    let criticalMin = 0;
+    let overloadMin = 0;
+    let totalHours = 0;
+
+    for (const d of sortedDates) {
+      const rec = recordsMap.get(d);
+      const hrRows = rec?.byCircuit?.[spec.key] || [];
+      for (const r of hrRows) {
+        normalMin += r.normalMin || 0;
+        emergencyMin += r.emergencyMin || 0;
+        criticalMin += r.criticalMin || 0;
+        overloadMin += r.overloadMin || 0;
+        totalHours += 1;
+      }
+    }
+
+    const totalOperationMin = normalMin + emergencyMin + criticalMin + overloadMin;
+    const denom = totalOperationMin > 0 ? totalOperationMin : 1;
+
+    result[spec.key] = {
+      circuitKey: spec.key,
+      totalDays: sortedDates.length,
+      totalHours,
+      totalOperationMin,
+      normalMin,
+      emergencyMin,
+      criticalMin,
+      overloadMin,
+      normalPct: Number(((normalMin / denom) * 100).toFixed(2)),
+      emergencyPct: Number(((emergencyMin / denom) * 100).toFixed(2)),
+      criticalPct: Number(((criticalMin / denom) * 100).toFixed(2)),
+      overloadPct: Number(((overloadMin / denom) * 100).toFixed(2)),
+    };
+  }
+
+  return result;
+}
+
+/**
+ * Builds the 4-Sheet Excel (.xlsx) Workbook for the Power Operating Condition Database:
+ * - 4 Sheets (1 per circuit: 115kV Ckt#3, 115kV Ckt#2, 33kV NKT, 33kV Oil)
+ * - Columns A-B: Date, Hourly (00:00-01:00 to 23:00-24:00)
+ * - Columns C-F: Operation minutes of each condition (Normal, Emergency, Critical, Overload)
+ * - Columns G-J: Percentage summarize of each condition (% of all operation time from record)
+ * - Columns L-P: Executive Summary Table of Total Operation Minutes, Hours, and % of All Record
+ */
+export function buildPowerOperatingConditionWorkbook(
+  recordsMap: Map<string, DailyPowerOperatingConditionRecord>
+): XLSX.WorkBook {
+  const wb = XLSX.utils.book_new();
+  const sortedDates = Array.from(recordsMap.keys()).sort();
+  const summaries = computeOperatingConditionSummaries(recordsMap);
+
+  for (const spec of OPERATING_CONDITION_CIRCUIT_SPECS) {
+    const stat = summaries[spec.key];
+    const aoa: any[][] = [];
+
+    // Header Row (Row 1)
+    aoa.push([
+      'Date',
+      'Hourly',
+      'Normal_Condition_Min',
+      'Emergency_Condition_Min',
+      'Critical_Condition_Min',
+      'Overload_Condition_Min',
+      'Normal_Condition_% (All_Record)',
+      'Emergency_Condition_% (All_Record)',
+      'Critical_Condition_% (All_Record)',
+      'Overload_Condition_% (All_Record)',
+      '',
+      'Summary_Operating_Condition',
+      'Power_Criteria_Range',
+      'Total_Operation_Min',
+      'Total_Operation_Hours',
+      'Percentage_Of_All_Operation_Time (%)',
+    ]);
+
+    // Flatten all date-hour rows in chronological order
+    const flatRows: HourlyOperatingConditionRow[] = [];
+    for (const d of sortedDates) {
+      const rec = recordsMap.get(d);
+      const hrRows = rec?.byCircuit?.[spec.key] || [];
+      for (const r of hrRows) {
+        flatRows.push(r);
+      }
+    }
+
+    // Side Summary Rows (for rows 0..4 of data, i.e., Excel rows 2..6)
+    const summaryTableRows: any[][] = [
+      [
+        'Normal Condition',
+        spec.criteriaLabels.normal,
+        stat.normalMin,
+        Number((stat.normalMin / 60).toFixed(2)),
+        `${stat.normalPct.toFixed(2)}%`,
+      ],
+      [
+        'Emergency Condition',
+        spec.criteriaLabels.emergency,
+        stat.emergencyMin,
+        Number((stat.emergencyMin / 60).toFixed(2)),
+        `${stat.emergencyPct.toFixed(2)}%`,
+      ],
+      [
+        'Critical Condition',
+        spec.criteriaLabels.critical,
+        stat.criticalMin,
+        Number((stat.criticalMin / 60).toFixed(2)),
+        `${stat.criticalPct.toFixed(2)}%`,
+      ],
+      [
+        'Overload Condition',
+        spec.criteriaLabels.overload,
+        stat.overloadMin,
+        Number((stat.overloadMin / 60).toFixed(2)),
+        `${stat.overloadPct.toFixed(2)}%`,
+      ],
+      [
+        'TOTAL ALL OPERATION TIME',
+        `${stat.totalDays} Days (${stat.totalHours} Hrs)`,
+        stat.totalOperationMin,
+        Number((stat.totalOperationMin / 60).toFixed(2)),
+        '100.00%',
+      ],
+    ];
+
+    const totalLoopRows = Math.max(flatRows.length, summaryTableRows.length);
+    for (let i = 0; i < totalLoopRows; i++) {
+      const hr = flatRows[i];
+      const sumRow = summaryTableRows[i];
+
+      const leftCols = hr
+        ? [
+            hr.date,
+            hr.hourly,
+            hr.normalMin,
+            hr.emergencyMin,
+            hr.criticalMin,
+            hr.overloadMin,
+            stat.normalPct,
+            stat.emergencyPct,
+            stat.criticalPct,
+            stat.overloadPct,
+          ]
+        : ['', '', '', '', '', '', '', '', '', ''];
+
+      if (sumRow) {
+        aoa.push([...leftCols, '', ...sumRow]);
+      } else {
+        aoa.push(leftCols);
+      }
+    }
+
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [
+      { wch: 13 }, // Col A: Date
+      { wch: 14 }, // Col B: Hourly
+      { wch: 22 }, // Col C: Normal_Condition_Min
+      { wch: 24 }, // Col D: Emergency_Condition_Min
+      { wch: 23 }, // Col E: Critical_Condition_Min
+      { wch: 23 }, // Col F: Overload_Condition_Min
+      { wch: 28 }, // Col G: Normal_Condition_%
+      { wch: 30 }, // Col H: Emergency_Condition_%
+      { wch: 29 }, // Col I: Critical_Condition_%
+      { wch: 29 }, // Col J: Overload_Condition_%
+      { wch: 3 },  // Col K: Spacer
+      { wch: 26 }, // Col L: Summary_Operating_Condition
+      { wch: 20 }, // Col M: Power_Criteria_Range
+      { wch: 22 }, // Col N: Total_Operation_Min
+      { wch: 22 }, // Col O: Total_Operation_Hours
+      { wch: 32 }, // Col P: Percentage_Of_All_Operation_Time (%)
+    ];
+
+    XLSX.utils.book_append_sheet(wb, ws, spec.sheetName);
+  }
+
+  return wb;
+}
+
+// ============================================================================
+// OPTION 4: HOURLY LOAD CURVE DATABASE (1 SHEET FOR ALL 4 CIRCUITS - EVERY 30 MINUTES)
+// ============================================================================
+
+export const HOURLY_LOAD_CURVE_SHEET_NAME = 'Hourly Load Curve (4 Circuits)';
+
+export interface HourlyLoadCurveRow {
+  date: string; // YYYY-MM-DD
+  hourly: string; // '00:00-00:30', '00:30-01:00' .. '23:30-24:00' (48 intervals of 30 minutes)
+  hourIndex: number; // 0..47 (30-minute slot index)
+  ckt3MaxMW: number; // Col C: 115kV Ckt#3 (KMB) 30-Min Max MW
+  ckt2MaxMW: number; // Col D: 115kV Ckt#2 (KMA) 30-Min Max MW
+  nkt33MaxMW: number; // Col E: 33kV NKT (KNA) 30-Min Max MW
+  oil33MaxMW: number; // Col F: 33kV Oil (KNA) 30-Min Max MW
+}
+
+export interface DailyHourlyLoadCurveRecord {
+  date: string; // YYYY-MM-DD
+  hours: HourlyLoadCurveRow[]; // 48 rows per day (every 30 minutes: 00:00-00:30 to 23:30-24:00)
+}
+
+export interface HourlyLoadCurveSummaryStats {
+  totalDays: number;
+  totalHours: number; // Total 30-minute interval rows across all recorded days
+  ckt3PeakMW: number;
+  ckt3AvgHourlyMaxMW: number;
+  ckt2PeakMW: number;
+  ckt2AvgHourlyMaxMW: number;
+  nkt33PeakMW: number;
+  nkt33AvgHourlyMaxMW: number;
+  oil33PeakMW: number;
+  oil33AvgHourlyMaxMW: number;
+}
+
+export function formatHalfHourPeriodLabel(slotIdx: number): string {
+  const idx = Math.max(0, Math.min(47, Math.floor(slotIdx)));
+  const startMin = idx * 30;
+  const endMin = (idx + 1) * 30;
+  const h0 = Math.floor(startMin / 60);
+  const m0 = startMin % 60;
+  const h1 = Math.floor(endMin / 60);
+  const m1 = endMin % 60;
+  return `${String(h0).padStart(2, '0')}:${String(m0).padStart(2, '0')}-${String(h1).padStart(2, '0')}:${String(m1).padStart(2, '0')}`;
+}
+
+export function parseHalfHourIndexFromLabel(rawPeriod: any, fallbackIdx = 0): number {
+  const s = String(rawPeriod ?? '').trim();
+  if (!s) return Math.max(0, Math.min(47, fallbackIdx));
+  const m = s.match(/^(\d{1,2})[:.](\d{2})/);
+  if (m) {
+    const h = parseInt(m[1], 10);
+    const min = parseInt(m[2], 10);
+    if (h >= 0 && h <= 23) {
+      return h * 2 + (min >= 30 ? 1 : 0);
+    }
+  }
+  const hOnly = s.match(/^(\d{1,2})[:.]/);
+  if (hOnly) {
+    const h = parseInt(hOnly[1], 10);
+    if (h >= 0 && h <= 23) return h * 2;
+  }
+  const num = parseInt(s, 10);
+  if (!isNaN(num) && num >= 0 && num <= 47) return num;
+  return Math.max(0, Math.min(47, fallbackIdx));
+}
+
+/**
+ * Extracts 48 every-30-minute maximum power records (00:00-00:30 to 23:30-24:00)
+ * for all 4 circuits from a Target Folder 2 DailyPowerSummary.
+ */
+export function extractDailyHourlyLoadCurveRecord(
+  dateKey: string,
+  summary?: DailyPowerSummary | null
+): DailyHourlyLoadCurveRecord {
+  const validSummary = summary && !isSyntheticPowerSummary(summary) ? summary : null;
+  const dataPoints = validSummary?.dataPoints || [];
+  const hours: HourlyLoadCurveRow[] = [];
+
+  for (let slot = 0; slot < 48; slot++) {
+    const startMin = slot * 30;
+    const endMin = (slot + 1) * 30;
+    const ptsInSlot = dataPoints.filter(
+      (p) => p.timeMinutes >= startMin && p.timeMinutes < endMin
+    );
+
+    let maxCkt3 = 0;
+    let maxCkt2 = 0;
+    let maxNkt = 0;
+    let maxOil = 0;
+
+    for (const pt of ptsInSlot) {
+      if (Number.isFinite(pt.kmbCircuit3) && pt.kmbCircuit3 > maxCkt3) {
+        maxCkt3 = pt.kmbCircuit3;
+      }
+      if (Number.isFinite(pt.kmaCircuit2) && pt.kmaCircuit2 > maxCkt2) {
+        maxCkt2 = pt.kmaCircuit2;
+      }
+      if (Number.isFinite(pt.knaNkt) && pt.knaNkt > maxNkt) {
+        maxNkt = pt.knaNkt;
+      }
+      if (Number.isFinite(pt.knaOilFilled) && pt.knaOilFilled > maxOil) {
+        maxOil = pt.knaOilFilled;
+      }
+    }
+
+    hours.push({
+      date: dateKey,
+      hourly: formatHalfHourPeriodLabel(slot),
+      hourIndex: slot,
+      ckt3MaxMW: Number(maxCkt3.toFixed(2)),
+      ckt2MaxMW: Number(maxCkt2.toFixed(2)),
+      nkt33MaxMW: Number(maxNkt.toFixed(2)),
+      oil33MaxMW: Number(maxOil.toFixed(2)),
+    });
+  }
+
+  return {
+    date: dateKey,
+    hours,
+  };
+}
+
+/**
+ * Computes summary statistics across all dates and 30-minute intervals in the Hourly Load Curve Database.
+ */
+export function computeHourlyLoadCurveSummaryStats(
+  recordsMap: Map<string, DailyHourlyLoadCurveRecord>
+): HourlyLoadCurveSummaryStats {
+  const sortedDates = Array.from(recordsMap.keys()).sort();
+  let totalHours = 0;
+  let ckt3PeakMW = 0;
+  let ckt2PeakMW = 0;
+  let nkt33PeakMW = 0;
+  let oil33PeakMW = 0;
+  let sumCkt3 = 0;
+  let sumCkt2 = 0;
+  let sumNkt = 0;
+  let sumOil = 0;
+
+  for (const d of sortedDates) {
+    const rec = recordsMap.get(d);
+    if (!rec || !rec.hours) continue;
+    for (const hr of rec.hours) {
+      totalHours += 1;
+      const c3 = hr.ckt3MaxMW || 0;
+      const c2 = hr.ckt2MaxMW || 0;
+      const nkt = hr.nkt33MaxMW || 0;
+      const oil = hr.oil33MaxMW || 0;
+
+      if (c3 > ckt3PeakMW) ckt3PeakMW = c3;
+      if (c2 > ckt2PeakMW) ckt2PeakMW = c2;
+      if (nkt > nkt33PeakMW) nkt33PeakMW = nkt;
+      if (oil > oil33PeakMW) oil33PeakMW = oil;
+
+      sumCkt3 += c3;
+      sumCkt2 += c2;
+      sumNkt += nkt;
+      sumOil += oil;
+    }
+  }
+
+  const denom = totalHours > 0 ? totalHours : 1;
+
+  return {
+    totalDays: sortedDates.length,
+    totalHours,
+    ckt3PeakMW: Number(ckt3PeakMW.toFixed(2)),
+    ckt3AvgHourlyMaxMW: Number((sumCkt3 / denom).toFixed(2)),
+    ckt2PeakMW: Number(ckt2PeakMW.toFixed(2)),
+    ckt2AvgHourlyMaxMW: Number((sumCkt2 / denom).toFixed(2)),
+    nkt33PeakMW: Number(nkt33PeakMW.toFixed(2)),
+    nkt33AvgHourlyMaxMW: Number((sumNkt / denom).toFixed(2)),
+    oil33PeakMW: Number(oil33PeakMW.toFixed(2)),
+    oil33AvgHourlyMaxMW: Number((sumOil / denom).toFixed(2)),
+  };
+}
+
+/**
+ * Builds the 1-Sheet Excel (.xlsx) Workbook for the Hourly Load Curve Database (Every 30 Minutes):
+ * - Single worksheet: "Hourly Load Curve (4 Circuits)"
+ * - Col A: Date (YYYY-MM-DD)
+ * - Col B: Hourly (00:00-00:30 to 23:30-24:00, every 30 minutes)
+ * - Col C: 115kV_Ckt3_Max_MW (KMB · 03YB01)
+ * - Col D: 115kV_Ckt2_Max_MW (KMA · 04YB01)
+ * - Col E: 33kV_NKT_Max_MW (KNA · 07WB01)
+ * - Col F: 33kV_Oil_Max_MW (KNA · 10WB01)
+ */
+export function buildHourlyLoadCurveWorkbook(
+  recordsMap: Map<string, DailyHourlyLoadCurveRecord>
+): XLSX.WorkBook {
+  const wb = XLSX.utils.book_new();
+  const sortedDates = Array.from(recordsMap.keys()).sort();
+
+  const aoa: any[][] = [
+    [
+      'Date',
+      'Hourly',
+      '115kV_Ckt3_Max_MW',
+      '115kV_Ckt2_Max_MW',
+      '33kV_NKT_Max_MW',
+      '33kV_Oil_Max_MW',
+    ],
+  ];
+
+  for (const d of sortedDates) {
+    const rec = recordsMap.get(d);
+    if (!rec || !rec.hours) continue;
+    for (const hr of rec.hours) {
+      aoa.push([
+        hr.date,
+        hr.hourly,
+        Number((hr.ckt3MaxMW ?? 0).toFixed(2)),
+        Number((hr.ckt2MaxMW ?? 0).toFixed(2)),
+        Number((hr.nkt33MaxMW ?? 0).toFixed(2)),
+        Number((hr.oil33MaxMW ?? 0).toFixed(2)),
+      ]);
+    }
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [
+    { wch: 14 }, // Col A: Date
+    { wch: 15 }, // Col B: Hourly (00:00-00:30 .. 23:30-24:00)
+    { wch: 22 }, // Col C: 115kV_Ckt3_Max_MW
+    { wch: 22 }, // Col D: 115kV_Ckt2_Max_MW
+    { wch: 20 }, // Col E: 33kV_NKT_Max_MW
+    { wch: 20 }, // Col F: 33kV_Oil_Max_MW
+  ];
+
+  XLSX.utils.book_append_sheet(wb, ws, HOURLY_LOAD_CURVE_SHEET_NAME);
+  return wb;
 }
