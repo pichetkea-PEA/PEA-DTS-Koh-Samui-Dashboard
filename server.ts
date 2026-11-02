@@ -2506,6 +2506,17 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
         }
       }
 
+      // Also scan & sync Page 2.6's 2 shared Google Drive folders concurrently
+      let p26SyncRes: any = null;
+      try {
+        p26SyncRes = await scanAndSyncPage26SharedFolders({
+          authHeader,
+          forceDownload: forceDl,
+        });
+      } catch (e) {
+        console.warn('Auto-sync Page 2.6 folders warning:', e);
+      }
+
       const p1Info = currentDb?.panel1?.info || {};
       const p2Info = currentDb?.panel2?.info || {};
       const p3Info = currentDb?.panel3?.info || {};
@@ -2513,7 +2524,7 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
       return {
         success: true,
         scannedAt: new Date().toISOString(),
-        changesDetected: anyUpdated,
+        changesDetected: anyUpdated || Boolean(p26SyncRes?.changesDetected),
         panel1: {
           changed: p1Changed,
           updated: p1Updated,
@@ -2541,6 +2552,7 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
           dateRange: p3Info.dateRange || { firstDate: '', latestDate: '' },
           recordCount: p3Info.recordCount || 0,
         },
+        page26: p26SyncRes || undefined,
       };
     } finally {
       activePublicFolderSyncPromise = null;
@@ -3144,6 +3156,28 @@ app.get('/api/page26-data', (_req, res) => {
     return res.status(500).json({
       success: false,
       error: err?.message || 'Failed to get Page 2.6 data',
+    });
+  }
+});
+
+app.get('/api/page26-sync', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || (req.query.token ? `Bearer ${req.query.token}` : '');
+    const syncRes = await scanAndSyncPage26SharedFolders({
+      opCondFolderUrl: req.query.opCondFolderUrl ? String(req.query.opCondFolderUrl) : undefined,
+      loadCurveFolderUrl: req.query.loadCurveFolderUrl ? String(req.query.loadCurveFolderUrl) : undefined,
+      authHeader,
+      forceDownload: req.query.force === '1',
+    });
+    return res.json({
+      ...syncRes,
+      opCondData: cachedPage26OpCondData,
+      loadCurveData: cachedPage26LoadCurveData,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to sync Page 2.6 shared Google Drive folders',
     });
   }
 });

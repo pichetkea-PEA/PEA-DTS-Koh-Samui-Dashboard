@@ -17,7 +17,6 @@ import {
   ChevronUp,
   Minimize2,
   Maximize2,
-  RefreshCw,
   ExternalLink,
   Activity,
   GitCompare,
@@ -42,6 +41,12 @@ import {
   PowerCircuitKey,
   PowerOperateConditionKey,
   PowerCircuitMeta,
+  Page26OpCondDataset,
+  Page26LoadCurveDataset,
+  getPage26OpCondDataset,
+  getPage26LoadCurveDataset,
+  ensurePage26DatasetsLoaded,
+  subscribeToOrgDatabase,
 } from '../services/orgDatabaseStorage';
 import { GlobalStatFilterMode } from './PublicTempStatisticsPage';
 
@@ -82,45 +87,12 @@ interface PeriodBucket {
   dates: string[];
 }
 
-export interface Page26OpCondDataset {
-  folderUrl: string;
-  fileName: string;
-  fileId: string;
-  fileSize?: number;
-  versionSignature?: string;
-  updatedAt: string;
-  totalDates: number;
-  dateRange: { firstDate: string; latestDate: string };
-  dates: string[];
-  // byDate[YYYY-MM-DD] = 4 circuits x 4 conditions (minutes in each condition)
-  byDate: Record<string, number[][]>;
-}
-
-export interface Page26LoadCurveDataset {
-  folderUrl: string;
-  fileName: string;
-  fileId: string;
-  fileSize?: number;
-  versionSignature?: string;
-  updatedAt: string;
-  totalDates: number;
-  dateRange: { firstDate: string; latestDate: string };
-  slots: string[];
-  dates: string[];
-  // byDate[YYYY-MM-DD] = 48 half-hour slots x 4 circuits [ckt3MW, ckt2MW, nkt33MW, oil33MW]
-  byDate: Record<string, number[][]>;
-}
-
 interface PublicPowerStatisticsPageProps {
   dbConfig: OrgDatabaseConfig;
 }
 
 const ALL_CIRCUIT_KEYS: PowerCircuitKey[] = ['ckt3', 'ckt2', 'nkt33', 'oil33'];
 const ALL_RANGE_KEYS: PowerOperateConditionKey[] = ['normal', 'emergency', 'critical', 'overload'];
-
-// Module-level memory cache so switching tabs is instantaneous
-let memoryOpCondDataset: Page26OpCondDataset | null = null;
-let memoryLoadCurveDataset: Page26LoadCurveDataset | null = null;
 
 function classifyCircuitCondition(circuit: PowerCircuitMeta, mw: number): {
   key: PowerOperateConditionKey;
@@ -140,105 +112,51 @@ function classifyCircuitCondition(circuit: PowerCircuitMeta, mw: number): {
 }
 
 export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps> = () => {
-  const [opCondData, setOpCondData] = useState<Page26OpCondDataset | null>(() => memoryOpCondDataset);
-  const [loadCurveData, setLoadCurveData] = useState<Page26LoadCurveDataset | null>(() => memoryLoadCurveDataset);
-  const [isLoadingData, setIsLoadingData] = useState<boolean>(!memoryOpCondDataset || !memoryLoadCurveDataset);
-  const [isSyncingDrive, setIsSyncingDrive] = useState<boolean>(false);
-  const [syncMessage, setSyncMessage] = useState<string>('');
+  const [opCondData, setOpCondData] = useState<Page26OpCondDataset | null>(() => getPage26OpCondDataset());
+  const [loadCurveData, setLoadCurveData] = useState<Page26LoadCurveDataset | null>(() =>
+    getPage26LoadCurveDataset()
+  );
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(
+    () => !getPage26OpCondDataset() || !getPage26LoadCurveDataset()
+  );
 
-  // Load Page 2.6 datasets from server / static bundle on mount
+  // Automatically stay synchronized with the global opening database loader & background sync
   useEffect(() => {
     let mounted = true;
-    async function loadPage26Datasets() {
-      try {
-        const res = await fetch('/api/page26-data');
-        if (res.ok) {
-          const json = await res.json();
-          if (json?.opCond?.dates?.length && json?.loadCurve?.dates?.length) {
-            memoryOpCondDataset = json.opCond;
-            memoryLoadCurveDataset = json.loadCurve;
-            if (mounted) {
-              setOpCondData(json.opCond);
-              setLoadCurveData(json.loadCurve);
-              setIsLoadingData(false);
-            }
-            return;
-          }
-        }
-      } catch {
-        // fallback to static JSON files
-      }
 
-      try {
-        const [opRes, lcRes] = await Promise.all([
-          fetch('/data/page26_op_cond.json'),
-          fetch('/data/page26_load_curve.json'),
-        ]);
-        if (opRes.ok) {
-          const opJson = await opRes.json();
-          memoryOpCondDataset = opJson;
-          if (mounted) setOpCondData(opJson);
-        }
-        if (lcRes.ok) {
-          const lcJson = await lcRes.json();
-          memoryLoadCurveDataset = lcJson;
-          if (mounted) setLoadCurveData(lcJson);
-        }
-      } catch (e) {
-        console.warn('Fallback static Page 2.6 load warning:', e);
-      } finally {
+    const syncFromStore = () => {
+      if (!mounted) return;
+      const latestOp = getPage26OpCondDataset();
+      const latestLc = getPage26LoadCurveDataset();
+      if (latestOp) setOpCondData(latestOp);
+      if (latestLc) setLoadCurveData(latestLc);
+      if (latestOp && latestLc) {
+        setIsLoadingData(false);
+      }
+    };
+
+    syncFromStore();
+
+    ensurePage26DatasetsLoaded(false)
+      .then(({ opCond, loadCurve }) => {
+        if (!mounted) return;
+        if (opCond) setOpCondData(opCond);
+        if (loadCurve) setLoadCurveData(loadCurve);
+        setIsLoadingData(false);
+      })
+      .catch(() => {
         if (mounted) setIsLoadingData(false);
-      }
-    }
+      });
 
-    if (!memoryOpCondDataset || !memoryLoadCurveDataset) {
-      loadPage26Datasets();
-    } else {
-      setIsLoadingData(false);
-    }
+    const unsubscribe = subscribeToOrgDatabase(() => {
+      syncFromStore();
+    });
 
     return () => {
       mounted = false;
+      unsubscribe();
     };
   }, []);
-
-  const handleSyncSharedFolders = async () => {
-    setIsSyncingDrive(true);
-    setSyncMessage('Scanning Shared Folder 1 & Shared Folder 2 on Google Drive...');
-    try {
-      const res = await fetch('/api/page26-sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          opCondFolderUrl: SHARED_FOLDER_1_OP_COND_URL,
-          loadCurveFolderUrl: SHARED_FOLDER_2_LOAD_CURVE_URL,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.opCondData?.dates?.length) {
-          memoryOpCondDataset = data.opCondData;
-          setOpCondData(data.opCondData);
-        }
-        if (data?.loadCurveData?.dates?.length) {
-          memoryLoadCurveDataset = data.loadCurveData;
-          setLoadCurveData(data.loadCurveData);
-        }
-        setSyncMessage(
-          data.changesDetected
-            ? 'Updated with newest files from Google Drive folders!'
-            : `Verified latest files (${data?.opCond?.totalDates || 484} dates) in both Google Drive folders.`
-        );
-      } else {
-        setSyncMessage('Could not reach sync endpoint; using cached dataset.');
-      }
-    } catch {
-      setSyncMessage('Using cached Google Drive dataset.');
-    } finally {
-      setIsSyncingDrive(false);
-      setTimeout(() => setSyncMessage(''), 5000);
-    }
-  };
 
   // ============================================================================
   // CHART 1: "OPERATION CONDITION DATABASE" STATE & GLOBAL FILTER
@@ -759,25 +677,17 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleSyncSharedFolders}
-              disabled={isSyncingDrive}
-              className="px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 text-xs font-mono font-bold flex items-center gap-2 cursor-pointer transition-all disabled:opacity-50"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingDrive ? 'animate-spin' : ''}`} />
-              <span>{isSyncingDrive ? 'Syncing Drive Folders...' : 'Sync Shared Google Drive Folders'}</span>
-            </button>
+          <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
+            <div className="px-3 py-1.5 rounded-xl bg-slate-900/90 border border-emerald-500/30 text-emerald-300 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>Backdoor Pre-Calculated Feed Active</span>
+            </div>
+            <div className="px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-700 text-slate-300 flex items-center gap-1.5">
+              <Database className="w-3.5 h-3.5 text-amber-400" />
+              <span>{(opCondData?.totalDates || allDatesChart1.length).toLocaleString()} Recorded Days</span>
+            </div>
           </div>
         </div>
-
-        {syncMessage && (
-          <div className="px-3 py-2 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-200 text-xs font-mono flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>{syncMessage}</span>
-          </div>
-        )}
 
         {/* Active 2 Shared Google Drive Folder Data Sources */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 pt-1">

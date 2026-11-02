@@ -547,6 +547,153 @@ export function getPanel3StatisticsSummary(): Panel3StatisticsSummary | null {
   }
   return memoryPanel3StatsSummary;
 }
+
+export interface Page26OpCondDataset {
+  folderUrl: string;
+  fileName: string;
+  fileId: string;
+  fileSize?: number;
+  versionSignature?: string;
+  updatedAt: string;
+  totalDates: number;
+  dateRange: { firstDate: string; latestDate: string };
+  dates: string[];
+  byDate: Record<string, number[][]>;
+}
+
+export interface Page26LoadCurveDataset {
+  folderUrl: string;
+  fileName: string;
+  fileId: string;
+  fileSize?: number;
+  versionSignature?: string;
+  updatedAt: string;
+  totalDates: number;
+  dateRange: { firstDate: string; latestDate: string };
+  slots: string[];
+  dates: string[];
+  byDate: Record<string, number[][]>;
+}
+
+let memoryPage26OpCondDataset: Page26OpCondDataset | null = null;
+let memoryPage26LoadCurveDataset: Page26LoadCurveDataset | null = null;
+let fetchingPage26Promise: Promise<{
+  opCond: Page26OpCondDataset | null;
+  loadCurve: Page26LoadCurveDataset | null;
+}> | null = null;
+
+export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<{
+  opCond: Page26OpCondDataset | null;
+  loadCurve: Page26LoadCurveDataset | null;
+}> {
+  if (
+    !forceRefresh &&
+    memoryPage26OpCondDataset?.dates?.length &&
+    memoryPage26LoadCurveDataset?.dates?.length
+  ) {
+    return {
+      opCond: memoryPage26OpCondDataset,
+      loadCurve: memoryPage26LoadCurveDataset,
+    };
+  }
+  if (!forceRefresh && fetchingPage26Promise) {
+    return fetchingPage26Promise;
+  }
+
+  fetchingPage26Promise = (async () => {
+    const cacheBust = forceRefresh ? `?t=${Date.now()}` : '';
+    const fetchOpts: RequestInit = forceRefresh ? { cache: 'no-store' } : {};
+
+    // 1. Try unified fast server endpoint /api/page26-data
+    try {
+      const res = await fetch(`/api/page26-data${cacheBust}`, fetchOpts);
+      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+        const json = await res.json();
+        if (json?.opCond?.dates?.length && json?.loadCurve?.dates?.length) {
+          memoryPage26OpCondDataset = json.opCond;
+          memoryPage26LoadCurveDataset = json.loadCurve;
+          void idbSet('page26_op_cond', json.opCond);
+          void idbSet('page26_load_curve', json.loadCurve);
+          notifyListeners();
+          return {
+            opCond: memoryPage26OpCondDataset,
+            loadCurve: memoryPage26LoadCurveDataset,
+          };
+        }
+      }
+    } catch {}
+
+    // 2. Fallback to static pre-bundled JSON files (/data/page26_op_cond.json & /data/page26_load_curve.json)
+    try {
+      const [opRes, lcRes] = await Promise.all([
+        fetch(`/data/page26_op_cond.json${cacheBust}`, fetchOpts),
+        fetch(`/data/page26_load_curve.json${cacheBust}`, fetchOpts),
+      ]);
+      if (opRes.ok && (opRes.headers.get('content-type') || '').includes('application/json')) {
+        const opJson = await opRes.json();
+        if (opJson?.dates?.length) {
+          memoryPage26OpCondDataset = opJson;
+          void idbSet('page26_op_cond', opJson);
+        }
+      }
+      if (lcRes.ok && (lcRes.headers.get('content-type') || '').includes('application/json')) {
+        const lcJson = await lcRes.json();
+        if (lcJson?.dates?.length) {
+          memoryPage26LoadCurveDataset = lcJson;
+          void idbSet('page26_load_curve', lcJson);
+        }
+      }
+      if (memoryPage26OpCondDataset?.dates?.length || memoryPage26LoadCurveDataset?.dates?.length) {
+        notifyListeners();
+        return {
+          opCond: memoryPage26OpCondDataset,
+          loadCurve: memoryPage26LoadCurveDataset,
+        };
+      }
+    } catch {}
+
+    // 3. Fallback to IndexedDB cache
+    try {
+      const [idbOp, idbLc] = await Promise.all([
+        idbGet<Page26OpCondDataset>('page26_op_cond'),
+        idbGet<Page26LoadCurveDataset>('page26_load_curve'),
+      ]);
+      if (idbOp?.dates?.length) memoryPage26OpCondDataset = idbOp;
+      if (idbLc?.dates?.length) memoryPage26LoadCurveDataset = idbLc;
+      if (memoryPage26OpCondDataset || memoryPage26LoadCurveDataset) {
+        notifyListeners();
+      }
+    } catch {}
+
+    return {
+      opCond: memoryPage26OpCondDataset,
+      loadCurve: memoryPage26LoadCurveDataset,
+    };
+  })();
+
+  try {
+    return await fetchingPage26Promise;
+  } finally {
+    fetchingPage26Promise = null;
+  }
+}
+
+export function getPage26OpCondDataset(): Page26OpCondDataset | null {
+  initFromStorage();
+  if (!memoryPage26OpCondDataset) {
+    void ensurePage26DatasetsLoaded(false);
+  }
+  return memoryPage26OpCondDataset;
+}
+
+export function getPage26LoadCurveDataset(): Page26LoadCurveDataset | null {
+  initFromStorage();
+  if (!memoryPage26LoadCurveDataset) {
+    void ensurePage26DatasetsLoaded(false);
+  }
+  return memoryPage26LoadCurveDataset;
+}
+
 let hasStartedAsyncHydration = false;
 
 const IDB_NAME = 'dts_public_default_db_idb_v2';
@@ -832,6 +979,9 @@ async function hydrateFromPublicDefaultDatabases(): Promise<void> {
       localStorage.setItem(STORAGE_KEY_THREE_PANEL_LINKS, JSON.stringify(serverData.linksConfig));
     } catch {}
   }
+
+  // Also pre-hydrate Page 2.6 Operation Condition & 30-Min Load Curve datasets
+  void ensurePage26DatasetsLoaded(false);
 
   if (didUpdate) {
     notifyListeners();
@@ -3723,9 +3873,20 @@ export async function syncAllPublicSharedTargetFolders(
       result.panel3 = { success: false, count: 0, error: formatErrorMessage(e) };
     }
   }
-  onProgress?.(97, 'Shared Folder 3 Synchronized (100%)');
+  onProgress?.(96, 'Shared Folder 3 Synchronized (100%)');
 
-  // 4. Finalization & listener notification: (98% - 100%)
+  // 4. Synchronize Page 2.6 Operation Condition Database & 30-Min Load Curve Database (96% - 99%)
+  try {
+    onProgress?.(
+      97,
+      'Synchronizing Power Operating Condition & 30-Min Load Curve Databases (Page 2.6)...'
+    );
+    await ensurePage26DatasetsLoaded(true);
+  } catch (e) {
+    console.warn('Page 2.6 auto-load warning:', e);
+  }
+
+  // 5. Finalization & listener notification: (99% - 100%)
   onProgress?.(99, 'Finalizing Public Dashboard Views [2.1, 2.2, 2.3, 2.4, 2.5, 2.6]...');
   notifyListeners();
   await new Promise((r) => setTimeout(r, 30));
