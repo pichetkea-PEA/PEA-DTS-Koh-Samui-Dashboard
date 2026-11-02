@@ -48,6 +48,10 @@ import {
   ensurePage26DatasetsLoaded,
   subscribeToOrgDatabase,
 } from '../services/orgDatabaseStorage';
+import {
+  BUNDLED_PAGE26_OP_COND,
+  BUNDLED_PAGE26_LOAD_CURVE,
+} from '../data/page26BundledData';
 import { GlobalStatFilterMode } from './PublicTempStatisticsPage';
 
 export const SHARED_FOLDER_1_OP_COND_URL =
@@ -112,13 +116,15 @@ function classifyCircuitCondition(circuit: PowerCircuitMeta, mw: number): {
 }
 
 export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps> = () => {
-  const [opCondData, setOpCondData] = useState<Page26OpCondDataset | null>(() => getPage26OpCondDataset());
-  const [loadCurveData, setLoadCurveData] = useState<Page26LoadCurveDataset | null>(() =>
-    getPage26LoadCurveDataset()
-  );
-  const [isLoadingData, setIsLoadingData] = useState<boolean>(
-    () => !getPage26OpCondDataset() || !getPage26LoadCurveDataset()
-  );
+  const [opCondData, setOpCondData] = useState<Page26OpCondDataset>(() => {
+    const storeOp = getPage26OpCondDataset();
+    return storeOp?.dates?.length ? storeOp : BUNDLED_PAGE26_OP_COND;
+  });
+  const [loadCurveData, setLoadCurveData] = useState<Page26LoadCurveDataset>(() => {
+    const storeLc = getPage26LoadCurveDataset();
+    return storeLc?.dates?.length ? storeLc : BUNDLED_PAGE26_LOAD_CURVE;
+  });
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(false);
 
   // Automatically stay synchronized with the global opening database loader & background sync
   useEffect(() => {
@@ -128,11 +134,9 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
       if (!mounted) return;
       const latestOp = getPage26OpCondDataset();
       const latestLc = getPage26LoadCurveDataset();
-      if (latestOp) setOpCondData(latestOp);
-      if (latestLc) setLoadCurveData(latestLc);
-      if (latestOp && latestLc) {
-        setIsLoadingData(false);
-      }
+      if (latestOp?.dates?.length) setOpCondData(latestOp);
+      if (latestLc?.dates?.length) setLoadCurveData(latestLc);
+      setIsLoadingData(false);
     };
 
     syncFromStore();
@@ -140,8 +144,8 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
     ensurePage26DatasetsLoaded(false)
       .then(({ opCond, loadCurve }) => {
         if (!mounted) return;
-        if (opCond) setOpCondData(opCond);
-        if (loadCurve) setLoadCurveData(loadCurve);
+        if (opCond?.dates?.length) setOpCondData(opCond);
+        if (loadCurve?.dates?.length) setLoadCurveData(loadCurve);
         setIsLoadingData(false);
       })
       .catch(() => {
@@ -181,12 +185,22 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
 
   // Global Filter State (Applies to Chart 1: Operation Condition Database)
   const [globalMode, setGlobalMode] = useState<GlobalStatFilterMode>('year_to_year');
-  const [selectedYears, setSelectedYears] = useState<string[]>([]);
+  const [selectedYears, setSelectedYears] = useState<string[]>(() => {
+    const yrs = new Set<string>();
+    for (const d of BUNDLED_PAGE26_OP_COND.dates || []) {
+      if (d && d.length >= 4) yrs.add(d.slice(0, 4));
+    }
+    return Array.from(yrs).sort();
+  });
   const [selectedMonthAcrossYears, setSelectedMonthAcrossYears] = useState<string>('09');
   const [selectedSingleYearForMonths, setSelectedSingleYearForMonths] = useState<string>('2026');
   const [selectedMonthsInYear, setSelectedMonthsInYear] = useState<string[]>([]);
-  const [customStartDate, setCustomStartDate] = useState<string>('');
-  const [customEndDate, setCustomEndDate] = useState<string>('');
+  const [customStartDate, setCustomStartDate] = useState<string>(
+    () => BUNDLED_PAGE26_OP_COND.dates[0] || '2021-11-28'
+  );
+  const [customEndDate, setCustomEndDate] = useState<string>(
+    () => BUNDLED_PAGE26_OP_COND.dates[BUNDLED_PAGE26_OP_COND.dates.length - 1] || '2026-10-26'
+  );
 
   // Local Built-in Chart 1 Filters
   const [selectedCircuits, setSelectedCircuits] = useState<PowerCircuitKey[]>([...ALL_CIRCUIT_KEYS]);
@@ -512,8 +526,12 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
   // ============================================================================
   const allDatesChart2 = useMemo(() => loadCurveData?.dates || [], [loadCurveData]);
   const [chart2Mode, setChart2Mode] = useState<'single' | 'dual'>('single');
-  const [chart2Date1, setChart2Date1] = useState<string>('');
-  const [chart2Date2, setChart2Date2] = useState<string>('');
+  const [chart2Date1, setChart2Date1] = useState<string>(
+    () => BUNDLED_PAGE26_LOAD_CURVE.dates[BUNDLED_PAGE26_LOAD_CURVE.dates.length - 1] || '2026-10-26'
+  );
+  const [chart2Date2, setChart2Date2] = useState<string>(
+    () => BUNDLED_PAGE26_LOAD_CURVE.dates[Math.max(0, BUNDLED_PAGE26_LOAD_CURVE.dates.length - 2)] || '2026-10-25'
+  );
   const [chart2CircuitKey, setChart2CircuitKey] = useState<PowerCircuitKey>('ckt3');
   const [isChart2FilterMinimized, setIsChart2FilterMinimized] = useState<boolean>(false);
 

@@ -21,6 +21,10 @@ import {
   getThermalZoneInfo,
   evaluateSectionConductorTemp,
 } from '../data/cableCircuitStructure';
+import {
+  BUNDLED_PAGE26_OP_COND,
+  BUNDLED_PAGE26_LOAD_CURVE,
+} from '../data/page26BundledData';
 import * as XLSX from 'xlsx';
 
 export interface OrgDatabaseConfig {
@@ -575,8 +579,8 @@ export interface Page26LoadCurveDataset {
   byDate: Record<string, number[][]>;
 }
 
-let memoryPage26OpCondDataset: Page26OpCondDataset | null = null;
-let memoryPage26LoadCurveDataset: Page26LoadCurveDataset | null = null;
+let memoryPage26OpCondDataset: Page26OpCondDataset | null = BUNDLED_PAGE26_OP_COND;
+let memoryPage26LoadCurveDataset: Page26LoadCurveDataset | null = BUNDLED_PAGE26_LOAD_CURVE;
 let fetchingPage26Promise: Promise<{
   opCond: Page26OpCondDataset | null;
   loadCurve: Page26LoadCurveDataset | null;
@@ -586,6 +590,13 @@ export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<
   opCond: Page26OpCondDataset | null;
   loadCurve: Page26LoadCurveDataset | null;
 }> {
+  if (!memoryPage26OpCondDataset?.dates?.length) {
+    memoryPage26OpCondDataset = BUNDLED_PAGE26_OP_COND;
+  }
+  if (!memoryPage26LoadCurveDataset?.dates?.length) {
+    memoryPage26LoadCurveDataset = BUNDLED_PAGE26_LOAD_CURVE;
+  }
+
   if (
     !forceRefresh &&
     memoryPage26OpCondDataset?.dates?.length &&
@@ -607,7 +618,7 @@ export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<
     // 1. Try unified fast server endpoint /api/page26-data
     try {
       const res = await fetch(`/api/page26-data${cacheBust}`, fetchOpts);
-      if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
+      if (res.ok) {
         const json = await res.json();
         if (json?.opCond?.dates?.length && json?.loadCurve?.dates?.length) {
           memoryPage26OpCondDataset = json.opCond;
@@ -629,14 +640,14 @@ export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<
         fetch(`/data/page26_op_cond.json${cacheBust}`, fetchOpts),
         fetch(`/data/page26_load_curve.json${cacheBust}`, fetchOpts),
       ]);
-      if (opRes.ok && (opRes.headers.get('content-type') || '').includes('application/json')) {
+      if (opRes.ok) {
         const opJson = await opRes.json();
         if (opJson?.dates?.length) {
           memoryPage26OpCondDataset = opJson;
           void idbSet('page26_op_cond', opJson);
         }
       }
-      if (lcRes.ok && (lcRes.headers.get('content-type') || '').includes('application/json')) {
+      if (lcRes.ok) {
         const lcJson = await lcRes.json();
         if (lcJson?.dates?.length) {
           memoryPage26LoadCurveDataset = lcJson;
@@ -660,10 +671,15 @@ export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<
       ]);
       if (idbOp?.dates?.length) memoryPage26OpCondDataset = idbOp;
       if (idbLc?.dates?.length) memoryPage26LoadCurveDataset = idbLc;
-      if (memoryPage26OpCondDataset || memoryPage26LoadCurveDataset) {
-        notifyListeners();
-      }
     } catch {}
+
+    if (!memoryPage26OpCondDataset?.dates?.length) {
+      memoryPage26OpCondDataset = BUNDLED_PAGE26_OP_COND;
+    }
+    if (!memoryPage26LoadCurveDataset?.dates?.length) {
+      memoryPage26LoadCurveDataset = BUNDLED_PAGE26_LOAD_CURVE;
+    }
+    notifyListeners();
 
     return {
       opCond: memoryPage26OpCondDataset,
@@ -678,17 +694,19 @@ export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<
   }
 }
 
-export function getPage26OpCondDataset(): Page26OpCondDataset | null {
+export function getPage26OpCondDataset(): Page26OpCondDataset {
   initFromStorage();
-  if (!memoryPage26OpCondDataset) {
+  if (!memoryPage26OpCondDataset?.dates?.length) {
+    memoryPage26OpCondDataset = BUNDLED_PAGE26_OP_COND;
     void ensurePage26DatasetsLoaded(false);
   }
   return memoryPage26OpCondDataset;
 }
 
-export function getPage26LoadCurveDataset(): Page26LoadCurveDataset | null {
+export function getPage26LoadCurveDataset(): Page26LoadCurveDataset {
   initFromStorage();
-  if (!memoryPage26LoadCurveDataset) {
+  if (!memoryPage26LoadCurveDataset?.dates?.length) {
+    memoryPage26LoadCurveDataset = BUNDLED_PAGE26_LOAD_CURVE;
     void ensurePage26DatasetsLoaded(false);
   }
   return memoryPage26LoadCurveDataset;
