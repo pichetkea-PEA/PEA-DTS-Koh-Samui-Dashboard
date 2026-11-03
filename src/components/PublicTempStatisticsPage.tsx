@@ -88,6 +88,8 @@ const IndividualTempBarChartCard: React.FC<{
   globalMode: GlobalStatFilterMode;
   periodBuckets: PeriodBucket[];
   activeDates: string[];
+  fallbackPrevPeriod: PeriodBucket | null;
+  isThreeComparisonMode: boolean;
   initialThresholds: ThermalZoneKey[];
 }> = ({
   chartType,
@@ -97,6 +99,8 @@ const IndividualTempBarChartCard: React.FC<{
   globalMode,
   periodBuckets,
   activeDates,
+  fallbackPrevPeriod,
+  isThreeComparisonMode,
   initialThresholds,
 }) => {
   const [localFilter, setLocalFilter] = useState<LocalTempChartFilterState>({
@@ -140,7 +144,9 @@ const IndividualTempBarChartCard: React.FC<{
     return THERMAL_ZONES_6.map((z, idx) => (keySet.has(z.key) ? idx : -1)).filter((idx) => idx >= 0);
   }, [localFilter.selectedThresholds]);
 
-  // Pre-calculate bar data for each visible slot
+  // Pre-calculate percentage and hour bar data for each visible slot
+  // Each threshold range is normalized to a percentage (%) of all recorded hours across all 6 ranges in that period
+  // so 30-day months (720 hrs) and 31-day months (744 hrs) both sum to 100.0%.
   const slotChartData = useMemo(() => {
     if (!statsSummary || !statsSummary.byDate) return [];
 
@@ -156,6 +162,18 @@ const IndividualTempBarChartCard: React.FC<{
         }
       }
 
+      const totalAllZonesHours =
+        byZoneCounts[0] +
+        byZoneCounts[1] +
+        byZoneCounts[2] +
+        byZoneCounts[3] +
+        byZoneCounts[4] +
+        byZoneCounts[5];
+
+      const byZonePcts = byZoneCounts.map((c) =>
+        totalAllZonesHours > 0 ? Number(((c / totalAllZonesHours) * 100).toFixed(2)) : 0
+      );
+
       let selectedTotal = 0;
       let dominantZoneIdx = activeZoneIndices[0] ?? 1;
       let maxZoneCount = -1;
@@ -168,9 +186,45 @@ const IndividualTempBarChartCard: React.FC<{
         }
       }
 
+      const selectedTotalPct =
+        totalAllZonesHours > 0 ? Number(((selectedTotal / totalAllZonesHours) * 100).toFixed(2)) : 0;
+
+      // Fallback previous period calculation (for single-bar comparison mode & first period bar in multi-bar mode)
+      const fallbackPrevZones = [0, 0, 0, 0, 0, 0];
+      if (fallbackPrevPeriod) {
+        for (const d of fallbackPrevPeriod.dates) {
+          const dayEntry = statsSummary.byDate[d];
+          if (!dayEntry) continue;
+          const arr = chartType === 'tf' ? dayEntry.tf?.[slot.index] : dayEntry.tc?.[slot.index];
+          if (!arr) continue;
+          for (let z = 0; z < 6; z++) {
+            fallbackPrevZones[z] += arr[z] || 0;
+          }
+        }
+      }
+      const fallbackPrevAllZonesHours =
+        fallbackPrevZones[0] +
+        fallbackPrevZones[1] +
+        fallbackPrevZones[2] +
+        fallbackPrevZones[3] +
+        fallbackPrevZones[4] +
+        fallbackPrevZones[5];
+      let fallbackPrevSelectedHours = 0;
+      for (const zIdx of activeZoneIndices) {
+        fallbackPrevSelectedHours += fallbackPrevZones[zIdx] || 0;
+      }
+      const hasSingleBarDelta = Boolean(fallbackPrevPeriod && fallbackPrevAllZonesHours > 0);
+      const fallbackPrevPct = hasSingleBarDelta
+        ? Number(((fallbackPrevSelectedHours / fallbackPrevAllZonesHours) * 100).toFixed(2))
+        : 0;
+      const singleBarDeltaPct = hasSingleBarDelta
+        ? Number((selectedTotalPct - fallbackPrevPct).toFixed(2))
+        : 0;
+
       // Period breakdown for comparison modes (Year-to-Year, Same Month Across Years, Monthly Comparison)
       const rawPeriodCounts = periodBuckets.map((pb) => {
         let count = 0;
+        const pbAllZones = [0, 0, 0, 0, 0, 0];
         const pbZones = [0, 0, 0, 0, 0, 0];
         let pbDominantZoneIdx = activeZoneIndices[0] ?? 1;
         let pbMaxZoneCount = -1;
@@ -179,12 +233,29 @@ const IndividualTempBarChartCard: React.FC<{
           if (!dayEntry) continue;
           const arr = chartType === 'tf' ? dayEntry.tf?.[slot.index] : dayEntry.tc?.[slot.index];
           if (!arr) continue;
+          for (let z = 0; z < 6; z++) {
+            pbAllZones[z] += arr[z] || 0;
+          }
           for (const zIdx of activeZoneIndices) {
             const val = arr[zIdx] || 0;
             count += val;
             pbZones[zIdx] += val;
           }
         }
+        const pbTotalAllZonesHours =
+          pbAllZones[0] +
+          pbAllZones[1] +
+          pbAllZones[2] +
+          pbAllZones[3] +
+          pbAllZones[4] +
+          pbAllZones[5];
+
+        const pbZonePcts = pbZones.map((c) =>
+          pbTotalAllZonesHours > 0 ? Number(((c / pbTotalAllZonesHours) * 100).toFixed(2)) : 0
+        );
+        const pct =
+          pbTotalAllZonesHours > 0 ? Number(((count / pbTotalAllZonesHours) * 100).toFixed(2)) : 0;
+
         for (const zIdx of activeZoneIndices) {
           if (pbZones[zIdx] >= pbMaxZoneCount) {
             pbMaxZoneCount = pbZones[zIdx];
@@ -196,93 +267,117 @@ const IndividualTempBarChartCard: React.FC<{
           label: pb.label,
           shortLabel: pb.shortLabel,
           count,
+          totalAllZonesHours: pbTotalAllZonesHours,
+          pct,
           pbZones,
+          pbZonePcts,
           pbDominantZoneIdx,
         };
       });
 
       const periodCounts = rawPeriodCounts.map((pc, pIdx) => {
         const prevCount = pIdx > 0 ? rawPeriodCounts[pIdx - 1].count : null;
+        const prevPct =
+          pIdx > 0
+            ? rawPeriodCounts[pIdx - 1].pct
+            : hasSingleBarDelta
+              ? fallbackPrevPct
+              : null;
         const deltaFromPrev = prevCount !== null ? pc.count - prevCount : null;
-        const pctFromPrev =
-          prevCount !== null && prevCount > 0
-            ? ((pc.count - prevCount) / prevCount) * 100
-            : prevCount === 0 && pc.count > 0
-              ? 100
-              : 0;
+        const deltaPctFromPrev =
+          prevPct !== null ? Number((pc.pct - prevPct).toFixed(2)) : 0;
+        const hasDelta = pIdx > 0 || hasSingleBarDelta;
         return {
           ...pc,
           deltaFromPrev,
-          pctFromPrev,
+          deltaPctFromPrev,
+          hasDelta,
         };
       });
 
       const maxPeriodCount =
         periodCounts.length > 0 ? Math.max(...periodCounts.map((p) => p.count), 0) : selectedTotal;
-      const lastPeriodCount = periodCounts.length >= 2 ? periodCounts[periodCounts.length - 1].count : selectedTotal;
-      const prevPeriodCount = periodCounts.length >= 2 ? periodCounts[periodCounts.length - 2].count : selectedTotal;
-      const deltaVsPrev = periodCounts.length >= 2 ? lastPeriodCount - prevPeriodCount : 0;
+      const maxPeriodPct =
+        periodCounts.length > 0 ? Math.max(...periodCounts.map((p) => p.pct), 0) : selectedTotalPct;
+      const lastPeriodPct = periodCounts.length >= 2 ? periodCounts[periodCounts.length - 1].pct : selectedTotalPct;
+      const prevPeriodPct = periodCounts.length >= 2 ? periodCounts[periodCounts.length - 2].pct : fallbackPrevPct;
+      const deltaPctVsPrev =
+        periodCounts.length >= 2
+          ? Number((lastPeriodPct - prevPeriodPct).toFixed(2))
+          : singleBarDeltaPct;
 
       return {
         slot,
         byZoneCounts,
+        byZonePcts,
+        totalAllZonesHours,
         selectedTotal,
+        selectedTotalPct,
         maxPeriodCount,
+        maxPeriodPct,
         dominantZoneIdx,
         periodCounts,
-        deltaVsPrev,
+        deltaPctVsPrev,
+        hasSingleBarDelta,
+        singleBarDeltaPct,
       };
     });
-  }, [statsSummary, visibleSlots, activeDates, activeZoneIndices, chartType, periodBuckets]);
+  }, [statsSummary, visibleSlots, activeDates, activeZoneIndices, chartType, periodBuckets, fallbackPrevPeriod]);
 
-  const isComparisonMode = globalMode !== 'custom_range' && periodBuckets.length > 1;
+  const isComparisonMode = isThreeComparisonMode && periodBuckets.length > 1;
 
-  // Identify highest value and max scale (uses per-period bar max when in comparison mode, or slot total in single-bar mode)
-  const { maxBarValue, highestSlotKeys, highestSlotPeriodKeys, totalHitsAcrossChart } = useMemo(() => {
-    let maxVal = 0;
+  // Identify highest percentage and max Y-axis percentage scale (0% to maxBarPct%)
+  const { maxBarPct, highestSlotKeys, totalHitsAcrossChart, totalPossibleHoursAcrossChart } = useMemo(() => {
+    let rawMaxPct = 0;
     let grandTotal = 0;
+    let grandPossible = 0;
     for (const item of slotChartData) {
       grandTotal += item.selectedTotal;
+      grandPossible += item.totalAllZonesHours;
       if (isComparisonMode) {
         for (const pc of item.periodCounts) {
-          if (pc.count > maxVal) {
-            maxVal = pc.count;
+          if (pc.pct > rawMaxPct) {
+            rawMaxPct = pc.pct;
           }
         }
       } else {
-        if (item.selectedTotal > maxVal) {
-          maxVal = item.selectedTotal;
+        if (item.selectedTotalPct > rawMaxPct) {
+          rawMaxPct = item.selectedTotalPct;
         }
       }
     }
     const highestKeys = new Set<string>();
-    const highestPeriodKeys = new Set<string>();
-    if (maxVal > 0) {
+    if (rawMaxPct > 0) {
       for (const item of slotChartData) {
         if (isComparisonMode) {
           for (const pc of item.periodCounts) {
-            if (pc.count === maxVal) {
+            if (pc.pct === rawMaxPct) {
               highestKeys.add(item.slot.key);
-              highestPeriodKeys.add(`${item.slot.key}__${pc.periodId}`);
             }
           }
-        } else if (item.selectedTotal === maxVal) {
+        } else if (item.selectedTotalPct === rawMaxPct) {
           highestKeys.add(item.slot.key);
         }
       }
     }
+    const yAxisMaxPct =
+      rawMaxPct > 80
+        ? 100
+        : rawMaxPct > 0
+          ? Math.min(100, Math.max(10, Math.ceil(rawMaxPct / 10) * 10))
+          : 100;
     return {
-      maxBarValue: maxVal,
+      maxBarPct: yAxisMaxPct,
       highestSlotKeys: highestKeys,
-      highestSlotPeriodKeys: highestPeriodKeys,
       totalHitsAcrossChart: grandTotal,
+      totalPossibleHoursAcrossChart: grandPossible,
     };
   }, [slotChartData, isComparisonMode]);
 
   const highestSlotItem = useMemo(() => {
-    if (maxBarValue <= 0) return null;
-    return slotChartData.find((item) => highestSlotKeys.has(item.slot.key)) || null;
-  }, [slotChartData, highestSlotKeys, maxBarValue]);
+    if (slotChartData.length === 0) return null;
+    return slotChartData.find((item) => highestSlotKeys.has(item.slot.key)) || slotChartData[0] || null;
+  }, [slotChartData, highestSlotKeys]);
 
   const inspectedSlotItem = useMemo(() => {
     if (hoveredSlotKey) {
@@ -370,9 +465,16 @@ const IndividualTempBarChartCard: React.FC<{
         {/* Summary KPI Badges */}
         <div className="flex flex-wrap items-center gap-2.5">
           <div className="px-3 py-1.5 rounded-xl bg-slate-900/90 border border-slate-800 text-xs font-mono">
-            <span className="text-slate-400 mr-1.5">Total Matched Records:</span>
-            <span className="text-cyan-300 font-bold">{totalHitsAcrossChart.toLocaleString()}</span>
-            <span className="text-slate-500 ml-1">hrs</span>
+            <span className="text-slate-400 mr-1.5">Active Threshold Share:</span>
+            <span className="text-cyan-300 font-bold">
+              {totalPossibleHoursAcrossChart > 0
+                ? ((totalHitsAcrossChart / totalPossibleHoursAcrossChart) * 100).toFixed(2)
+                : '0.00'}
+              %
+            </span>
+            <span className="text-slate-500 ml-1">
+              ({totalHitsAcrossChart.toLocaleString()} / {totalPossibleHoursAcrossChart.toLocaleString()} hrs)
+            </span>
           </div>
           {highestSlotItem && (
             <div
@@ -383,12 +485,12 @@ const IndividualTempBarChartCard: React.FC<{
               }}
             >
               <Award className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span className="text-amber-200 font-semibold">Highest Record:</span>
+              <span className="text-amber-200 font-semibold">Peak Share Section:</span>
               <span className="text-white font-extrabold">
                 Sec {highestSlotItem.slot.shortLabel} (
                 {isComparisonMode
-                  ? `${highestSlotItem.maxPeriodCount.toLocaleString()} hrs peak / ${highestSlotItem.selectedTotal.toLocaleString()} hrs total`
-                  : `${highestSlotItem.selectedTotal.toLocaleString()} hrs`}
+                  ? `${highestSlotItem.maxPeriodPct.toFixed(1)}% peak / ${highestSlotItem.selectedTotalPct.toFixed(1)}% avg`
+                  : `${highestSlotItem.selectedTotalPct.toFixed(1)}%`}
                 )
               </span>
             </div>
@@ -757,8 +859,8 @@ const IndividualTempBarChartCard: React.FC<{
                 <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                 <span>
                   {hoveredSlotKey && hoveredSlotKey !== highestSlotItem?.slot.key
-                    ? 'INSPECTED SECTION RECORD'
-                    : 'HIGHEST RECORD HIGHLIGHT'}
+                    ? 'INSPECTED SECTION SHARE'
+                    : 'DOMINANT SECTION SHARE'}
                 </span>
               </div>
               <div className="text-xs font-mono">
@@ -769,11 +871,11 @@ const IndividualTempBarChartCard: React.FC<{
                 </span>
               </div>
               <div className="text-xs font-mono">
-                <span className="text-slate-400">{isComparisonMode ? 'Peak Period / Total:' : 'Hit Count:'}</span>{' '}
+                <span className="text-slate-400">{isComparisonMode ? 'Peak Period / Share:' : 'Threshold Share:'}</span>{' '}
                 <span className="text-amber-300 font-extrabold text-sm">
                   {isComparisonMode
-                    ? `${inspectedSlotItem.maxPeriodCount.toLocaleString()} hrs peak (${inspectedSlotItem.selectedTotal.toLocaleString()} hrs combined)`
-                    : `${inspectedSlotItem.selectedTotal.toLocaleString()} hrs`}
+                    ? `${inspectedSlotItem.maxPeriodPct.toFixed(1)}% peak (${inspectedSlotItem.selectedTotalPct.toFixed(1)}% combined · ${inspectedSlotItem.selectedTotal.toLocaleString()} hrs)`
+                    : `${inspectedSlotItem.selectedTotalPct.toFixed(1)}% (${inspectedSlotItem.selectedTotal.toLocaleString()} / ${inspectedSlotItem.totalAllZonesHours.toLocaleString()} hrs)`}
                 </span>
               </div>
               {isComparisonMode && inspectedSlotItem.periodCounts.length >= 2 && (
@@ -785,54 +887,55 @@ const IndividualTempBarChartCard: React.FC<{
                       className="px-2 py-0.5 rounded bg-slate-950/90 border border-slate-800 text-slate-200 flex items-center gap-1"
                     >
                       <span>{pc.shortLabel}:</span>
-                      <strong className="text-cyan-300">{pc.count.toLocaleString()}</strong>
-                      {pIdx > 0 && pc.deltaFromPrev !== null && (
+                      <strong className="text-cyan-300">{pc.pct.toFixed(1)}%</strong>
+                      {(pIdx > 0 || pc.hasDelta) && (
                         <span
                           className={`text-[10px] font-bold ml-0.5 ${
-                            pc.deltaFromPrev > 0
+                            pc.deltaPctFromPrev > 0
                               ? 'text-rose-400'
-                              : pc.deltaFromPrev < 0
+                              : pc.deltaPctFromPrev < 0
                                 ? 'text-emerald-400'
                                 : 'text-slate-400'
                           }`}
                         >
-                          ({pc.deltaFromPrev > 0 ? `▲+${pc.deltaFromPrev}` : pc.deltaFromPrev < 0 ? `▼${pc.deltaFromPrev}` : '0Δ'})
+                          ({pc.deltaPctFromPrev > 0 ? `▲+${pc.deltaPctFromPrev.toFixed(1)}%` : pc.deltaPctFromPrev < 0 ? `▼${pc.deltaPctFromPrev.toFixed(1)}%` : '=0.0%'})
                         </span>
                       )}
                     </span>
                   ))}
                   <span
                     className={`px-2 py-0.5 rounded font-bold flex items-center gap-1 ${
-                      inspectedSlotItem.deltaVsPrev > 0
+                      inspectedSlotItem.deltaPctVsPrev > 0
                         ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                        : inspectedSlotItem.deltaVsPrev < 0
+                        : inspectedSlotItem.deltaPctVsPrev < 0
                           ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                           : 'bg-slate-800 text-slate-300 border border-slate-700'
                     }`}
                   >
-                    {inspectedSlotItem.deltaVsPrev > 0 ? (
+                    {inspectedSlotItem.deltaPctVsPrev > 0 ? (
                       <TrendingUp className="w-3 h-3" />
-                    ) : inspectedSlotItem.deltaVsPrev < 0 ? (
+                    ) : inspectedSlotItem.deltaPctVsPrev < 0 ? (
                       <TrendingDown className="w-3 h-3" />
                     ) : (
                       <Minus className="w-3 h-3" />
                     )}
-                    {inspectedSlotItem.deltaVsPrev > 0
-                      ? `Increase +${inspectedSlotItem.deltaVsPrev.toLocaleString()} hrs`
-                      : inspectedSlotItem.deltaVsPrev < 0
-                        ? `Decrease ${inspectedSlotItem.deltaVsPrev.toLocaleString()} hrs`
-                        : 'No Change (0 hrs)'}
+                    {inspectedSlotItem.deltaPctVsPrev > 0
+                      ? `Increase +${inspectedSlotItem.deltaPctVsPrev.toFixed(1)}%`
+                      : inspectedSlotItem.deltaPctVsPrev < 0
+                        ? `Decrease ${inspectedSlotItem.deltaPctVsPrev.toFixed(1)}%`
+                        : 'No Change (0.0%)'}
                   </span>
                 </div>
               )}
             </div>
 
             <div className="flex items-center gap-2">
-              {/* Breakdown pills for active threshold ranges */}
+              {/* Breakdown pills for active threshold ranges (in %) */}
               <div className="flex flex-wrap items-center gap-1.5">
                 {activeZoneIndices.map((zIdx) => {
                   const z = THERMAL_ZONES_6[zIdx];
-                  const val = inspectedSlotItem.byZoneCounts[zIdx] || 0;
+                  const pctVal = inspectedSlotItem.byZonePcts[zIdx] || 0;
+                  const hrsVal = inspectedSlotItem.byZoneCounts[zIdx] || 0;
                   return (
                     <span
                       key={z.key}
@@ -843,7 +946,7 @@ const IndividualTempBarChartCard: React.FC<{
                         color: '#f8fafc',
                       }}
                     >
-                      {z.shortLabel}: {val.toLocaleString()}
+                      {z.shortLabel}: {pctVal.toFixed(1)}% ({hrsVal.toLocaleString()}h)
                     </span>
                   );
                 })}
@@ -867,101 +970,133 @@ const IndividualTempBarChartCard: React.FC<{
                 className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-500/30 text-[11px] font-mono flex items-center gap-1.5 cursor-pointer"
               >
                 <Eye className="w-3.5 h-3.5" />
-                <span>Show Highest Record Callout Card</span>
+                <span>Show Section Share Callout Card</span>
               </button>
             </div>
           )
         )}
       </div>
 
-      {/* BAR CHART VISUALIZATION CANVAS */}
+      {/* BAR CHART VISUALIZATION CANVAS (PERCENTAGE OF TOTAL RECORDED HOURS 0% – 100%) */}
       <div className="p-4 sm:p-6">
         {slotChartData.length === 0 ? (
           <div className="h-72 flex flex-col items-center justify-center text-slate-400 font-mono text-xs border border-dashed border-slate-800 rounded-xl">
             No sections or phases selected. Use the Local Filter above to select sections.
           </div>
         ) : (
-          <div className="space-y-2.5">
-            {/* Comparison Mode Active Legend & Change Indicator Guide */}
-            {isComparisonMode && (
-              <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-900/75 border border-slate-800 text-[11px] font-mono">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-cyan-300 font-bold uppercase">
-                    Multi-Bar Comparison Active ({periodBuckets.length} Periods per Section):
-                  </span>
-                  {periodBuckets.map((pb, pIdx) => (
-                    <span
-                      key={pb.id}
-                      className="px-2 py-0.5 rounded-md bg-slate-950 border border-cyan-500/30 text-slate-200 font-semibold"
-                    >
-                      Bar {pIdx + 1}: <strong className="text-cyan-300">{pb.shortLabel}</strong> ({pb.dates.length}d)
-                    </span>
-                  ))}
-                </div>
-                <div className="flex flex-wrap items-center gap-2 text-[10px]">
-                  <span className="text-slate-400">Change Indicator:</span>
-                  <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold">
-                    ▲ +X Increase
-                  </span>
-                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
-                    ▼ -X Decrease
-                  </span>
-                  <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-bold">
-                    = 0 No Change
-                  </span>
-                </div>
-              </div>
-            )}
+          <div className="overflow-x-auto pb-2">
+            <div
+              className="relative min-w-[920px] pt-4 pb-4 px-3 rounded-xl bg-[#060b16] border border-slate-800/90"
+              style={{
+                minWidth: `${Math.max(
+                  920,
+                  slotChartData.length *
+                    (isComparisonMode ? Math.max(82, periodBuckets.length * 36) : 46) +
+                    80
+                )}px`,
+              }}
+            >
+              {/* Inside-Chart Legend Bar (Thermal Threshold Ranges, Active Comparison Periods & Trend Indicator Key) */}
+              <div className="mb-14 flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 rounded-lg bg-slate-900/80 border border-slate-800/90 text-[10px] font-mono">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="text-slate-400 uppercase font-bold">Thresholds (% of Recorded Hours):</span>
+                  {activeZoneIndices.map((zIdx) => {
+                    const z = THERMAL_ZONES_6[zIdx];
+                    return (
+                      <span key={z.key} className="inline-flex items-center gap-1.5 text-slate-200 font-semibold">
+                        <span
+                          className="w-2.5 h-2.5 rounded-sm shrink-0"
+                          style={{ backgroundColor: z.hexColor }}
+                        />
+                        <span>
+                          {z.shortLabel} ({z.rangeText})
+                        </span>
+                      </span>
+                    );
+                  })}
 
-            <div className="overflow-x-auto pb-2">
-              <div
-                className="relative min-w-[920px] pt-20 pb-3 px-3 rounded-xl bg-[#060b16] border border-slate-800/90"
-                style={{
-                  minWidth: `${Math.max(
-                    920,
-                    slotChartData.length *
-                      (isComparisonMode ? Math.max(76, periodBuckets.length * 34) : 38)
-                  )}px`,
-                }}
-              >
-                {/* Horizontal Y-Axis Reference Grid Lines & Pure Bar Plot Area (0% to 100%) */}
-                <div className="relative h-72 flex items-end gap-2 sm:gap-2.5 border-b border-l border-slate-700/80 pl-10 pr-2">
+                  {isComparisonMode && (
+                    <div className="flex flex-wrap items-center gap-1.5 pl-2 border-l border-slate-700/80">
+                      <span className="text-cyan-300 font-bold uppercase">Periods:</span>
+                      {periodBuckets.map((pb, pIdx) => (
+                        <span
+                          key={pb.id}
+                          className="px-1.5 py-0.5 rounded bg-slate-950 border border-cyan-500/30 text-slate-200"
+                        >
+                          Bar {pIdx + 1}: <strong className="text-cyan-300">{pb.shortLabel}</strong> ({pb.dates.length}d)
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {!isComparisonMode && isThreeComparisonMode && periodBuckets.length === 1 && fallbackPrevPeriod && (
+                    <div className="flex flex-wrap items-center gap-1.5 pl-2 border-l border-slate-700/80">
+                      <span className="text-cyan-300 font-bold uppercase">Comparison:</span>
+                      <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-cyan-500/30 text-slate-200">
+                        <strong className="text-cyan-300">{periodBuckets[0].shortLabel}</strong> vs{' '}
+                        <strong className="text-slate-300">{fallbackPrevPeriod.shortLabel}</strong>
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {isThreeComparisonMode && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-slate-400 font-bold uppercase">
+                      Trend Indicator (
+                      {globalMode === 'year_to_year'
+                        ? 'Year-to-Year'
+                        : globalMode === 'same_month_across_years'
+                          ? 'Same Month Across Years'
+                          : 'Monthly Comparison'}
+                      ):
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold">
+                      ▲ +X.X% Increase
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
+                      ▼ -X.X% Decrease
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-bold">
+                      = 0.0% No Change
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Unified Section Columns Area: Each Section Column contains BOTH its h-72 Bar Plot Track AND its X-Axis Labels */}
+              <div className="relative pl-12 pr-2">
+                {/* Horizontal Y-Axis Percentage Reference Grid Lines (0%, 25%, 50%, 75%, 100% of maxBarPct) */}
+                <div className="absolute top-0 left-12 right-2 h-72 pointer-events-none z-0">
                   {[0, 0.25, 0.5, 0.75, 1].map((frac) => {
-                    const tickVal = Math.round(maxBarValue * frac);
+                    const tickPct = (maxBarPct * frac).toFixed(0);
                     return (
                       <div
                         key={frac}
-                        className="absolute left-10 right-2 border-t border-dashed border-slate-800/80 pointer-events-none"
+                        className="absolute left-0 right-0 border-t border-dashed border-slate-800/80"
                         style={{ bottom: `${frac * 100}%` }}
                       >
-                        <span className="absolute -left-10 -top-2 w-9 text-right text-[10px] font-mono text-slate-400">
-                          {tickVal.toLocaleString()}
+                        <span className="absolute -left-12 -top-2 w-10 text-right text-[10px] font-mono text-slate-400">
+                          {tickPct}%
                         </span>
                       </div>
                     );
                   })}
+                </div>
 
-                  {/* Bars across all visible sections */}
+                {/* Unified Flex Row where each Section Column wraps both its h-72 Bar Plot and its X-Axis Label */}
+                <div className="relative z-10 flex items-stretch gap-2 sm:gap-2.5 border-l border-slate-700/80">
                   {slotChartData.map((item, idx) => {
                     const prevSlot = idx > 0 ? slotChartData[idx - 1].slot : null;
                     const showCategoryDivider =
                       prevSlot && prevSlot.category === 'land' && item.slot.category === 'submarine';
 
                     if (isComparisonMode) {
-                      const isSectionHighest = highestSlotKeys.has(item.slot.key) && item.maxPeriodCount > 0;
-                      const firstPeriod = item.periodCounts[0];
-                      const lastPeriod = item.periodCounts[item.periodCounts.length - 1];
-                      const prevPeriod =
-                        item.periodCounts.length >= 2
-                          ? item.periodCounts[item.periodCounts.length - 2]
-                          : firstPeriod;
-                      const netDelta = item.deltaVsPrev;
-
                       return (
                         <React.Fragment key={item.slot.key}>
                           {showCategoryDivider && (
-                            <div className="h-full w-0.5 bg-cyan-500/40 mx-1 relative shrink-0">
-                              <span className="absolute -top-16 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-500/40 text-[9px] font-mono whitespace-nowrap">
+                            <div className="w-0.5 bg-cyan-500/40 mx-1 relative shrink-0">
+                              <span className="absolute -top-11 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-500/40 text-[9px] font-mono whitespace-nowrap">
                                 LAND | SUBMARINE
                               </span>
                             </div>
@@ -970,59 +1105,26 @@ const IndividualTempBarChartCard: React.FC<{
                           <div
                             onMouseEnter={() => setHoveredSlotKey(item.slot.key)}
                             onMouseLeave={() => setHoveredSlotKey(null)}
-                            className={`flex-1 h-full relative flex items-end justify-center group cursor-pointer rounded-t-xl px-1 transition-colors ${
+                            className={`flex-1 flex flex-col cursor-pointer rounded-t-xl transition-colors ${
                               hoveredSlotKey === item.slot.key
                                 ? 'bg-cyan-950/25 ring-1 ring-cyan-500/30'
-                                : isSectionHighest
-                                  ? 'bg-amber-950/10'
-                                  : 'hover:bg-slate-900/40'
+                                : 'hover:bg-slate-900/40'
                             }`}
                             style={{
-                              minWidth: `${Math.max(66, item.periodCounts.length * 30)}px`,
+                              minWidth: `${Math.max(72, item.periodCounts.length * 34)}px`,
                             }}
                           >
-                            {/* Top Group Change Indicator Badge (Floats above the 100% Y-axis line so it never compresses bar heights) */}
+                            {/* TOP: h-72 Bar Plot Area for this Section */}
                             <div
-                              className="absolute -top-16 left-1/2 -translate-x-1/2 flex flex-col items-center z-30 pointer-events-none"
-                              title={`${prevPeriod?.shortLabel || ''}: ${prevPeriod?.count.toLocaleString() || 0} hrs → ${lastPeriod?.shortLabel || ''}: ${lastPeriod?.count.toLocaleString() || 0} hrs`}
+                              className="h-72 grid items-end gap-1 sm:gap-1.5 px-1 border-b border-slate-700/80"
+                              style={{
+                                gridTemplateColumns: `repeat(${Math.max(1, item.periodCounts.length)}, minmax(0, 1fr))`,
+                              }}
                             >
-                              <span
-                                className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-extrabold whitespace-nowrap border flex items-center gap-0.5 shadow-sm ${
-                                  netDelta > 0
-                                    ? 'bg-rose-500/20 text-rose-300 border-rose-500/50'
-                                    : netDelta < 0
-                                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
-                                      : 'bg-slate-900/90 text-slate-300 border-slate-700/80'
-                                }`}
-                              >
-                                {netDelta > 0 ? (
-                                  <>
-                                    <span>▲</span>
-                                    <span>+{netDelta.toLocaleString()}</span>
-                                  </>
-                                ) : netDelta < 0 ? (
-                                  <>
-                                    <span>▼</span>
-                                    <span>{netDelta.toLocaleString()}</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <span>=</span>
-                                    <span>0 Δ</span>
-                                  </>
-                                )}
-                              </span>
-                            </div>
-
-                            {/* Side-by-Side Period Bars inside this Section (Full 100% Plot Height Track) */}
-                            <div className="w-full h-full flex items-end justify-center gap-1 sm:gap-1.5">
                               {item.periodCounts.map((pb, pIdx) => {
-                                const isHighestPeriodBar =
-                                  highestSlotPeriodKeys.has(`${item.slot.key}__${pb.periodId}`) &&
-                                  pb.count > 0;
                                 const barHeightPct =
-                                  maxBarValue > 0
-                                    ? Math.max(pb.count > 0 ? 2 : 0, (pb.count / maxBarValue) * 100)
+                                  maxBarPct > 0
+                                    ? Math.max(pb.pct > 0 ? 3 : 0, (pb.pct / maxBarPct) * 100)
                                     : 0;
                                 const pbDominantZone =
                                   THERMAL_ZONES_6[pb.pbDominantZoneIdx] || primaryThresholdInfo;
@@ -1033,70 +1135,56 @@ const IndividualTempBarChartCard: React.FC<{
                                 return (
                                   <div
                                     key={pb.periodId}
-                                    className="flex-1 min-w-[24px] max-w-[44px] h-full relative flex items-end justify-center"
+                                    className="w-full h-full relative flex items-end justify-center group"
                                   >
-                                    {/* Individual Period Bar Column (Exact % of h-72 plot area) */}
                                     <div
-                                      className={`w-full rounded-t-md transition-all duration-300 relative flex flex-col-reverse ${
-                                        isHighestPeriodBar
-                                          ? 'ring-2 ring-amber-300'
-                                          : 'border-t border-x border-white/15 group-hover:brightness-125'
-                                      }`}
+                                      className="w-full max-w-[40px] rounded-t-md transition-all duration-300 relative flex flex-col-reverse border-t border-x border-white/15 group-hover:brightness-125"
                                       style={{
                                         height: `${barHeightPct}%`,
                                         backgroundColor:
-                                          pb.count > 0 ? `${barHexColor}33` : 'rgba(30,41,59,0.35)',
-                                        boxShadow: isHighestPeriodBar
-                                          ? `0 0 20px ${barHexColor}, 0 0 12px rgba(251, 191, 36, 0.85)`
-                                          : pb.count > 0
+                                          pb.pct > 0 ? `${barHexColor}33` : 'rgba(30,41,59,0.35)',
+                                        boxShadow:
+                                          pb.pct > 0
                                             ? `0 0 8px ${barHexColor}44`
                                             : 'none',
                                       }}
                                     >
-                                      {/* Per-bar Top Value + MAX Star + Step Delta positioned directly above the bar's top edge */}
+                                      {/* Trend Indicator directly above Percentage at top of bar */}
                                       <div
                                         className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 flex flex-col items-center pointer-events-none"
-                                        style={{ zIndex: isHighestPeriodBar ? 25 : 15 }}
+                                        style={{ zIndex: 20 }}
                                       >
-                                        {isHighestPeriodBar && (
-                                          <span className="mb-0.5 px-1 py-0.2 rounded-full text-[8px] font-mono font-extrabold uppercase bg-amber-400 text-slate-950 shadow-[0_0_12px_rgba(251,191,36,0.95)] animate-pulse whitespace-nowrap">
-                                            ★ MAX
-                                          </span>
-                                        )}
-                                        {item.periodCounts.length > 2 && pIdx > 0 && pb.deltaFromPrev !== null && (
+                                        {(pIdx > 0 || pb.hasDelta) && (
                                           <span
-                                            className={`text-[8px] font-mono font-bold leading-tight whitespace-nowrap ${
-                                              pb.deltaFromPrev > 0
-                                                ? 'text-rose-400'
-                                                : pb.deltaFromPrev < 0
-                                                  ? 'text-emerald-400'
-                                                  : 'text-slate-500'
+                                            className={`mb-0.5 px-1 py-0.2 rounded text-[8px] font-mono font-extrabold leading-tight whitespace-nowrap border ${
+                                              pb.deltaPctFromPrev > 0
+                                                ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                                                : pb.deltaPctFromPrev < 0
+                                                  ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                                                  : 'bg-slate-900/90 text-slate-400 border-slate-700/70'
                                             }`}
                                           >
-                                            {pb.deltaFromPrev > 0
-                                              ? `▲+${pb.deltaFromPrev}`
-                                              : pb.deltaFromPrev < 0
-                                                ? `▼${pb.deltaFromPrev}`
-                                                : '=0'}
+                                            {pb.deltaPctFromPrev > 0
+                                              ? `▲+${pb.deltaPctFromPrev.toFixed(1)}%`
+                                              : pb.deltaPctFromPrev < 0
+                                                ? `▼${pb.deltaPctFromPrev.toFixed(1)}%`
+                                                : '=0.0%'}
                                           </span>
                                         )}
                                         <span
-                                          className={`text-[10px] font-mono leading-none whitespace-nowrap ${
-                                            isHighestPeriodBar
-                                              ? 'text-amber-300 font-extrabold drop-shadow-[0_0_8px_rgba(251,191,36,0.9)]'
-                                              : pb.count > 0
-                                                ? 'text-slate-100 font-bold'
-                                                : 'text-slate-600'
+                                          className={`text-[9px] font-mono leading-none whitespace-nowrap ${
+                                            pb.pct > 0 ? 'text-slate-100 font-bold' : 'text-slate-600'
                                           }`}
                                         >
-                                          {pb.count.toLocaleString()}
+                                          {pb.pct.toFixed(1)}%
                                         </span>
                                       </div>
 
-                                      {/* Stacked Thermal Threshold Segments inside the Bar */}
+                                      {/* Stacked Thermal Threshold Segments inside the Bar (showing % of recorded hours) */}
                                       <div className="w-full h-full rounded-t-md overflow-hidden flex flex-col-reverse">
                                         {activeZoneIndices.map((zIdx) => {
                                           const zCount = pb.pbZones[zIdx] || 0;
+                                          const zPct = pb.pbZonePcts[zIdx] || 0;
                                           if (zCount <= 0 || pb.count <= 0) return null;
                                           const segPct = (zCount / pb.count) * 100;
                                           const zInfo = THERMAL_ZONES_6[zIdx];
@@ -1108,10 +1196,10 @@ const IndividualTempBarChartCard: React.FC<{
                                                 backgroundColor: zInfo.hexColor,
                                               }}
                                               className="w-full min-h-[14px] flex items-center justify-center overflow-hidden border-b border-black/15 last:border-b-0 transition-all"
-                                              title={`${zInfo.name}: ${zCount.toLocaleString()} hrs`}
+                                              title={`${zInfo.name} (${zInfo.rangeText}): ${zPct.toFixed(2)}% (${zCount.toLocaleString()} / ${pb.totalAllZonesHours.toLocaleString()} hrs)`}
                                             >
-                                              <span className="text-[9px] sm:text-[10px] font-mono font-extrabold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)] bg-slate-950/30 px-1 py-0.2 rounded leading-none whitespace-nowrap select-none">
-                                                {zCount.toLocaleString()}
+                                              <span className="text-[8px] sm:text-[9px] font-mono font-extrabold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)] bg-slate-950/30 px-0.5 py-0.2 rounded leading-none whitespace-nowrap select-none">
+                                                {zPct.toFixed(1)}%
                                               </span>
                                             </div>
                                           );
@@ -1122,16 +1210,50 @@ const IndividualTempBarChartCard: React.FC<{
                                 );
                               })}
                             </div>
+
+                            {/* BOTTOM: X-Axis Period Sub-Labels & Section/Phase Label inside the exact same Section Column */}
+                            <div className="pt-1.5 flex flex-col items-center text-center">
+                              <div
+                                className="w-full grid gap-1 sm:gap-1.5 px-1 pb-1 mb-1 border-b border-slate-800/80"
+                                style={{
+                                  gridTemplateColumns: `repeat(${Math.max(1, item.periodCounts.length)}, minmax(0, 1fr))`,
+                                }}
+                              >
+                                {item.periodCounts.map((pb) => (
+                                  <span
+                                    key={pb.periodId}
+                                    className="w-full text-center text-[8px] font-mono font-bold text-cyan-200/90 leading-none truncate"
+                                    title={pb.label}
+                                  >
+                                    {pb.shortLabel}
+                                  </span>
+                                ))}
+                              </div>
+                              <span
+                                className={`text-[10px] font-mono leading-tight ${
+                                  item.slot.category === 'land'
+                                    ? 'text-cyan-300 font-semibold'
+                                    : 'text-emerald-300 font-semibold'
+                                }`}
+                              >
+                                {item.slot.sectionId}
+                              </span>
+                              <span className="text-[9px] font-mono text-slate-400 leading-tight">
+                                {item.slot.category === 'land' ? `(${item.slot.phaseCode})` : 'SM'}
+                              </span>
+                            </div>
                           </div>
                         </React.Fragment>
                       );
                     }
 
                     // Single-bar mode (Custom Date Range or single period selected)
-                    const isHighest = highestSlotKeys.has(item.slot.key) && item.selectedTotal > 0;
                     const heightPct =
-                      maxBarValue > 0
-                        ? Math.max(item.selectedTotal > 0 ? 2 : 0, (item.selectedTotal / maxBarValue) * 100)
+                      maxBarPct > 0
+                        ? Math.max(
+                            item.selectedTotalPct > 0 ? 3 : 0,
+                            (item.selectedTotalPct / maxBarPct) * 100
+                          )
                         : 0;
                     const dominantZone = THERMAL_ZONES_6[item.dominantZoneIdx] || primaryThresholdInfo;
                     const barHexColor = isSingleThresholdSelected
@@ -1141,8 +1263,8 @@ const IndividualTempBarChartCard: React.FC<{
                     return (
                       <React.Fragment key={item.slot.key}>
                         {showCategoryDivider && (
-                          <div className="h-full w-0.5 bg-cyan-500/40 mx-1 relative shrink-0">
-                            <span className="absolute -top-12 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-500/40 text-[9px] font-mono whitespace-nowrap">
+                          <div className="w-0.5 bg-cyan-500/40 mx-1 relative shrink-0">
+                            <span className="absolute -top-11 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-500/40 text-[9px] font-mono whitespace-nowrap">
                               LAND | SUBMARINE
                             </span>
                           </div>
@@ -1151,128 +1273,95 @@ const IndividualTempBarChartCard: React.FC<{
                         <div
                           onMouseEnter={() => setHoveredSlotKey(item.slot.key)}
                           onMouseLeave={() => setHoveredSlotKey(null)}
-                          className="flex-1 min-w-[24px] h-full relative flex items-end justify-center group cursor-pointer"
+                          className="flex-1 min-w-[34px] flex flex-col cursor-pointer group"
                         >
-                          {/* Bar Column (Exact % of h-72 plot area) */}
-                          <div
-                            className={`w-full max-w-[36px] rounded-t-md transition-all duration-300 relative ${
-                              isHighest ? 'ring-2 ring-amber-300' : 'group-hover:brightness-125'
-                            }`}
-                            style={{
-                              height: `${heightPct}%`,
-                              backgroundColor:
-                                item.selectedTotal > 0 ? `${barHexColor}33` : 'rgba(30,41,59,0.3)',
-                              boxShadow: isHighest
-                                ? `0 0 22px ${barHexColor}, 0 0 12px rgba(251, 191, 36, 0.85)`
-                                : item.selectedTotal > 0
-                                  ? `0 0 10px ${barHexColor}44`
-                                  : 'none',
-                            }}
-                          >
-                            {/* Value at the top of each bar + Highest Record Star (Positioned above top of bar) */}
+                          {/* TOP: h-72 Bar Plot Area */}
+                          <div className="h-72 w-full relative flex items-end justify-center border-b border-slate-700/80 px-0.5">
                             <div
-                              className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 flex flex-col items-center transition-transform group-hover:-translate-y-0.5 pointer-events-none"
-                              style={{ zIndex: isHighest ? 25 : 15 }}
+                              className="w-full max-w-[36px] rounded-t-md transition-all duration-300 relative group-hover:brightness-125"
+                              style={{
+                                height: `${heightPct}%`,
+                                backgroundColor:
+                                  item.selectedTotalPct > 0 ? `${barHexColor}33` : 'rgba(30,41,59,0.3)',
+                                boxShadow:
+                                  item.selectedTotalPct > 0
+                                    ? `0 0 10px ${barHexColor}44`
+                                    : 'none',
+                              }}
                             >
-                              {isHighest && (
-                                <span className="mb-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-mono font-extrabold uppercase tracking-wider bg-amber-400 text-slate-950 shadow-[0_0_14px_rgba(251,191,36,0.9)] animate-pulse whitespace-nowrap">
-                                  ★ MAX
-                                </span>
-                              )}
-                              <span
-                                className={`text-[10px] font-mono leading-none whitespace-nowrap ${
-                                  isHighest
-                                    ? 'text-amber-300 font-extrabold text-xs drop-shadow-[0_0_8px_rgba(251,191,36,0.9)]'
-                                    : item.selectedTotal > 0
-                                      ? 'text-slate-200 font-bold'
-                                      : 'text-slate-600'
-                                }`}
+                              {/* Trend Indicator (in 3 Comparison Modes) + Percentage at top of bar */}
+                              <div
+                                className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 flex flex-col items-center pointer-events-none"
+                                style={{ zIndex: 20 }}
                               >
-                                {item.selectedTotal.toLocaleString()}
-                              </span>
-                            </div>
-
-                            <div className="w-full h-full rounded-t-md overflow-hidden flex flex-col-reverse">
-                              {activeZoneIndices.map((zIdx) => {
-                                const zCount = item.byZoneCounts[zIdx] || 0;
-                                if (zCount <= 0 || item.selectedTotal <= 0) return null;
-                                const segPct = (zCount / item.selectedTotal) * 100;
-                                const zInfo = THERMAL_ZONES_6[zIdx];
-                                return (
-                                  <div
-                                    key={zInfo.key}
-                                    style={{
-                                      height: `${segPct}%`,
-                                      backgroundColor: zInfo.hexColor,
-                                    }}
-                                    className="w-full min-h-[14px] flex items-center justify-center overflow-hidden border-b border-black/15 last:border-b-0 transition-all"
-                                    title={`${zInfo.name}: ${zCount.toLocaleString()} hrs`}
+                                {isThreeComparisonMode && (
+                                  <span
+                                    className={`mb-0.5 px-1 py-0.2 rounded text-[8px] font-mono font-extrabold leading-tight whitespace-nowrap border ${
+                                      item.singleBarDeltaPct > 0
+                                        ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                                        : item.singleBarDeltaPct < 0
+                                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                                          : 'bg-slate-900/90 text-slate-400 border-slate-700/70'
+                                    }`}
                                   >
-                                    <span className="text-[9px] sm:text-[10px] font-mono font-extrabold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)] bg-slate-950/30 px-1 py-0.2 rounded leading-none whitespace-nowrap select-none">
-                                      {zCount.toLocaleString()}
-                                    </span>
-                                  </div>
-                                );
-                              })}
+                                    {item.singleBarDeltaPct > 0
+                                      ? `▲+${item.singleBarDeltaPct.toFixed(1)}%`
+                                      : item.singleBarDeltaPct < 0
+                                        ? `▼${item.singleBarDeltaPct.toFixed(1)}%`
+                                        : '=0.0%'}
+                                  </span>
+                                )}
+                                <span
+                                  className={`text-[10px] font-mono leading-none whitespace-nowrap ${
+                                    item.selectedTotalPct > 0 ? 'text-slate-100 font-bold' : 'text-slate-600'
+                                  }`}
+                                >
+                                  {item.selectedTotalPct.toFixed(1)}%
+                                </span>
+                              </div>
+
+                              <div className="w-full h-full rounded-t-md overflow-hidden flex flex-col-reverse">
+                                {activeZoneIndices.map((zIdx) => {
+                                  const zCount = item.byZoneCounts[zIdx] || 0;
+                                  const zPct = item.byZonePcts[zIdx] || 0;
+                                  if (zCount <= 0 || item.selectedTotal <= 0) return null;
+                                  const segPct = (zCount / item.selectedTotal) * 100;
+                                  const zInfo = THERMAL_ZONES_6[zIdx];
+                                  return (
+                                    <div
+                                      key={zInfo.key}
+                                      style={{
+                                        height: `${segPct}%`,
+                                        backgroundColor: zInfo.hexColor,
+                                      }}
+                                      className="w-full min-h-[14px] flex items-center justify-center overflow-hidden border-b border-black/15 last:border-b-0 transition-all"
+                                      title={`${zInfo.name} (${zInfo.rangeText}): ${zPct.toFixed(2)}% (${zCount.toLocaleString()} / ${item.totalAllZonesHours.toLocaleString()} hrs)`}
+                                    >
+                                      <span className="text-[8px] sm:text-[9px] font-mono font-extrabold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.95)] bg-slate-950/30 px-0.5 py-0.2 rounded leading-none whitespace-nowrap select-none">
+                                        {zPct.toFixed(1)}%
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      </React.Fragment>
-                    );
-                  })}
-                </div>
 
-                {/* Horizontal X-Axis Period Sub-Labels + Section & Phase Labels (Below 0 Baseline) */}
-                <div className="flex items-start gap-2 sm:gap-2.5 pl-10 pr-2 pt-1.5">
-                  {slotChartData.map((item, idx) => {
-                    const isHighest =
-                      highestSlotKeys.has(item.slot.key) &&
-                      (isComparisonMode ? item.maxPeriodCount > 0 : item.selectedTotal > 0);
-                    const prevSlot = idx > 0 ? slotChartData[idx - 1].slot : null;
-                    const showCategoryDivider =
-                      prevSlot && prevSlot.category === 'land' && item.slot.category === 'submarine';
-
-                    return (
-                      <React.Fragment key={item.slot.key}>
-                        {showCategoryDivider && <div className="w-0.5 mx-1 shrink-0" />}
-                        <div
-                          className="flex-1 flex flex-col items-center text-center"
-                          style={{
-                            minWidth: isComparisonMode
-                              ? `${Math.max(66, item.periodCounts.length * 30)}px`
-                              : '24px',
-                          }}
-                        >
-                          {/* In comparison mode, render each period's shortLabel aligned directly under its bar */}
-                          {isComparisonMode && (
-                            <div className="w-full flex items-center justify-center gap-1 sm:gap-1.5 px-1 pb-1 mb-1 border-b border-slate-800/80">
-                              {item.periodCounts.map((pb) => (
-                                <div
-                                  key={pb.periodId}
-                                  className="flex-1 min-w-[24px] max-w-[44px] text-center"
-                                >
-                                  <span className="text-[9px] font-mono font-bold text-cyan-200/90 leading-none whitespace-nowrap">
-                                    {pb.shortLabel}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-
-                          <span
-                            className={`text-[10px] font-mono leading-tight ${
-                              isHighest
-                                ? 'text-amber-300 font-extrabold'
-                                : item.slot.category === 'land'
+                          {/* BOTTOM: X-Axis Section & Phase Label */}
+                          <div className="pt-1.5 flex flex-col items-center text-center">
+                            <span
+                              className={`text-[10px] font-mono leading-tight ${
+                                item.slot.category === 'land'
                                   ? 'text-cyan-300 font-semibold'
                                   : 'text-emerald-300 font-semibold'
-                            }`}
-                          >
-                            {item.slot.sectionId}
-                          </span>
-                          <span className="text-[9px] font-mono text-slate-400 leading-tight">
-                            {item.slot.category === 'land' ? `(${item.slot.phaseCode})` : 'SM'}
-                          </span>
+                              }`}
+                            >
+                              {item.slot.sectionId}
+                            </span>
+                            <span className="text-[9px] font-mono text-slate-400 leading-tight">
+                              {item.slot.category === 'land' ? `(${item.slot.phaseCode})` : 'SM'}
+                            </span>
+                          </div>
                         </div>
                       </React.Fragment>
                     );
@@ -1451,6 +1540,101 @@ export const PublicTempStatisticsPage: React.FC<PublicTempStatisticsPageProps> =
     customEndDate,
   ]);
 
+  const isThreeComparisonMode =
+    globalMode === 'year_to_year' ||
+    globalMode === 'same_month_across_years' ||
+    globalMode === 'monthly_same_year';
+
+  // Resolve the immediately preceding reference period before periodBuckets[0] from allDates
+  // so that in all 3 comparison modes (whether 1 period or multiple periods are selected),
+  // every bar has a reference comparison period for the trend indicator above the percentage.
+  const fallbackPrevPeriod = useMemo<PeriodBucket | null>(() => {
+    if (!isThreeComparisonMode || periodBuckets.length === 0 || allDates.length === 0) {
+      return null;
+    }
+    const targetBucket = periodBuckets[0];
+    const allYearMonths = Array.from(
+      new Set(allDates.filter((d) => d && d.length >= 7).map((d) => d.slice(0, 7)))
+    ).sort();
+
+    if (globalMode === 'year_to_year') {
+      const yrIdx = availableYears.indexOf(targetBucket.id);
+      if (yrIdx > 0) {
+        const prevYr = availableYears[yrIdx - 1];
+        const dates = allDates.filter((d) => d.startsWith(`${prevYr}-`));
+        if (dates.length > 0) {
+          return { id: prevYr, label: `Year ${prevYr}`, shortLabel: prevYr, dates };
+        }
+      }
+      return null;
+    }
+
+    if (globalMode === 'same_month_across_years') {
+      const mo = selectedMonthAcrossYears || targetBucket.id.slice(5, 7);
+      const targetYr = targetBucket.id.slice(0, 4);
+      const yearsWithMonth = availableYears.filter((yr) =>
+        allDates.some((d) => d.startsWith(`${yr}-${mo}`))
+      );
+      const yrIdx = yearsWithMonth.indexOf(targetYr);
+      if (yrIdx > 0) {
+        const prevYr = yearsWithMonth[yrIdx - 1];
+        const dates = allDates.filter((d) => d.startsWith(`${prevYr}-${mo}`));
+        if (dates.length > 0) {
+          return {
+            id: `${prevYr}-${mo}`,
+            label: `${MONTH_NAMES[mo] || mo} ${prevYr}`,
+            shortLabel: `${MONTH_NAMES[mo] || mo} '${prevYr.slice(2)}`,
+            dates,
+          };
+        }
+      }
+      const ymIdx = allYearMonths.indexOf(targetBucket.id);
+      if (ymIdx > 0) {
+        const prevYm = allYearMonths[ymIdx - 1];
+        const prevMo = prevYm.slice(5, 7);
+        const prevYr = prevYm.slice(0, 4);
+        const dates = allDates.filter((d) => d.startsWith(prevYm));
+        if (dates.length > 0) {
+          return {
+            id: prevYm,
+            label: `${MONTH_NAMES[prevMo] || prevMo} ${prevYr}`,
+            shortLabel: `${MONTH_NAMES[prevMo] || prevMo} '${prevYr.slice(2)}`,
+            dates,
+          };
+        }
+      }
+      return null;
+    }
+
+    if (globalMode === 'monthly_same_year') {
+      const ymIdx = allYearMonths.indexOf(targetBucket.id);
+      if (ymIdx > 0) {
+        const prevYm = allYearMonths[ymIdx - 1];
+        const prevMo = prevYm.slice(5, 7);
+        const prevYr = prevYm.slice(0, 4);
+        const dates = allDates.filter((d) => d.startsWith(prevYm));
+        if (dates.length > 0) {
+          return {
+            id: prevYm,
+            label: `${MONTH_NAMES[prevMo] || prevMo} ${prevYr}`,
+            shortLabel: `${MONTH_NAMES[prevMo] || prevMo} '${prevYr.slice(2)}`,
+            dates,
+          };
+        }
+      }
+      return null;
+    }
+
+    return null;
+  }, [
+    isThreeComparisonMode,
+    periodBuckets,
+    allDates,
+    globalMode,
+    availableYears,
+    selectedMonthAcrossYears,
+  ]);
+
   const toggleGlobalYear = (yr: string) => {
     setSelectedYears((prev) => {
       const exists = prev.includes(yr);
@@ -1486,8 +1670,8 @@ export const PublicTempStatisticsPage: React.FC<PublicTempStatisticsPageProps> =
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
               Hourly peak Fiber Temperature (<span className="text-cyan-300 font-mono">Tf</span>) &amp; IEC 60287
-              Estimated Conductor Temperature (<span className="text-amber-300 font-mono">Tc</span>) counter from
-              Section Daily Profile Database (Sector 2.3 Panel 3)
+              Estimated Conductor Temperature (<span className="text-amber-300 font-mono">Tc</span>) percentage share (%)
+              from Section Daily Profile Database (Sector 2.3 Panel 3)
             </p>
           </div>
         </div>
@@ -1534,7 +1718,7 @@ export const PublicTempStatisticsPage: React.FC<PublicTempStatisticsPageProps> =
               Active Window:{' '}
               <span className="text-white font-bold">{activeDates.length.toLocaleString()}</span> Days (
               <span className="text-cyan-300 font-bold">{(activeDates.length * 24).toLocaleString()}</span> Hourly
-              Intervals/Section)
+              Intervals/Section · Normalized to 100%)
             </div>
             <button
               type="button"
@@ -1567,17 +1751,17 @@ export const PublicTempStatisticsPage: React.FC<PublicTempStatisticsPageProps> =
             {
               id: 'year_to_year' as GlobalStatFilterMode,
               title: 'Year-to-Year',
-              subtitle: 'Compare thermal hits across years',
+              subtitle: 'Compare thermal % share across years',
             },
             {
               id: 'same_month_across_years' as GlobalStatFilterMode,
               title: 'Same Month Across Years',
-              subtitle: 'Compare a target month across years',
+              subtitle: 'Compare a target month % across years',
             },
             {
               id: 'monthly_same_year' as GlobalStatFilterMode,
               title: 'Monthly Comparison (Same Year)',
-              subtitle: 'Compare months inside a selected year',
+              subtitle: 'Compare normalized monthly % (30d vs 31d)',
             },
             {
               id: 'custom_range' as GlobalStatFilterMode,
@@ -1788,26 +1972,30 @@ export const PublicTempStatisticsPage: React.FC<PublicTempStatisticsPageProps> =
       {/* CHART 1: FIBER TEMPERATURE (Tf) STATISTICS BAR CHART */}
       <IndividualTempBarChartCard
         chartType="tf"
-        title="Chart 1: Hourly Peak Fiber Optic Temperature (Tf) — Threshold Range Statistics"
-        subtitle="Counts of hourly peak fiber optic sensor readings (Tf) falling into each thermal threshold range across Land (Phase A, B, C) & Submarine sections"
-        unitLabel="hrs"
+        title="Chart 1: Hourly Peak Fiber Optic Temperature (Tf) — Threshold Range Percentage (%)"
+        subtitle="Percentage (%) of all recorded hours where hourly peak fiber optic temperature (Tf) falls into each thermal threshold range across Land (Phase A, B, C) & Submarine sections"
+        unitLabel="%"
         statsSummary={statsSummary}
         globalMode={globalMode}
         periodBuckets={periodBuckets}
         activeDates={activeDates}
+        fallbackPrevPeriod={fallbackPrevPeriod}
+        isThreeComparisonMode={isThreeComparisonMode}
         initialThresholds={['monitoring', 'alert', 'danger', 'critical']}
       />
 
       {/* CHART 2: ESTIMATED CONDUCTOR TEMPERATURE (Tc) STATISTICS BAR CHART */}
       <IndividualTempBarChartCard
         chartType="tc"
-        title="Chart 2: Hourly Estimated Conductor Temperature (Tc,60287) — Threshold Range Statistics"
-        subtitle="Counts of hourly IEC 60287 estimated conductor temperatures (Tc) falling into each thermal threshold range across Land (Phase A, B, C) & Submarine sections"
-        unitLabel="hrs"
+        title="Chart 2: Hourly Estimated Conductor Temperature (Tc,60287) — Threshold Range Percentage (%)"
+        subtitle="Percentage (%) of all recorded hours where hourly IEC 60287 estimated conductor temperature (Tc) falls into each thermal threshold range across Land (Phase A, B, C) & Submarine sections"
+        unitLabel="%"
         statsSummary={statsSummary}
         globalMode={globalMode}
         periodBuckets={periodBuckets}
         activeDates={activeDates}
+        fallbackPrevPeriod={fallbackPrevPeriod}
+        isThreeComparisonMode={isThreeComparisonMode}
         initialThresholds={['monitoring', 'alert', 'danger', 'critical']}
       />
     </div>

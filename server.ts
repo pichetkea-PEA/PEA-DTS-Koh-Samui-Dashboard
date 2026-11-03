@@ -3324,8 +3324,27 @@ app.get('/api/fetch-shared-database', async (req, res) => {
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        watch: null,
+      },
       appType: 'spa',
+    });
+    app.use((req, _res, next) => {
+      if (req.url && req.url.startsWith('/src/')) {
+        try {
+          const cleanUrl = req.url.split('?')[0];
+          const absFile = path.join(process.cwd(), cleanUrl);
+          const mods = vite.moduleGraph.getModulesByFile(absFile);
+          if (mods) {
+            for (const m of mods) {
+              vite.moduleGraph.invalidateModule(m);
+            }
+          }
+        } catch {}
+      }
+      next();
     });
     app.use(vite.middlewares);
   } else {
@@ -3336,16 +3355,58 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    // Automatically scan the shared Google Drive folders on startup and sync any updated database files
+  const runInitialSync = () => {
     void scanAndSyncThreePublicSharedFolders().catch((err) => {
       console.warn('Initial background shared folder scan warning:', err);
     });
     void scanAndSyncPage26SharedFolders().catch((err) => {
       console.warn('Initial background Page 2.6 shared folder scan warning:', err);
     });
-  });
+  };
+
+  let retryCount = 0;
+  const maxRetries = 5;
+
+  const listenWithRetry = () => {
+    const httpServer = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+      runInitialSync();
+    });
+
+    httpServer.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        retryCount += 1;
+        if (retryCount <= maxRetries) {
+          console.warn(
+            `Port ${PORT} is currently in use (attempt ${retryCount}/${maxRetries}). Retrying in 1000ms...`
+          );
+          setTimeout(() => {
+            try {
+              httpServer.close();
+            } catch {}
+            listenWithRetry();
+          }, 1000);
+        } else {
+          console.warn(`Port ${PORT} is already served by an active instance.`);
+        }
+      } else {
+        console.error('Server error:', err);
+      }
+    });
+
+    const shutdown = () => {
+      try {
+        httpServer.close(() => process.exit(0));
+      } catch {
+        process.exit(0);
+      }
+    };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
+  };
+
+  listenWithRetry();
 }
 
 startServer();
+

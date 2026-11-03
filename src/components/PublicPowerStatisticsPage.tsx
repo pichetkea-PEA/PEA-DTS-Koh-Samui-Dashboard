@@ -329,7 +329,102 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
     customEndDate,
   ]);
 
-  const isComparisonMode = globalMode !== 'custom_range' && periodBuckets.length > 1;
+  const isThreeComparisonMode =
+    globalMode === 'year_to_year' ||
+    globalMode === 'same_month_across_years' ||
+    globalMode === 'monthly_same_year';
+  const isComparisonMode = isThreeComparisonMode && periodBuckets.length > 1;
+
+  // Resolve the immediately preceding reference period before periodBuckets[0] from allDatesChart1
+  // so that in all 3 comparison modes (whether 1 period or multiple periods are selected),
+  // every bar has a reference comparison period for the trend indicator above the percentage.
+  const fallbackPrevPeriod = useMemo(() => {
+    if (!isThreeComparisonMode || periodBuckets.length === 0 || allDatesChart1.length === 0) {
+      return null;
+    }
+    const targetBucket = periodBuckets[0];
+    const allYearMonths = Array.from(
+      new Set(allDatesChart1.filter((d) => d && d.length >= 7).map((d) => d.slice(0, 7)))
+    ).sort();
+
+    if (globalMode === 'year_to_year') {
+      const yrIdx = availableYears.indexOf(targetBucket.id);
+      if (yrIdx > 0) {
+        const prevYr = availableYears[yrIdx - 1];
+        const dates = allDatesChart1.filter((d) => d.startsWith(`${prevYr}-`));
+        if (dates.length > 0) {
+          return { id: prevYr, label: `Year ${prevYr}`, shortLabel: prevYr, dates };
+        }
+      }
+      return null;
+    }
+
+    if (globalMode === 'same_month_across_years') {
+      const mo = selectedMonthAcrossYears || targetBucket.id.slice(5, 7);
+      const targetYr = targetBucket.id.slice(0, 4);
+      const yearsWithMonth = availableYears.filter((yr) =>
+        allDatesChart1.some((d) => d.startsWith(`${yr}-${mo}`))
+      );
+      const yrIdx = yearsWithMonth.indexOf(targetYr);
+      if (yrIdx > 0) {
+        const prevYr = yearsWithMonth[yrIdx - 1];
+        const dates = allDatesChart1.filter((d) => d.startsWith(`${prevYr}-${mo}`));
+        if (dates.length > 0) {
+          return {
+            id: `${prevYr}-${mo}`,
+            label: `${MONTH_NAMES[mo] || mo} ${prevYr}`,
+            shortLabel: `${MONTH_NAMES[mo] || mo} '${prevYr.slice(2)}`,
+            dates,
+          };
+        }
+      }
+      // Fallback to immediately preceding available month in dataset if this month only exists in 1 year
+      const ymIdx = allYearMonths.indexOf(targetBucket.id);
+      if (ymIdx > 0) {
+        const prevYm = allYearMonths[ymIdx - 1];
+        const prevMo = prevYm.slice(5, 7);
+        const prevYr = prevYm.slice(0, 4);
+        const dates = allDatesChart1.filter((d) => d.startsWith(prevYm));
+        if (dates.length > 0) {
+          return {
+            id: prevYm,
+            label: `${MONTH_NAMES[prevMo] || prevMo} ${prevYr}`,
+            shortLabel: `${MONTH_NAMES[prevMo] || prevMo} '${prevYr.slice(2)}`,
+            dates,
+          };
+        }
+      }
+      return null;
+    }
+
+    if (globalMode === 'monthly_same_year') {
+      const ymIdx = allYearMonths.indexOf(targetBucket.id);
+      if (ymIdx > 0) {
+        const prevYm = allYearMonths[ymIdx - 1];
+        const prevMo = prevYm.slice(5, 7);
+        const prevYr = prevYm.slice(0, 4);
+        const dates = allDatesChart1.filter((d) => d.startsWith(prevYm));
+        if (dates.length > 0) {
+          return {
+            id: prevYm,
+            label: `${MONTH_NAMES[prevMo] || prevMo} ${prevYr}`,
+            shortLabel: `${MONTH_NAMES[prevMo] || prevMo} '${prevYr.slice(2)}`,
+            dates,
+          };
+        }
+      }
+      return null;
+    }
+
+    return null;
+  }, [
+    isThreeComparisonMode,
+    periodBuckets,
+    allDatesChart1,
+    globalMode,
+    availableYears,
+    selectedMonthAcrossYears,
+  ]);
 
   const visibleCircuitsMeta = useMemo(() => {
     const cSet = new Set(selectedCircuits);
@@ -362,6 +457,23 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
         totalCircuitAllCondMinutes[2] +
         totalCircuitAllCondMinutes[3];
 
+      // Also compute fallback previous period minutes if in a 1-bucket comparison mode
+      const fallbackPrevCondMinutes = [0, 0, 0, 0];
+      if (fallbackPrevPeriod) {
+        for (const d of fallbackPrevPeriod.dates) {
+          const dayMat = opCondData.byDate[d];
+          if (!dayMat || !dayMat[circuit.index]) continue;
+          for (let rIdx = 0; rIdx < 4; rIdx++) {
+            fallbackPrevCondMinutes[rIdx] += dayMat[circuit.index][rIdx] || 0;
+          }
+        }
+      }
+      const fallbackPrevTotalMinutes =
+        fallbackPrevCondMinutes[0] +
+        fallbackPrevCondMinutes[1] +
+        fallbackPrevCondMinutes[2] +
+        fallbackPrevCondMinutes[3];
+
       // Also pre-calculate total operation minutes across ALL 4 conditions per periodBucket for this circuit
       const bucketTotalCircuitMinutes = periodBuckets.map((pb) => {
         let sumMin = 0;
@@ -384,6 +496,14 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
             ? Number(((totalMinutes / grandTotalCircuitMinutes) * 100).toFixed(2))
             : 0;
 
+        const hasSingleBarDelta = Boolean(fallbackPrevPeriod && fallbackPrevTotalMinutes > 0);
+        const fallbackPrevPct = hasSingleBarDelta
+          ? Number(((fallbackPrevCondMinutes[range.index] / fallbackPrevTotalMinutes) * 100).toFixed(2))
+          : 0;
+        const singleBarDeltaPct = hasSingleBarDelta
+          ? Number((totalPct - fallbackPrevPct).toFixed(2))
+          : 0;
+
         const periodBars = periodBuckets.map((pb, pIdx) => {
           let pMinutes = 0;
           for (const d of pb.dates) {
@@ -403,8 +523,10 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
             pct: pPct,
             minutes: pMinutes,
             totalOperationMinutes: pbTotalMin,
-            deltaPctFromPrev: 0,
-            deltaMinFromPrev: 0,
+            deltaPctFromPrev: pIdx === 0 && hasSingleBarDelta ? Number((pPct - fallbackPrevPct).toFixed(2)) : 0,
+            deltaMinFromPrev:
+              pIdx === 0 && hasSingleBarDelta ? pMinutes - fallbackPrevCondMinutes[range.index] : 0,
+            hasDelta: pIdx > 0 || hasSingleBarDelta,
           };
         });
 
@@ -413,6 +535,7 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
           const curr = periodBars[i];
           curr.deltaPctFromPrev = Number((curr.pct - prev.pct).toFixed(2));
           curr.deltaMinFromPrev = curr.minutes - prev.minutes;
+          curr.hasDelta = true;
         }
 
         const netDeltaPct =
@@ -423,7 +546,7 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
                   periodBars[periodBars.length - 2].pct
                 ).toFixed(2)
               )
-            : 0;
+            : singleBarDeltaPct;
 
         return {
           circuit,
@@ -435,6 +558,9 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
           grandTotalCircuitMinutes,
           periodBars,
           netDeltaPct,
+          hasSingleBarDelta,
+          singleBarDeltaPct,
+          fallbackPrevPct,
         };
       });
 
@@ -444,7 +570,7 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
         rangeItems,
       };
     });
-  }, [opCondData, visibleCircuitsMeta, visibleRangesMeta, activeDates, periodBuckets]);
+  }, [opCondData, visibleCircuitsMeta, visibleRangesMeta, activeDates, periodBuckets, fallbackPrevPeriod]);
 
   // Identify highest percentage bar across Chart 1
   const { maxBarPct, highestBarIds, highestBarDetail } = useMemo(() => {
@@ -1366,130 +1492,194 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
             </div>
           ) : (
             <div className="overflow-x-auto pb-2">
-              <div className="min-w-[920px] pt-20 pb-4 px-4 rounded-xl bg-[#060b16] border border-slate-800/90">
-                {/* Chart Plot Area (0% to 100% Bar Height Track) */}
-                <div className="relative h-72 flex items-end justify-around gap-4 border-b border-l border-slate-700/80 pl-14 pr-4">
-                  {/* Horizontal Y-Axis Reference Grid Lines (0%, 25%, 50%, 75%, 100%) */}
-                  {[0, 0.25, 0.5, 0.75, 1].map((frac) => {
-                    const tickPct = (maxBarPct * frac).toFixed(0);
-                    return (
-                      <div
-                        key={frac}
-                        className="absolute left-14 right-4 border-t border-dashed border-slate-800/80 pointer-events-none"
-                        style={{ bottom: `${frac * 100}%` }}
-                      >
-                        <span className="absolute -left-14 -top-2 w-12 text-right text-[10px] font-mono text-slate-400">
-                          {tickPct}%
+              <div
+                className="pt-4 pb-4 px-4 rounded-xl bg-[#060b16] border border-slate-800/90"
+                style={{
+                  minWidth: `${Math.max(
+                    920,
+                    circuitChartGroups.length *
+                      Math.max(1, visibleRangesMeta.length) *
+                      (isComparisonMode ? Math.max(84, periodBuckets.length * 38) : 72) +
+                      110
+                  )}px`,
+                }}
+              >
+                {/* Inside-Chart Legend Bar (Operating Conditions, Active Comparison Periods & Trend Indicator Key) */}
+                <div className="mb-14 flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 rounded-lg bg-slate-900/80 border border-slate-800/90 text-[10px] font-mono">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-slate-400 uppercase font-bold">Conditions:</span>
+                    {visibleRangesMeta.map((r) => (
+                      <span key={r.key} className="inline-flex items-center gap-1.5 text-slate-200 font-semibold">
+                        <span
+                          className="w-2.5 h-2.5 rounded-sm shrink-0"
+                          style={{ backgroundColor: r.hexColor }}
+                        />
+                        <span>{r.shortLabel}</span>
+                      </span>
+                    ))}
+
+                    {isComparisonMode && (
+                      <div className="flex flex-wrap items-center gap-1.5 pl-2 border-l border-slate-700/80">
+                        <span className="text-cyan-300 font-bold uppercase">Periods:</span>
+                        {periodBuckets.map((pb, pIdx) => (
+                          <span
+                            key={pb.id}
+                            className="px-1.5 py-0.5 rounded bg-slate-950 border border-cyan-500/30 text-slate-200"
+                          >
+                            Bar {pIdx + 1}: <strong className="text-cyan-300">{pb.shortLabel}</strong> ({pb.dates.length}d)
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {!isComparisonMode && isThreeComparisonMode && periodBuckets.length === 1 && fallbackPrevPeriod && (
+                      <div className="flex flex-wrap items-center gap-1.5 pl-2 border-l border-slate-700/80">
+                        <span className="text-cyan-300 font-bold uppercase">Comparison:</span>
+                        <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-cyan-500/30 text-slate-200">
+                          <strong className="text-cyan-300">{periodBuckets[0].shortLabel}</strong> vs{' '}
+                          <strong className="text-slate-300">{fallbackPrevPeriod.shortLabel}</strong>
                         </span>
                       </div>
-                    );
-                  })}
+                    )}
+                  </div>
 
-                  {/* 4 Circuit Clusters on Horizontal X-Axis */}
-                  {circuitChartGroups.map((cg) => (
-                    <div
-                      key={cg.circuit.key}
-                      className="flex-1 h-full flex items-end justify-center px-2 border-r last:border-r-0 border-slate-800/60"
-                    >
-                      {/* Inside each circuit: 4 Operating Range Sub-Groups */}
-                      <div className="w-full h-full flex items-end justify-around gap-2 sm:gap-3">
-                        {cg.rangeItems.map((ri) => {
-                          if (!isComparisonMode) {
-                            const isHighest = highestBarIds.has(ri.groupId) && ri.totalPct > 0;
-                            const heightPct =
-                              maxBarPct > 0
-                                ? Math.max(ri.totalPct > 0 ? 3 : 1, (ri.totalPct / maxBarPct) * 100)
-                                : 1;
+                  {isThreeComparisonMode && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-slate-400 font-bold uppercase">
+                        Trend Indicator (
+                        {globalMode === 'year_to_year'
+                          ? 'Year-to-Year'
+                          : globalMode === 'same_month_across_years'
+                            ? 'Same Month Across Years'
+                            : 'Monthly Comparison'}
+                        ):
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold">
+                        ▲ +X.XX% Increase
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold">
+                        ▼ -X.XX% Decrease
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-bold">
+                        = 0.00% No Change
+                      </span>
+                    </div>
+                  )}
+                </div>
 
+                {/* Unified Circuit Columns Grid: Each Circuit Column contains BOTH its Bar Plot Area AND its X-Axis Labels so they are 100% aligned */}
+                <div className="relative pl-14 pr-2">
+                  {/* Horizontal Y-Axis Reference Grid Lines (0%, 25%, 50%, 75%, 100%) across the 288px (h-72) Bar Plot Area */}
+                  <div className="absolute top-0 left-14 right-2 h-72 pointer-events-none z-0">
+                    {[0, 0.25, 0.5, 0.75, 1].map((frac) => {
+                      const tickPct = (maxBarPct * frac).toFixed(0);
+                      return (
+                        <div
+                          key={frac}
+                          className="absolute left-0 right-0 border-t border-dashed border-slate-800/80"
+                          style={{ bottom: `${frac * 100}%` }}
+                        >
+                          <span className="absolute -left-14 -top-2 w-12 text-right text-[10px] font-mono text-slate-400">
+                            {tickPct}%
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div
+                    className="relative z-10 grid border-l border-slate-700/80"
+                    style={{
+                      gridTemplateColumns: `repeat(${Math.max(1, circuitChartGroups.length)}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {circuitChartGroups.map((cg) => (
+                      <div
+                        key={cg.circuit.key}
+                        className="flex flex-col border-r last:border-r-0 border-slate-800/60"
+                      >
+                        {/* TOP: Circuit Bar Plot Area (h-72) */}
+                        <div
+                          className="h-72 grid items-end gap-2 px-3 border-b border-slate-700/80"
+                          style={{
+                            gridTemplateColumns: `repeat(${Math.max(1, cg.rangeItems.length)}, minmax(0, 1fr))`,
+                          }}
+                        >
+                          {cg.rangeItems.map((ri) => {
+                            if (!isComparisonMode) {
+                              const heightPct =
+                                maxBarPct > 0
+                                  ? Math.max(ri.totalPct > 0 ? 3 : 1, (ri.totalPct / maxBarPct) * 100)
+                                  : 1;
+
+                              return (
+                                <div
+                                  key={ri.groupId}
+                                  onMouseEnter={() => setHoveredBarId(ri.groupId)}
+                                  onMouseLeave={() => setHoveredBarId(null)}
+                                  className="w-full h-full relative flex items-end justify-center group cursor-pointer"
+                                  title={`${cg.circuit.label} · ${ri.range.label}: ${ri.totalPct.toFixed(2)}% (${ri.totalMinutes.toLocaleString()} min / ${ri.grandTotalCircuitMinutes.toLocaleString()} min)`}
+                                >
+                                  <div
+                                    className="w-full max-w-[46px] rounded-t-lg transition-all duration-300 relative flex items-center justify-center group-hover:brightness-125"
+                                    style={{
+                                      height: `${heightPct}%`,
+                                      backgroundColor: ri.range.hexColor,
+                                      boxShadow:
+                                        ri.totalPct > 0
+                                          ? `0 0 12px ${ri.range.hexColor}66`
+                                          : 'none',
+                                      opacity: ri.totalPct > 0 ? 1 : 0.25,
+                                    }}
+                                  >
+                                    {/* Little Trend Indicator directly above Percentage in the 3 Comparison Modes */}
+                                    <div
+                                      className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 flex flex-col items-center pointer-events-none"
+                                      style={{ zIndex: 20 }}
+                                    >
+                                      {isThreeComparisonMode && (
+                                        <span
+                                          className={`mb-0.5 px-1.5 py-0.5 rounded text-[9px] font-mono font-extrabold leading-tight whitespace-nowrap border ${
+                                            ri.singleBarDeltaPct > 0
+                                              ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                                              : ri.singleBarDeltaPct < 0
+                                                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                                                : 'bg-slate-900/90 text-slate-400 border-slate-700/70'
+                                          }`}
+                                        >
+                                          {ri.singleBarDeltaPct > 0
+                                            ? `▲ +${ri.singleBarDeltaPct.toFixed(2)}%`
+                                            : ri.singleBarDeltaPct < 0
+                                              ? `▼ ${ri.singleBarDeltaPct.toFixed(2)}%`
+                                              : '= 0.00%'}
+                                        </span>
+                                      )}
+                                      <span
+                                        className={`text-[11px] font-mono leading-none whitespace-nowrap ${
+                                          ri.totalPct > 0 ? 'text-white font-bold' : 'text-slate-500'
+                                        }`}
+                                      >
+                                        {ri.totalPct.toFixed(2)}%
+                                      </span>
+                                      <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap mt-0.5">
+                                        ({(ri.totalMinutes / 60).toFixed(1)}h)
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            }
+
+                            // COMPARISON MODE (Multiple Period Bars in Year-to-Year, Same Month Across Years, Monthly Comparison)
                             return (
                               <div
                                 key={ri.groupId}
-                                onMouseEnter={() => setHoveredBarId(ri.groupId)}
-                                onMouseLeave={() => setHoveredBarId(null)}
-                                className="flex-1 h-full relative flex items-end justify-center group cursor-pointer"
-                                title={`${cg.circuit.label} · ${ri.range.label}: ${ri.totalPct.toFixed(2)}% (${ri.totalMinutes.toLocaleString()} min / ${ri.grandTotalCircuitMinutes.toLocaleString()} min)`}
+                                className="w-full h-full grid items-end gap-1 px-0.5"
+                                style={{
+                                  gridTemplateColumns: `repeat(${Math.max(1, ri.periodBars.length)}, minmax(0, 1fr))`,
+                                }}
                               >
-                                <div
-                                  className={`w-full max-w-[46px] rounded-t-lg transition-all duration-300 relative flex items-center justify-center ${
-                                    isHighest ? 'ring-2 ring-amber-300' : 'group-hover:brightness-125'
-                                  }`}
-                                  style={{
-                                    height: `${heightPct}%`,
-                                    backgroundColor: ri.range.hexColor,
-                                    boxShadow: isHighest
-                                      ? `0 0 26px ${ri.range.hexColor}, 0 0 14px rgba(251, 191, 36, 0.9)`
-                                      : ri.totalPct > 0
-                                        ? `0 0 12px ${ri.range.hexColor}66`
-                                        : 'none',
-                                    opacity: ri.totalPct > 0 ? 1 : 0.25,
-                                  }}
-                                >
-                                  {/* Percentage at top of bar */}
-                                  <div
-                                    className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 flex flex-col items-center pointer-events-none"
-                                    style={{ zIndex: isHighest ? 25 : 15 }}
-                                  >
-                                    {isHighest && (
-                                      <span className="mb-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-mono font-extrabold uppercase bg-amber-400 text-slate-950 shadow-[0_0_15px_rgba(251,191,36,0.95)] whitespace-nowrap">
-                                        ★ {ri.totalPct.toFixed(2)}%
-                                      </span>
-                                    )}
-                                    <span
-                                      className={`text-[11px] font-mono leading-none whitespace-nowrap ${
-                                        isHighest
-                                          ? 'text-amber-300 font-extrabold text-xs'
-                                          : ri.totalPct > 0
-                                            ? 'text-white font-bold'
-                                            : 'text-slate-500'
-                                      }`}
-                                    >
-                                      {ri.totalPct.toFixed(2)}%
-                                    </span>
-                                    <span className="text-[9px] font-mono text-slate-400 whitespace-nowrap mt-0.5">
-                                      ({(ri.totalMinutes / 60).toFixed(1)}h)
-                                    </span>
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          }
-
-                          // COMPARISON MODE: Side-by-side period bars for each operating condition
-                          return (
-                            <div
-                              key={ri.groupId}
-                              className="flex-1 h-full relative flex items-end justify-center px-1"
-                            >
-                              {/* Delta % Change Indicator Banner above the 100% Y-axis line */}
-                              {ri.periodBars.length >= 2 && (
-                                <div
-                                  className={`absolute -top-16 left-1/2 -translate-x-1/2 z-30 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold flex items-center gap-0.5 whitespace-nowrap border pointer-events-none ${
-                                    ri.netDeltaPct > 0
-                                      ? 'bg-rose-950/90 text-rose-300 border-rose-500/50'
-                                      : ri.netDeltaPct < 0
-                                        ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500/50'
-                                        : 'bg-slate-900 text-slate-400 border-slate-700'
-                                  }`}
-                                >
-                                  {ri.netDeltaPct > 0 ? (
-                                    <>
-                                      <TrendingUp className="w-2.5 h-2.5 text-rose-400 shrink-0" />
-                                      <span>+{ri.netDeltaPct.toFixed(2)}%</span>
-                                    </>
-                                  ) : ri.netDeltaPct < 0 ? (
-                                    <>
-                                      <TrendingDown className="w-2.5 h-2.5 text-emerald-400 shrink-0" />
-                                      <span>{ri.netDeltaPct.toFixed(2)}%</span>
-                                    </>
-                                  ) : (
-                                    <span>0.00% Δ</span>
-                                  )}
-                                </div>
-                              )}
-
-                              <div className="w-full h-full flex items-end justify-center gap-1">
                                 {ri.periodBars.map((pb, pIdx) => {
-                                  const isHighest = highestBarIds.has(pb.barId) && pb.pct > 0;
                                   const heightPct =
                                     maxBarPct > 0
                                       ? Math.max(pb.pct > 0 ? 3 : 1, (pb.pct / maxBarPct) * 100)
@@ -1504,40 +1694,46 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
                                       key={pb.barId}
                                       onMouseEnter={() => setHoveredBarId(pb.barId)}
                                       onMouseLeave={() => setHoveredBarId(null)}
-                                      className="flex-1 min-w-[18px] max-w-[34px] h-full relative flex items-end justify-center group cursor-pointer"
+                                      className="w-full h-full relative flex items-end justify-center group cursor-pointer"
                                       title={`${cg.circuit.label} · ${ri.range.label} (${pb.periodLabel}): ${pb.pct.toFixed(2)}% (${pb.minutes.toLocaleString()} min / ${pb.totalOperationMinutes.toLocaleString()} min)`}
                                     >
                                       <div
-                                        className={`w-full rounded-t-md transition-all duration-300 relative ${
-                                          isHighest ? 'ring-2 ring-amber-300' : 'group-hover:brightness-125'
-                                        }`}
+                                        className="w-full max-w-[34px] rounded-t-md transition-all duration-300 relative group-hover:brightness-125"
                                         style={{
                                           height: `${heightPct}%`,
                                           backgroundColor: ri.range.hexColor,
                                           opacity: pb.pct > 0 ? opacityFactor : 0.2,
-                                          boxShadow: isHighest
-                                            ? `0 0 24px ${ri.range.hexColor}, 0 0 12px rgba(251, 191, 36, 0.9)`
-                                            : pb.pct > 0
+                                          boxShadow:
+                                            pb.pct > 0
                                               ? `0 0 10px ${ri.range.hexColor}55`
                                               : 'none',
                                         }}
                                       >
+                                        {/* Little Trend Indicator directly above Percentage on each bar */}
                                         <div
                                           className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 flex flex-col items-center pointer-events-none"
-                                          style={{ zIndex: isHighest ? 25 : 15 }}
+                                          style={{ zIndex: 20 }}
                                         >
-                                          {isHighest && (
-                                            <span className="mb-0.5 px-1 py-0.2 rounded bg-amber-400 text-slate-950 text-[8px] font-mono font-extrabold shadow-[0_0_12px_rgba(251,191,36,0.95)] whitespace-nowrap">
-                                              ★ MAX
+                                          {(pIdx > 0 || pb.hasDelta) && (
+                                            <span
+                                              className={`mb-0.5 px-1 py-0.2 rounded text-[8px] font-mono font-extrabold leading-tight whitespace-nowrap border ${
+                                                pb.deltaPctFromPrev > 0
+                                                  ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                                                  : pb.deltaPctFromPrev < 0
+                                                    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                                                    : 'bg-slate-900/90 text-slate-400 border-slate-700/70'
+                                              }`}
+                                            >
+                                              {pb.deltaPctFromPrev > 0
+                                                ? `▲+${pb.deltaPctFromPrev.toFixed(1)}%`
+                                                : pb.deltaPctFromPrev < 0
+                                                  ? `▼${pb.deltaPctFromPrev.toFixed(1)}%`
+                                                  : '=0.0%'}
                                             </span>
                                           )}
                                           <span
                                             className={`text-[9px] font-mono leading-none whitespace-nowrap ${
-                                              isHighest
-                                                ? 'text-amber-300 font-extrabold text-[10px]'
-                                                : pb.pct > 0
-                                                  ? 'text-slate-100 font-bold'
-                                                  : 'text-slate-600'
+                                              pb.pct > 0 ? 'text-slate-100 font-bold' : 'text-slate-600'
                                             }`}
                                           >
                                             {pb.pct.toFixed(1)}%
@@ -1548,54 +1744,60 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
                                   );
                                 })}
                               </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* X-Axis Labels: Period Sub-Labels, Operating Ranges & Circuit Titles */}
-                <div className="flex items-start justify-around gap-4 pl-14 pr-4 pt-1.5">
-                  {circuitChartGroups.map((cg) => (
-                    <div key={cg.circuit.key} className="flex-1 flex flex-col items-center px-2">
-                      {/* Operating Condition Sub-Labels under each circuit */}
-                      <div className="w-full flex items-start justify-around gap-2 pb-2 border-b border-slate-800/80">
-                        {cg.rangeItems.map((ri) => (
-                          <div key={ri.groupId} className="flex-1 flex flex-col items-center text-center">
-                            {isComparisonMode && (
-                              <div className="w-full flex items-center justify-center gap-1 px-1 pb-1 mb-1 border-b border-slate-800/60">
-                                {ri.periodBars.map((pb) => (
-                                  <span
-                                    key={pb.barId}
-                                    className="flex-1 min-w-[18px] max-w-[34px] text-[8px] font-mono font-bold text-cyan-200/90 truncate"
-                                  >
-                                    {pb.periodShortLabel}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                            <span
-                              className="text-[10px] font-mono font-extrabold"
-                              style={{ color: ri.range.hexColor }}
-                            >
-                              {ri.range.shortLabel}
-                            </span>
-                            <span className="text-[9px] font-mono text-slate-500">{ri.mwCriteriaText}</span>
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* Circuit Main X-Axis Title */}
-                      <div className="mt-2 text-center">
-                        <div className="text-xs sm:text-sm font-extrabold font-mono text-white tracking-wide">
-                          {cg.circuit.label}
+                            );
+                          })}
                         </div>
-                        <div className="text-[10px] text-slate-400">{cg.circuit.substation}</div>
+
+                        {/* BOTTOM: X-Axis Labels (Period Sub-Labels, Operating Condition Labels & Circuit Title) inside the exact same Circuit Column */}
+                        <div className="pt-1.5 px-3 flex flex-col items-center">
+                          <div
+                            className="w-full grid gap-2 pb-2 border-b border-slate-800/80"
+                            style={{
+                              gridTemplateColumns: `repeat(${Math.max(1, cg.rangeItems.length)}, minmax(0, 1fr))`,
+                            }}
+                          >
+                            {cg.rangeItems.map((ri) => (
+                              <div key={ri.groupId} className="w-full flex flex-col items-center text-center">
+                                {isComparisonMode && (
+                                  <div
+                                    className="w-full grid gap-1 px-0.5 pb-1 mb-1 border-b border-slate-800/60"
+                                    style={{
+                                      gridTemplateColumns: `repeat(${Math.max(1, ri.periodBars.length)}, minmax(0, 1fr))`,
+                                    }}
+                                  >
+                                    {ri.periodBars.map((pb) => (
+                                      <span
+                                        key={pb.barId}
+                                        className="w-full text-center text-[8px] font-mono font-bold text-cyan-200/90 truncate"
+                                        title={pb.periodLabel}
+                                      >
+                                        {pb.periodShortLabel}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                <span
+                                  className="text-[10px] font-mono font-extrabold"
+                                  style={{ color: ri.range.hexColor }}
+                                >
+                                  {ri.range.shortLabel}
+                                </span>
+                                <span className="text-[9px] font-mono text-slate-500">{ri.mwCriteriaText}</span>
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* Circuit Main X-Axis Title */}
+                          <div className="mt-2 text-center">
+                            <div className="text-xs sm:text-sm font-extrabold font-mono text-white tracking-wide">
+                              {cg.circuit.label}
+                            </div>
+                            <div className="text-[10px] text-slate-400">{cg.circuit.substation}</div>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
