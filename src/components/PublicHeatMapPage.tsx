@@ -347,26 +347,53 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
     return getOrgRecordsForDate(selectedDate);
   }, [selectedDate, dbConfig, dbVersion]);
 
-  // Determine the day before selectedDate and load its records for day-over-day comparison
-  const { prevDate, prevDailyRecords } = useMemo(() => {
-    if (!selectedDate) return { prevDate: '', prevDailyRecords: [] as OrgDatabaseRecord[] };
-    const dt = new Date(`${selectedDate}T00:00:00Z`);
-    let candidateDate = '';
-    if (!isNaN(dt.getTime())) {
-      dt.setUTCDate(dt.getUTCDate() - 1);
-      const calPrev = dt.toISOString().slice(0, 10);
-      const calRecs = getOrgRecordsForDate(calPrev);
-      if (calRecs.length > 0) {
-        return { prevDate: calPrev, prevDailyRecords: calRecs };
+  // Determine the same date of the previous year and load its records for year-over-year comparison
+  const { prevYearDate, prevYearRecords } = useMemo(() => {
+    if (!selectedDate) return { prevYearDate: '', prevYearRecords: [] as OrgDatabaseRecord[] };
+    const yr = parseInt(selectedDate.slice(0, 4), 10);
+    const monthDay = selectedDate.slice(5, 10);
+    if (isNaN(yr) || !monthDay) {
+      return { prevYearDate: '', prevYearRecords: [] as OrgDatabaseRecord[] };
+    }
+    const prevYr = yr - 1;
+    const isLeapPrevYr = (prevYr % 4 === 0 && prevYr % 100 !== 0) || prevYr % 400 === 0;
+    const targetMonthDay = monthDay === '02-29' && !isLeapPrevYr ? '02-28' : monthDay;
+    const exactPrevYearDate = `${prevYr}-${targetMonthDay}`;
+
+    const exactRecs = getOrgRecordsForDate(exactPrevYearDate);
+    if (exactRecs.length > 0) {
+      return { prevYearDate: exactPrevYearDate, prevYearRecords: exactRecs };
+    }
+
+    // Fallback 1: check if another prior year has the exact same month-day
+    const sameMonthDayInPriorYears = availableDates
+      .filter((d) => d.slice(5, 10) === targetMonthDay && parseInt(d.slice(0, 4), 10) < yr)
+      .sort();
+    if (sameMonthDayInPriorYears.length > 0) {
+      const bestPriorDate = sameMonthDayInPriorYears[sameMonthDayInPriorYears.length - 1];
+      const recs = getOrgRecordsForDate(bestPriorDate);
+      if (recs.length > 0) {
+        return { prevYearDate: bestPriorDate, prevYearRecords: recs };
       }
-      candidateDate = calPrev;
     }
-    const idx = availableDates.indexOf(selectedDate);
-    if (idx > 0) {
-      const fallbackPrev = availableDates[idx - 1];
-      return { prevDate: fallbackPrev, prevDailyRecords: getOrgRecordsForDate(fallbackPrev) };
+
+    // Fallback 2: closest date in the same month of the previous year
+    const prevYrSameMonthPrefix = `${prevYr}-${selectedDate.slice(5, 7)}-`;
+    const sameMonthDates = availableDates.filter((d) => d.startsWith(prevYrSameMonthPrefix));
+    if (sameMonthDates.length > 0) {
+      const targetMs = new Date(`${exactPrevYearDate}T00:00:00Z`).getTime();
+      const closestDate = [...sameMonthDates].sort((a, b) => {
+        const da = Math.abs(new Date(`${a}T00:00:00Z`).getTime() - targetMs);
+        const db = Math.abs(new Date(`${b}T00:00:00Z`).getTime() - targetMs);
+        return da - db;
+      })[0];
+      const recs = getOrgRecordsForDate(closestDate);
+      if (recs.length > 0) {
+        return { prevYearDate: closestDate, prevYearRecords: recs };
+      }
     }
-    return { prevDate: candidateDate, prevDailyRecords: [] as OrgDatabaseRecord[] };
+
+    return { prevYearDate: exactPrevYearDate, prevYearRecords: [] as OrgDatabaseRecord[] };
   }, [selectedDate, availableDates, dbConfig, dbVersion]);
 
   // Section record lookup map
@@ -542,13 +569,11 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
     });
   }, [selectedCategory, selectedSectionFilter, selectedPhaseFilter, sectionRecordMap, dbVersion]);
 
-  // Helper to compute stats for a set of daily records (respecting current category/section/phase filters)
-  const computeStatsForRecords = (records: OrgDatabaseRecord[]) => {
-    if (records.length === 0) {
-      return { maxTf: 0, maxTc: 0, hottestSection: '-', totalPowerMW: 0 };
-    }
+  // Enriched points for the same date of the previous year (respecting current filters)
+  const prevYearEnrichedPoints: EnrichedPublicPoint[] = useMemo(() => {
+    if (prevYearRecords.length === 0) return [];
     const recMap = new Map<string, OrgDatabaseRecord>();
-    records.forEach((r) => {
+    prevYearRecords.forEach((r) => {
       recMap.set(r.sectionId, r);
       if (r.phase) {
         const pNorm = r.phase.replace(/^Phase\s+/i, '').trim();
@@ -559,12 +584,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
       }
     });
 
-    let maxTf = 0;
-    let maxTc = 0;
-    let hottestSection = '-';
-    let totalPowerMW = 0;
-
-    const filteredPts = CIRCUIT_3_SAMPLING_POINTS.filter((p) => {
+    return CIRCUIT_3_SAMPLING_POINTS.filter((p) => {
       if (selectedCategory === 'land' && p.cableCategory !== 'land') return false;
       if (selectedCategory === 'submarine' && p.cableCategory !== 'submarine') return false;
       if (selectedSectionFilter !== 'all' && p.sectionId !== selectedSectionFilter) return false;
@@ -572,43 +592,141 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
         return false;
       }
       return true;
-    });
-
-    filteredPts.forEach((p) => {
+    }).map((p) => {
       const rec =
         (p.phase ? recMap.get(`${p.sectionId}_${p.phase}`) : null) ||
         recMap.get(p.sectionId);
-      if (!rec) return;
-      const { tf, tc } = resolveDofDailyPeak(p, rec);
-      if (tf > maxTf) {
-        maxTf = tf;
-        hottestSection = p.sectionId;
-      }
-      if (tc > maxTc) maxTc = tc;
-      if (rec.powerAtMaxMW > totalPowerMW) totalPowerMW = rec.powerAtMaxMW;
+      const {
+        tf,
+        tc,
+        peakTime,
+        pointIndexInSection,
+        totalPointsInSection,
+        tfColLetter,
+        tcColLetter,
+      } = resolveDofDailyPeak(p, rec);
+      return {
+        ...p,
+        tfMax: tf,
+        tcMax: tc,
+        powerAtMaxMW: rec?.powerAtMaxMW ?? 0,
+        pCkt3MaxMW: rec?.pCkt3MaxMW ?? 0,
+        pCkt2MaxMW: rec?.pCkt2MaxMW ?? 0,
+        p33NktMaxMW: rec?.p33NktMaxMW ?? 0,
+        p33OilMaxMW: rec?.p33OilMaxMW ?? 0,
+        peakTime,
+        sourceFile: rec?.fileNameMax || '',
+        pointIndexInSection,
+        totalPointsInSection,
+        tfColLetter,
+        tcColLetter,
+      };
+    });
+  }, [prevYearRecords, selectedCategory, selectedSectionFilter, selectedPhaseFilter, dbVersion]);
+
+  // Top 3 Maximum Values for Peak Fiber TF, Peak Conductor TC, and Peak Power Flow
+  // with DOF position, Section, and comparison to the same date of the previous year
+  const top3Metrics = useMemo(() => {
+    const getPowerVal = (p: EnrichedPublicPoint) =>
+      p.powerAtMaxMW > 0 ? p.powerAtMaxMW : p.pCkt3MaxMW;
+
+    const prevByPointId = new Map<string, EnrichedPublicPoint>();
+    prevYearEnrichedPoints.forEach((p) => {
+      prevByPointId.set(p.id, p);
     });
 
+    const pickTop3 = (
+      pts: EnrichedPublicPoint[],
+      getVal: (p: EnrichedPublicPoint) => number
+    ): EnrichedPublicPoint[] => {
+      const valid = pts.filter((p) => getVal(p) > 0);
+      const sorted = [...valid].sort((a, b) => {
+        const diff = getVal(b) - getVal(a);
+        if (Math.abs(diff) > 0.001) return diff;
+        if (Math.abs(b.tfMax - a.tfMax) > 0.001) return b.tfMax - a.tfMax;
+        if (Math.abs(b.tcMax - a.tcMax) > 0.001) return b.tcMax - a.tcMax;
+        return a.dof - b.dof;
+      });
+
+      const chosen: EnrichedPublicPoint[] = [];
+      const chosenIds = new Set<string>();
+      const chosenSections = new Set<string>();
+
+      // Pass 1: select the #1 peak DOF point from each distinct section so Top 3 come from 3 different sections
+      for (const p of sorted) {
+        if (chosen.length >= 3) break;
+        if (!chosenSections.has(p.sectionId)) {
+          chosen.push(p);
+          chosenIds.add(p.id);
+          chosenSections.add(p.sectionId);
+        }
+      }
+
+      // Pass 2: backfill only if fewer than 3 sections are in scope (e.g. when filtered to a single section)
+      for (const p of sorted) {
+        if (chosen.length >= 3) break;
+        if (!chosenIds.has(p.id)) {
+          chosen.push(p);
+          chosenIds.add(p.id);
+        }
+      }
+
+      return chosen;
+    };
+
+    const currTopTf = pickTop3(enrichedPoints, (p) => p.tfMax);
+    const currTopTc = pickTop3(enrichedPoints, (p) => p.tcMax);
+    const currTopPower = pickTop3(enrichedPoints, getPowerVal);
+
+    const prevTopTf = pickTop3(prevYearEnrichedPoints, (p) => p.tfMax);
+    const prevTopTc = pickTop3(prevYearEnrichedPoints, (p) => p.tcMax);
+    const prevTopPower = pickTop3(prevYearEnrichedPoints, getPowerVal);
+
+    const buildItems = (
+      currList: EnrichedPublicPoint[],
+      prevFallbackList: EnrichedPublicPoint[],
+      getVal: (p: EnrichedPublicPoint) => number
+    ) => {
+      return currList.map((pt, idx) => {
+        const val = getVal(pt);
+        const samePtPrev = prevByPointId.get(pt.id);
+        const samePtPrevVal = samePtPrev ? getVal(samePtPrev) : 0;
+        const fallbackPrevVal = prevFallbackList[idx] ? getVal(prevFallbackList[idx]) : 0;
+        const prevVal = samePtPrevVal > 0 ? samePtPrevVal : fallbackPrevVal;
+        return {
+          rank: idx + 1,
+          point: pt,
+          value: val,
+          prevYearValue: prevVal,
+        };
+      });
+    };
+
+    return {
+      topTf: buildItems(currTopTf, prevTopTf, (p) => p.tfMax),
+      topTc: buildItems(currTopTc, prevTopTc, (p) => p.tcMax),
+      topPower: buildItems(currTopPower, prevTopPower, getPowerVal),
+    };
+  }, [enrichedPoints, prevYearEnrichedPoints]);
+
+  // Overall top #1 summary stats for minimized bar compatibility
+  const summaryStats = useMemo(() => {
+    const maxTf = top3Metrics.topTf[0]?.value || 0;
+    const maxTc = top3Metrics.topTc[0]?.value || 0;
+    const hottestSection = top3Metrics.topTf[0]?.point.sectionId || '-';
+    const totalPowerMW = top3Metrics.topPower[0]?.value || 0;
     return { maxTf, maxTc, hottestSection, totalPowerMW };
-  };
+  }, [top3Metrics]);
 
-  // Overall stats for the selected date and the day before
-  const summaryStats = useMemo(
-    () => computeStatsForRecords(dailyRecords),
-    [dailyRecords, selectedCategory, selectedSectionFilter, selectedPhaseFilter]
-  );
-
-  const prevSummaryStats = useMemo(
-    () => computeStatsForRecords(prevDailyRecords),
-    [prevDailyRecords, selectedCategory, selectedSectionFilter, selectedPhaseFilter]
-  );
-
-  // Helper to render external Increase / Decrease indicator right next to each KPI box
-  const renderDayBeforeIndicator = (currentVal: number, prevVal: number, unit: string) => {
+  // Helper to render Increase / Decrease trend indicator compared to the same date of the previous year
+  const renderPrevYearIndicator = (currentVal: number, prevVal: number, unit: string) => {
     if (currentVal <= 0 || prevVal <= 0) {
       return (
-        <div className="flex flex-col justify-center font-mono text-left pl-0.5">
-          <span className="text-[10px] font-bold text-slate-400">● No Prior Day Data</span>
-          <span className="text-[10px] text-slate-500">N/A vs previous day</span>
+        <div className="flex flex-col justify-center font-mono text-left pl-0.5 min-w-[130px]">
+          <span className="text-[10px] font-bold text-slate-400">● No Prior Year Data</span>
+          <span className="text-[10px] text-slate-500">
+            N/A vs {prevYearDate || 'prev year'}
+          </span>
         </div>
       );
     }
@@ -619,9 +737,9 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
     const sign = diff > 0 ? '+' : '';
 
     return (
-      <div className="flex flex-col justify-center font-mono text-left leading-tight">
+      <div className="flex flex-col justify-center font-mono text-left leading-tight min-w-[140px]">
         <div
-          className={`inline-flex items-center gap-1 text-xs font-extrabold ${
+          className={`inline-flex items-center gap-1 text-[11px] font-extrabold ${
             isIncrease
               ? 'text-emerald-400'
               : isDecrease
@@ -629,14 +747,14 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
               : 'text-slate-300'
           }`}
         >
-          <span className="text-sm leading-none">
+          <span className="text-xs leading-none">
             {isIncrease ? '▲' : isDecrease ? '▼' : '●'}
           </span>
           <span className="uppercase tracking-wide">
             {isIncrease ? 'Increase' : isDecrease ? 'Decrease' : 'Unchanged'}
           </span>
         </div>
-        <div className="text-xs font-black text-white mt-0.5">
+        <div className="text-[11px] font-black text-white mt-0.5">
           {sign}
           {diff.toFixed(1)} {unit}{' '}
           <span
@@ -653,10 +771,17 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
           </span>
         </div>
         <div className="text-[10px] text-slate-400">
-          vs {prevDate || 'day before'} ({prevVal.toFixed(1)} {unit})
+          vs {prevYearDate || 'prev year'} ({prevVal.toFixed(1)} {unit})
         </div>
       </div>
     );
+  };
+
+  // Focus map on a specific sampling point when user clicks any Top 3 card
+  const handleFocusSamplingPoint = (pt: EnrichedPublicPoint) => {
+    if (mapInstanceRef.current) {
+      mapInstanceRef.current.flyTo([pt.latitude, pt.longitude], 15, { duration: 1.1 });
+    }
   };
 
   const landSectionsList = useMemo(() => {
@@ -1274,46 +1399,163 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
             </button>
           </div>
 
-          {/* Quick KPI stats — Re-arranged with wide separation so the 3 boxes do not stay close to each other,
-              and with an external Increase/Decrease indicator right next to each related box */}
-          <div className="w-full pt-3 mt-1 border-t border-slate-800/80 grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-10">
-            {/* 1. Peak Fiber TF Box + Outside Indicator */}
-            <div className="flex items-center gap-3.5">
-              <div className="bg-rose-950/40 border border-rose-500/40 px-4 py-2 rounded-xl text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.15)] shrink-0 min-w-[145px]">
-                <span className="text-[10px] uppercase font-bold text-rose-400 block">
-                  Peak Fiber TF
+          {/* Top 3 Maximum Values for Peak Fiber TF, Peak Conductor TC, and Peak Power Flow
+              with DOF position, Section, and Year-over-Year Increase/Decrease trend (vs same date of previous year) */}
+          <div className="w-full pt-3 mt-1 border-t border-slate-800/80 grid grid-cols-1 xl:grid-cols-3 gap-5 lg:gap-7">
+            {/* 1. Peak Fiber TF — Top 3 Maximum Values + DOF & Section + YoY Trend */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <span className="text-[11px] uppercase font-black tracking-wider text-rose-400 font-mono flex items-center gap-1.5">
+                  <Thermometer className="w-3.5 h-3.5 text-rose-400" />
+                  Peak Fiber TF (Top 3 Max)
                 </span>
-                <span className="font-extrabold text-base font-mono">
-                  {summaryStats.maxTf > 0 ? `${summaryStats.maxTf.toFixed(1)} °C` : '-'}
+                <span className="text-[10px] font-mono text-slate-400">
+                  vs {prevYearDate || 'Prev Year'}
                 </span>
               </div>
-              {renderDayBeforeIndicator(summaryStats.maxTf, prevSummaryStats.maxTf, '°C')}
+              <div className="space-y-2">
+                {top3Metrics.topTf.length > 0 ? (
+                  top3Metrics.topTf.map((item) => {
+                    const pt = item.point;
+                    const secPrefix = pt.cableCategory === 'land' ? 'Sec' : 'Zone';
+                    const phaseTag = pt.phase ? ` · Ph ${pt.phase}` : '';
+                    return (
+                      <div key={`tf-top-${item.rank}-${pt.id}`} className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => handleFocusSamplingPoint(pt)}
+                          title={`Click to zoom map to ${secPrefix} ${pt.sectionId} — DOF ${pt.dof.toFixed(1)} m (${pt.pos})`}
+                          className="text-left bg-rose-950/40 hover:bg-rose-950/60 border border-rose-500/40 hover:border-rose-400/70 px-3.5 py-2 rounded-xl text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.15)] transition-all cursor-pointer flex-1 min-w-[195px]"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] uppercase font-black text-rose-400 font-mono">
+                              #{item.rank} Peak Fiber TF
+                            </span>
+                            <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-rose-950/80 border border-rose-500/30 text-rose-200">
+                              DOF {pt.dof.toFixed(1)}m ({pt.pos})
+                            </span>
+                          </div>
+                          <div className="font-extrabold text-base font-mono text-rose-200 mt-0.5">
+                            {item.value.toFixed(1)} °C
+                          </div>
+                          <div className="text-[10px] font-mono text-rose-300/90 truncate mt-0.5">
+                            {secPrefix} {pt.sectionId}{phaseTag} — {pt.sectionName}
+                          </div>
+                        </button>
+                        {renderPrevYearIndicator(item.value, item.prevYearValue, '°C')}
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="bg-rose-950/30 border border-rose-500/30 px-4 py-3 rounded-xl text-xs font-mono text-slate-400">
+                    No Peak Fiber TF records for selected filter
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* 2. Peak Conductor TC Box + Outside Indicator */}
-            <div className="flex items-center gap-3.5">
-              <div className="bg-amber-950/40 border border-amber-500/40 px-4 py-2 rounded-xl text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.15)] shrink-0 min-w-[155px]">
-                <span className="text-[10px] uppercase font-bold text-amber-400 block">
-                  Peak Conductor TC
+            {/* 2. Peak Conductor TC — Top 3 Maximum Values + DOF & Section + YoY Trend */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <span className="text-[11px] uppercase font-black tracking-wider text-amber-400 font-mono flex items-center gap-1.5">
+                  <Flame className="w-3.5 h-3.5 text-amber-400" />
+                  Peak Conductor TC (Top 3 Max)
                 </span>
-                <span className="font-extrabold text-base font-mono">
-                  {summaryStats.maxTc > 0 ? `${summaryStats.maxTc.toFixed(1)} °C` : '-'}
+                <span className="text-[10px] font-mono text-slate-400">
+                  vs {prevYearDate || 'Prev Year'}
                 </span>
               </div>
-              {renderDayBeforeIndicator(summaryStats.maxTc, prevSummaryStats.maxTc, '°C')}
+              <div className="space-y-2">
+                {top3Metrics.topTc.length > 0 ? (
+                  top3Metrics.topTc.map((item) => {
+                    const pt = item.point;
+                    const secPrefix = pt.cableCategory === 'land' ? 'Sec' : 'Zone';
+                    const phaseTag = pt.phase ? ` · Ph ${pt.phase}` : '';
+                    return (
+                      <div key={`tc-top-${item.rank}-${pt.id}`} className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => handleFocusSamplingPoint(pt)}
+                          title={`Click to zoom map to ${secPrefix} ${pt.sectionId} — DOF ${pt.dof.toFixed(1)} m (${pt.pos})`}
+                          className="text-left bg-amber-950/40 hover:bg-amber-950/60 border border-amber-500/40 hover:border-amber-400/70 px-3.5 py-2 rounded-xl text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.15)] transition-all cursor-pointer flex-1 min-w-[195px]"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] uppercase font-black text-amber-400 font-mono">
+                              #{item.rank} Peak Conductor TC
+                            </span>
+                            <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-500/30 text-amber-200">
+                              DOF {pt.dof.toFixed(1)}m ({pt.pos})
+                            </span>
+                          </div>
+                          <div className="font-extrabold text-base font-mono text-amber-200 mt-0.5">
+                            {item.value.toFixed(1)} °C
+                          </div>
+                          <div className="text-[10px] font-mono text-amber-300/90 truncate mt-0.5">
+                            {secPrefix} {pt.sectionId}{phaseTag} — {pt.sectionName}
+                          </div>
+                        </button>
+                        {renderPrevYearIndicator(item.value, item.prevYearValue, '°C')}
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="bg-amber-950/30 border border-amber-500/30 px-4 py-3 rounded-xl text-xs font-mono text-slate-400">
+                    No Peak Conductor TC records for selected filter
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* 3. Peak Power Flow Box + Outside Indicator */}
-            <div className="flex items-center gap-3.5">
-              <div className="bg-cyan-950/40 border border-cyan-500/40 px-4 py-2 rounded-xl text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.15)] shrink-0 min-w-[150px]">
-                <span className="text-[10px] uppercase font-bold text-cyan-400 block">
-                  Peak Power Flow
+            {/* 3. Peak Power Flow — Top 3 Maximum Values + DOF & Section + YoY Trend */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <span className="text-[11px] uppercase font-black tracking-wider text-cyan-400 font-mono flex items-center gap-1.5">
+                  <Zap className="w-3.5 h-3.5 text-cyan-400" />
+                  Peak Power Flow (Top 3 Max)
                 </span>
-                <span className="font-extrabold text-base font-mono">
-                  {summaryStats.totalPowerMW > 0 ? `${summaryStats.totalPowerMW.toFixed(1)} MW` : '-'}
+                <span className="text-[10px] font-mono text-slate-400">
+                  vs {prevYearDate || 'Prev Year'}
                 </span>
               </div>
-              {renderDayBeforeIndicator(summaryStats.totalPowerMW, prevSummaryStats.totalPowerMW, 'MW')}
+              <div className="space-y-2">
+                {top3Metrics.topPower.length > 0 ? (
+                  top3Metrics.topPower.map((item) => {
+                    const pt = item.point;
+                    const secPrefix = pt.cableCategory === 'land' ? 'Sec' : 'Zone';
+                    const phaseTag = pt.phase ? ` · Ph ${pt.phase}` : '';
+                    return (
+                      <div key={`pw-top-${item.rank}-${pt.id}`} className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => handleFocusSamplingPoint(pt)}
+                          title={`Click to zoom map to ${secPrefix} ${pt.sectionId} — DOF ${pt.dof.toFixed(1)} m (${pt.pos})`}
+                          className="text-left bg-cyan-950/40 hover:bg-cyan-950/60 border border-cyan-500/40 hover:border-cyan-400/70 px-3.5 py-2 rounded-xl text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.15)] transition-all cursor-pointer flex-1 min-w-[195px]"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] uppercase font-black text-cyan-400 font-mono">
+                              #{item.rank} Peak Power Flow
+                            </span>
+                            <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-cyan-950/80 border border-cyan-500/30 text-cyan-200">
+                              DOF {pt.dof.toFixed(1)}m ({pt.pos})
+                            </span>
+                          </div>
+                          <div className="font-extrabold text-base font-mono text-cyan-200 mt-0.5">
+                            {item.value.toFixed(1)} MW
+                          </div>
+                          <div className="text-[10px] font-mono text-cyan-300/90 truncate mt-0.5">
+                            {secPrefix} {pt.sectionId}{phaseTag} — {pt.sectionName}
+                          </div>
+                        </button>
+                        {renderPrevYearIndicator(item.value, item.prevYearValue, 'MW')}
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="bg-cyan-950/30 border border-cyan-500/30 px-4 py-3 rounded-xl text-xs font-mono text-slate-400">
+                    No Peak Power Flow records for selected filter
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
