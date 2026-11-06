@@ -46,6 +46,7 @@ export interface PublicHeatMapPageProps {
   activeDailyPowerSummary?: DailyPowerSummary | null;
   powerSummariesByDate?: Map<string, DailyPowerSummary>;
   selectedDateFilter?: string;
+  isMobileView?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +280,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   activeDailyPowerSummary = null,
   powerSummariesByDate,
   selectedDateFilter = 'all',
+  isMobileView = false,
 }) => {
   const [dbVersion, setDbVersion] = useState<number>(0);
 
@@ -316,6 +318,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   const [selectedPhaseFilter, setSelectedPhaseFilter] = useState<'all' | 'A' | 'B' | 'C'>('all');
   const [highlightedLandmark, setHighlightedLandmark] = useState<string | null>(null);
   const [isTopPanelMinimized, setIsTopPanelMinimized] = useState<boolean>(false);
+  const [isLocationsPanelMinimized, setIsLocationsPanelMinimized] = useState<boolean>(false);
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -1153,7 +1156,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
       clearTimeout(t1);
       if (observer) observer.disconnect();
     };
-  }, [isTopPanelMinimized, enrichedPoints, highlightedLandmark]);
+  }, [isTopPanelMinimized, isMobileView, enrichedPoints, highlightedLandmark]);
 
   // Handle zooming/focusing to landmark when clicked from legend
   const handleFocusLandmark = (lm: LandmarkLocation) => {
@@ -1401,7 +1404,11 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
 
           {/* Top 3 Maximum Values for Peak Fiber TF, Peak Conductor TC, and Peak Power Flow
               with DOF position, Section, and Year-over-Year Increase/Decrease trend (vs same date of previous year) */}
-          <div className="w-full pt-3 mt-1 border-t border-slate-800/80 grid grid-cols-1 xl:grid-cols-3 gap-5 lg:gap-7">
+          <div
+            className={`w-full pt-3 mt-1 border-t border-slate-800/80 grid ${
+              isMobileView ? 'grid-cols-1 gap-4' : 'grid-cols-1 xl:grid-cols-3 gap-5 lg:gap-7'
+            }`}
+          >
             {/* 1. Peak Fiber TF — Top 3 Maximum Values + DOF & Section + YoY Trend */}
             <div className="space-y-2">
               <div className="flex items-center justify-between px-1">
@@ -1420,12 +1427,17 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
                     const secPrefix = pt.cableCategory === 'land' ? 'Sec' : 'Zone';
                     const phaseTag = pt.phase ? ` · Ph ${pt.phase}` : '';
                     return (
-                      <div key={`tf-top-${item.rank}-${pt.id}`} className="flex items-center gap-3">
+                      <div
+                        key={`tf-top-${item.rank}-${pt.id}`}
+                        className={`flex ${
+                          isMobileView ? 'flex-col sm:flex-row sm:items-center gap-2' : 'items-center gap-3'
+                        }`}
+                      >
                         <button
                           type="button"
                           onClick={() => handleFocusSamplingPoint(pt)}
                           title={`Click to zoom map to ${secPrefix} ${pt.sectionId} — DOF ${pt.dof.toFixed(1)} m (${pt.pos})`}
-                          className="text-left bg-rose-950/40 hover:bg-rose-950/60 border border-rose-500/40 hover:border-rose-400/70 px-3.5 py-2 rounded-xl text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.15)] transition-all cursor-pointer flex-1 min-w-[195px]"
+                          className="text-left bg-rose-950/40 hover:bg-rose-950/60 border border-rose-500/40 hover:border-rose-400/70 px-3.5 py-2 rounded-xl text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.15)] transition-all cursor-pointer flex-1 min-w-0"
                         >
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-[10px] uppercase font-black text-rose-400 font-mono">
@@ -1472,12 +1484,17 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
                     const secPrefix = pt.cableCategory === 'land' ? 'Sec' : 'Zone';
                     const phaseTag = pt.phase ? ` · Ph ${pt.phase}` : '';
                     return (
-                      <div key={`tc-top-${item.rank}-${pt.id}`} className="flex items-center gap-3">
+                      <div
+                        key={`tc-top-${item.rank}-${pt.id}`}
+                        className={`flex ${
+                          isMobileView ? 'flex-col sm:flex-row sm:items-center gap-2' : 'items-center gap-3'
+                        }`}
+                      >
                         <button
                           type="button"
                           onClick={() => handleFocusSamplingPoint(pt)}
                           title={`Click to zoom map to ${secPrefix} ${pt.sectionId} — DOF ${pt.dof.toFixed(1)} m (${pt.pos})`}
-                          className="text-left bg-amber-950/40 hover:bg-amber-950/60 border border-amber-500/40 hover:border-amber-400/70 px-3.5 py-2 rounded-xl text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.15)] transition-all cursor-pointer flex-1 min-w-[195px]"
+                          className="text-left bg-amber-950/40 hover:bg-amber-950/60 border border-amber-500/40 hover:border-amber-400/70 px-3.5 py-2 rounded-xl text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.15)] transition-all cursor-pointer flex-1 min-w-0"
                         >
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-[10px] uppercase font-black text-amber-400 font-mono">
@@ -1524,12 +1541,17 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
                     const secPrefix = pt.cableCategory === 'land' ? 'Sec' : 'Zone';
                     const phaseTag = pt.phase ? ` · Ph ${pt.phase}` : '';
                     return (
-                      <div key={`pw-top-${item.rank}-${pt.id}`} className="flex items-center gap-3">
+                      <div
+                        key={`pw-top-${item.rank}-${pt.id}`}
+                        className={`flex ${
+                          isMobileView ? 'flex-col sm:flex-row sm:items-center gap-2' : 'items-center gap-3'
+                        }`}
+                      >
                         <button
                           type="button"
                           onClick={() => handleFocusSamplingPoint(pt)}
                           title={`Click to zoom map to ${secPrefix} ${pt.sectionId} — DOF ${pt.dof.toFixed(1)} m (${pt.pos})`}
-                          className="text-left bg-cyan-950/40 hover:bg-cyan-950/60 border border-cyan-500/40 hover:border-cyan-400/70 px-3.5 py-2 rounded-xl text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.15)] transition-all cursor-pointer flex-1 min-w-[195px]"
+                          className="text-left bg-cyan-950/40 hover:bg-cyan-950/60 border border-cyan-500/40 hover:border-cyan-400/70 px-3.5 py-2 rounded-xl text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.15)] transition-all cursor-pointer flex-1 min-w-0"
                         >
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-[10px] uppercase font-black text-cyan-400 font-mono">
@@ -1564,7 +1586,13 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
       {/* Satellite Map Container — Increases height when top panel is minimized */}
       <div
         className={`relative bg-slate-950 rounded-3xl border border-cyan-500/20 overflow-hidden shadow-[0_0_35px_rgba(6,182,212,0.08)] ${
-          isTopPanelMinimized ? 'h-[calc(100vh-145px)] min-h-[780px]' : 'h-[600px]'
+          isTopPanelMinimized
+            ? isMobileView
+              ? 'h-[520px]'
+              : 'h-[calc(100vh-145px)] min-h-[780px]'
+            : isMobileView
+            ? 'h-[450px]'
+            : 'h-[600px]'
         }`}
       >
         <div
@@ -1574,13 +1602,13 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
         />
 
         {/* Floating Thermal Threshold Legend */}
-        <div className="absolute bottom-4 left-4 z-20 bg-slate-950/90 backdrop-blur-md border border-cyan-500/30 rounded-2xl p-3 text-white text-xs shadow-xl space-y-2 max-w-sm font-mono">
-          <div className="font-bold flex items-center justify-between text-[11px] text-slate-300">
-            <span className="flex items-center gap-1.5">
-              <Flame className="w-3.5 h-3.5 text-rose-400" />
+        <div className="absolute bottom-3 left-3 z-20 bg-slate-950/90 backdrop-blur-md border border-cyan-500/30 rounded-2xl p-2.5 sm:p-3 text-white text-xs shadow-xl space-y-2 max-w-[calc(100%-24px)] sm:max-w-sm font-mono">
+          <div className="font-bold flex items-center justify-between text-[10px] sm:text-[11px] text-slate-300 gap-2">
+            <span className="flex items-center gap-1.5 truncate">
+              <Flame className="w-3.5 h-3.5 text-rose-400 shrink-0" />
               THERMAL THRESHOLD CONTINUOUS LINE
             </span>
-            <span className="font-mono text-[10px] text-cyan-400">GRADIENT</span>
+            <span className="font-mono text-[10px] text-cyan-400 shrink-0">GRADIENT</span>
           </div>
           <div className="grid grid-cols-6 gap-1 text-[9px] text-center font-bold">
             <div className="bg-sky-950/80 border border-sky-500/40 p-1 rounded-lg">
@@ -1614,47 +1642,73 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
           </div>
         </div>
 
-        {/* Floating Legend with Arrow Pins for Important Locations (Item 5.1 Requirement) */}
-        <div className="absolute top-4 right-4 z-20 bg-slate-950/92 backdrop-blur-md border border-cyan-500/30 rounded-2xl p-3 text-slate-200 text-xs shadow-2xl max-w-xs font-mono space-y-2">
-          <div className="font-extrabold text-[11px] text-cyan-300 flex items-center justify-between">
-            <span className="flex items-center gap-1.5">
+        {/* Floating Legend with Arrow Pins for Important Locations (Minimizable / Hideable) */}
+        {isLocationsPanelMinimized ? (
+          <div className="absolute top-3 right-3 z-20">
+            <button
+              type="button"
+              onClick={() => setIsLocationsPanelMinimized(false)}
+              className="inline-flex items-center gap-2 bg-slate-950/92 hover:bg-slate-900 backdrop-blur-md border border-cyan-500/40 hover:border-cyan-400 rounded-xl px-3 py-2 text-cyan-300 text-xs font-mono font-bold shadow-2xl transition-all cursor-pointer"
+              title="Show Important Locations (Arrow Pins) panel"
+            >
               <Navigation className="w-3.5 h-3.5 text-cyan-400" />
-              IMPORTANT LOCATIONS (ARROW PINS)
-            </span>
-            <span className="text-[10px] text-slate-400 font-mono">7 Pins</span>
+              <span>Important Locations (7 Pins)</span>
+              <ChevronDown className="w-3.5 h-3.5 text-cyan-400" />
+            </button>
           </div>
+        ) : (
+          <div className="absolute top-3 right-3 z-20 bg-slate-950/92 backdrop-blur-md border border-cyan-500/30 rounded-2xl p-3 text-slate-200 text-xs shadow-2xl max-w-xs font-mono space-y-2">
+            <div className="font-extrabold text-[11px] text-cyan-300 flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5">
+                <Navigation className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span>IMPORTANT LOCATIONS (ARROW PINS)</span>
+              </span>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="text-[10px] text-slate-400 font-mono">7 Pins</span>
+                <button
+                  type="button"
+                  onClick={() => setIsLocationsPanelMinimized(true)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-cyan-300 border border-slate-700 hover:border-cyan-500/40 text-[10px] font-mono font-bold transition-all cursor-pointer"
+                  title="Minimize / Hide Important Locations panel"
+                >
+                  <Minimize2 className="w-3 h-3 text-cyan-400" />
+                  <span>Hide</span>
+                </button>
+              </div>
+            </div>
 
-          <div className="space-y-1 text-[10px] max-h-48 overflow-y-auto pr-1">
-            {IMPORTANT_LANDMARKS.map((lm) => (
-              <button
-                key={lm.id}
-                type="button"
-                onClick={() => handleFocusLandmark(lm)}
-                className={`w-full text-left p-1.5 rounded-lg border flex items-center justify-between transition-all cursor-pointer ${
-                  highlightedLandmark === lm.id
-                    ? 'bg-cyan-950/80 border-cyan-400 text-cyan-200'
-                    : 'bg-slate-900/60 hover:bg-slate-850 border-slate-800 text-slate-300 hover:border-slate-700'
-                }`}
-                title={`Click to focus map on ${lm.name}`}
-              >
-                <div className="flex items-center gap-1.5 truncate">
-                  <span
-                    className="w-2.5 h-2.5 rounded-full shrink-0"
-                    style={{ backgroundColor: lm.color }}
-                  />
-                  <span className="font-bold truncate">{lm.name}</span>
-                </div>
-                <span className="text-[9px] font-mono text-slate-400 shrink-0 ml-1">
-                  {lm.kp}
-                </span>
-              </button>
-            ))}
-          </div>
+            <div className="space-y-1 text-[10px] max-h-48 overflow-y-auto pr-1">
+              {IMPORTANT_LANDMARKS.map((lm) => (
+                <button
+                  key={lm.id}
+                  type="button"
+                  onClick={() => handleFocusLandmark(lm)}
+                  className={`w-full text-left p-1.5 rounded-lg border flex items-center justify-between transition-all cursor-pointer ${
+                    highlightedLandmark === lm.id
+                      ? 'bg-cyan-950/80 border-cyan-400 text-cyan-200'
+                      : 'bg-slate-900/60 hover:bg-slate-850 border-slate-800 text-slate-300 hover:border-slate-700'
+                  }`}
+                  title={`Click to focus map on ${lm.name}`}
+                >
+                  <div className="flex items-center gap-1.5 truncate">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{ backgroundColor: lm.color }}
+                    />
+                    <span className="font-bold truncate">{lm.name}</span>
+                  </div>
+                  <span className="text-[9px] font-mono text-slate-400 shrink-0 ml-1">
+                    {lm.kp}
+                  </span>
+                </button>
+              ))}
+            </div>
 
-          <div className="pt-1.5 border-t border-slate-800 text-[10px] text-slate-400 flex items-center justify-between">
-            <span>Click any location to zoom and inspect</span>
+            <div className="pt-1.5 border-t border-slate-800 text-[10px] text-slate-400 flex items-center justify-between">
+              <span>Click any location to zoom and inspect</span>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

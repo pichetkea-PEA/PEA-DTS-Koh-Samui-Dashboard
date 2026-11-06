@@ -115,6 +115,12 @@ export default function App() {
   const [isDataSettingPwdModalOpen, setIsDataSettingPwdModalOpen] = useState<boolean>(false);
   const [isPublicSidebarCollapsed, setIsPublicSidebarCollapsed] = useState<boolean>(false);
   const [adminViewMode, setAdminViewMode] = useState<'internal' | 'public'>('internal');
+  const [viewDeviceMode, setViewDeviceMode] = useState<'desktop' | 'mobile'>(() => {
+    if (typeof window !== 'undefined') {
+      return window.innerWidth < 768 ? 'mobile' : 'desktop';
+    }
+    return 'desktop';
+  });
   const [dbConfig, setDbConfig] = useState<OrgDatabaseConfig>(() => getOrgDatabaseConfig());
 
   // Subscribe to changes in persistent organization database
@@ -2604,6 +2610,8 @@ export default function App() {
         onRefreshPublicData={handleRefreshPublicData}
         isRefreshingPublicData={isRefreshingPublicData && !showPublicChargingScreen}
         refreshProgress={showPublicChargingScreen ? 0 : refreshProgress}
+        viewDeviceMode={viewDeviceMode}
+        onChangeViewDeviceMode={(mode) => setViewDeviceMode(mode)}
       />
 
       {/* Toast Notification */}
@@ -2646,8 +2654,14 @@ export default function App() {
 
       {/* Main Body Layout */}
       {isPublicView ? (
-        /* PUBLIC DASHBOARD: YouTube-Style Left Sidebar + 5 Dedicated Public Views (Decoupled from Admin Login Session) */
-        <div className="flex-1 flex flex-col lg:flex-row min-h-[calc(100vh-64px)]">
+        /* PUBLIC DASHBOARD: Adapts between Desktop View (Left Sidebar + Wide Workspace) and Mobile View (Stacked Mobile Arrangement) */
+        <div
+          className={`flex-1 min-h-[calc(100vh-64px)] ${
+            viewDeviceMode === 'mobile'
+              ? 'flex flex-col w-full max-w-[560px] mx-auto md:border-x md:border-cyan-500/20 md:shadow-[0_0_45px_rgba(6,182,212,0.08)]'
+              : 'flex flex-row min-w-[1120px] lg:min-w-0 overflow-x-auto'
+          }`}
+        >
           <PublicSidebar
             activeTab={publicTab}
             onTabChange={(tab) => {
@@ -2660,6 +2674,7 @@ export default function App() {
             isCollapsed={isPublicSidebarCollapsed}
             onToggleCollapse={() => setIsPublicSidebarCollapsed((prev) => !prev)}
             dbConfig={dbConfig}
+            isMobileView={viewDeviceMode === 'mobile'}
           />
 
           <DataSettingPasswordModal
@@ -2671,7 +2686,13 @@ export default function App() {
             onCancel={() => setIsDataSettingPwdModalOpen(false)}
           />
 
-          <main className="flex-1 min-w-0 w-full max-w-[1880px] mx-auto px-2.5 sm:px-4 lg:px-6 py-4 sm:py-5 space-y-5">
+          <main
+            className={`flex-1 min-w-0 w-full mx-auto ${
+              viewDeviceMode === 'mobile'
+                ? 'px-2.5 py-3 space-y-4'
+                : 'max-w-[1880px] px-2.5 sm:px-4 lg:px-6 py-4 sm:py-5 space-y-5'
+            }`}
+          >
             {publicTab === 'heatmap' ? (
               <PublicHeatMapPage
                 dbConfig={dbConfig}
@@ -2685,6 +2706,7 @@ export default function App() {
                 activeDailyPowerSummary={null}
                 powerSummariesByDate={new Map()}
                 selectedDateFilter="all"
+                isMobileView={viewDeviceMode === 'mobile'}
               />
             ) : publicTab === 'dailycurve' ? (
               <PublicDailyCurvePage
