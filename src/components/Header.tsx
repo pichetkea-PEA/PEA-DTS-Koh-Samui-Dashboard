@@ -17,6 +17,7 @@ import {
   TrendingUp,
   ShieldAlert,
   Layers,
+  Gauge,
 } from 'lucide-react';
 
 export type AppPageTab =
@@ -27,7 +28,8 @@ export type AppPageTab =
   | 'analyzing'
   | 'risk'
   | 'yearly'
-  | 'ai_summary';
+  | 'ai_summary'
+  | 'thermal_prediction';
 
 interface HeaderProps {
   user: User | null;
@@ -133,6 +135,14 @@ export const Header: React.FC<HeaderProps> = ({
       subtitle: 'Quarterly & Monthly Report',
       icon: Sparkles,
     },
+    {
+      id: 'thermal_prediction',
+      num: '9',
+      label: 'Thermal Prediction',
+      shortLabel: 'Prediction',
+      subtitle: '4-Key Indicators & SCADA',
+      icon: Gauge,
+    },
   ];
 
   const getTabAgent = () => {
@@ -153,6 +163,8 @@ export const Header: React.FC<HeaderProps> = ({
         return 'Multi-Year Comparator';
       case 'ai_summary':
         return 'Executive AI Reporter';
+      case 'thermal_prediction':
+        return '4-Key Thermal Predictor';
     }
   };
 

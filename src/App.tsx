@@ -103,6 +103,7 @@ import { SectionAnalyzingPage } from './components/SectionAnalyzingPage';
 import { RiskManagementPage } from './components/RiskManagementPage';
 import { YearlyComparisonPage } from './components/YearlyComparisonPage';
 import { AdminAiSummaryPage } from './components/AdminAiSummaryPage';
+import { ThermalPredictionPage } from './components/ThermalPredictionPage';
 import { VideoGameLoadingScreen } from './components/VideoGameLoadingScreen';
 import { PublicElectricalLoadingScreen } from './components/PublicElectricalLoadingScreen';
 
@@ -2454,7 +2455,7 @@ export default function App() {
   const handleNavigateToTab = useCallback(
     (tab: AppPageTab) => {
       setActiveTab(tab);
-      if (tab !== 'management' && tab !== 'yearly') {
+      if (tab !== 'management' && tab !== 'yearly' && tab !== 'ai_summary' && tab !== 'thermal_prediction') {
         // If user already clicked Reading Temperature and changed date filter or files are still pending, auto-apply
         if (
           hasReadTemperature &&
@@ -3162,6 +3163,14 @@ export default function App() {
               dbConfig={dbConfig}
               powerSummariesByDate={powerSummariesByDate}
               ensurePowerSummaryForDate={ensurePowerSummaryForDate}
+              showNotification={showNotification}
+            />
+          </div>
+        ) : activeTab === 'thermal_prediction' ? (
+          /* PAGE 9: Conductor Temperature Prediction & 4-Circuit SCADA Dispatch Optimizer (4 Key Indicators) */
+          <div className="space-y-6 animate-in fade-in duration-200">
+            <ThermalPredictionPage
+              dbConfig={dbConfig}
               showNotification={showNotification}
             />
           </div>
