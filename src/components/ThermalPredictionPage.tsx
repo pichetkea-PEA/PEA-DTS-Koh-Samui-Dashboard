@@ -24,6 +24,7 @@ import {
   CIRCUIT_3_SECTIONS,
   CIRCUIT_3_SAMPLING_POINTS,
   getThermalZoneInfo,
+  evaluateSectionConductorTemp,
 } from '../data/cableCircuitStructure';
 import {
   OrgDatabaseConfig,
@@ -157,14 +158,31 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
   // Simulation & Prediction Controls State
   // ---------------------------------------------------------------------------
   const [selectedSectionId, setSelectedSectionId] = useState<string>('auto_bottleneck');
+  const [sec16DofMode, setSec16DofMode] = useState<
+    | 'max_sub100'
+    | 'core_3452_3460'
+    | '3452.31'
+    | '3456.39'
+    | '3458.44'
+    | '3460.48'
+    | '3462.52'
+    | '3464.56'
+  >('max_sub100');
   const [selectedMonth, setSelectedMonth] = useState<number>(0); // 0 = Annual Peak, 1..12 = Jan..Dec
   const [predictionInputMode, setPredictionInputMode] = useState<'growth_pct' | 'direct_mw'>('growth_pct');
   const [annualGrowthPct, setAnnualGrowthPct] = useState<number>(4.5); // % per year
   const [horizonYears, setHorizonYears] = useState<number>(3); // years ahead
   const [directTargetCkt3MW, setDirectTargetCkt3MW] = useState<number>(62.0); // MW
   const [loadFactorMode, setLoadFactorMode] = useState<'normal' | 'sustained' | 'sharp'>('normal');
-  const [targetLimitTempC, setTargetLimitTempC] = useState<number>(70); // 70°C Warning, 80°C Emergency, 90°C IEC Max
+  const [targetLimitTempC, setTargetLimitTempC] = useState<number>(80); // 70°C Warning, 80°C Emergency, 90°C IEC Max
   const [activeFormulaTab, setActiveFormulaTab] = useState<1 | 2 | 3 | 4 | null>(1);
+
+  // Dual-Scenario Interactive Panel State (Scenario 1: Load Adjust Range -> Tf & Tc; Scenario 2: Tc Limit -> Remaining MW)
+  const [scenarioViewTab, setScenarioViewTab] = useState<'both' | 'scenario1' | 'scenario2'>('both');
+  const [scen1StartMW, setScen1StartMW] = useState<number>(50.0);
+  const [scen1EndMW, setScen1EndMW] = useState<number>(65.0);
+  const [scen1StepMW, setScen1StepMW] = useState<1 | 2 | 5 | 10>(2);
+  const [scenSectionFilter, setScenSectionFilter] = useState<'all' | 'land' | 'submarine'>('all');
 
   // ---------------------------------------------------------------------------
   // Load All Historical Records from Public Dashboard Databases (Panel 1, 2, 3)
@@ -238,18 +256,20 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
   const sectionModels = useMemo(() => {
     const modelsMap = new Map<string, SectionEmpiricalModel>();
 
-    // Group Panel 1 records by sectionId and date (taking daily max across phases for land sections)
-    const bySectionDate = new Map<string, Map<string, OrgDatabaseRecord>>();
+    // Group Panel 1 records by sectionId and date (preserving all phases/records per date so Section 1.6 can inspect all sub-100°C DOFs)
+    const bySectionDateList = new Map<string, Map<string, OrgDatabaseRecord[]>>();
     allOrgRecords.forEach((r) => {
       if (!r.sectionId || !r.date) return;
-      let dateMap = bySectionDate.get(r.sectionId);
+      let dateMap = bySectionDateList.get(r.sectionId);
       if (!dateMap) {
-        dateMap = new Map<string, OrgDatabaseRecord>();
-        bySectionDate.set(r.sectionId, dateMap);
+        dateMap = new Map<string, OrgDatabaseRecord[]>();
+        bySectionDateList.set(r.sectionId, dateMap);
       }
-      const existing = dateMap.get(r.date);
-      if (!existing || r.tcMax > existing.tcMax || r.tfMax > existing.tfMax) {
-        dateMap.set(r.date, r);
+      const list = dateMap.get(r.date);
+      if (!list) {
+        dateMap.set(r.date, [r]);
+      } else {
+        list.push(r);
       }
     });
 
@@ -264,8 +284,8 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
     const sampleProfileDates = profileDates.slice(-8);
 
     CIRCUIT_3_SECTIONS.forEach((sec, secIdx) => {
-      const dateMap = bySectionDate.get(sec.sectionId);
-      const records = dateMap ? Array.from(dateMap.values()) : [];
+      const dateMap = bySectionDateList.get(sec.sectionId);
+      const dateEntries = dateMap ? Array.from(dateMap.entries()) : [];
 
       const secSamplingPts = CIRCUIT_3_SAMPLING_POINTS.filter(
         (p) => p.sectionId === sec.sectionId
@@ -290,22 +310,129 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
       let histMaxTc = 0;
       let sumP = 0;
 
-      records.forEach((r) => {
-        const pCkt3 =
-          r.pCkt3MaxMW > 0
-            ? r.pCkt3MaxMW
-            : p2ByDate.get(r.date) ||
-              (r.powerAtMaxMW > 0 ? r.powerAtMaxMW * 0.46 : 0);
-        const tf = r.tfMax;
-        const tc = r.tcMax > 0 ? r.tcMax : tf > 0 ? tf * 1.08 + 2.2 : 0;
+      dateEntries.forEach(([dateKey, recsOnDate]) => {
+        // Resolve Circuit #3 MW and Total MW across records on this date
+        let pCkt3 = 0;
+        let pTotal = 0;
+        for (const r of recsOnDate) {
+          const candCkt3 =
+            r.pCkt3MaxMW > 0
+              ? r.pCkt3MaxMW
+              : p2ByDate.get(dateKey) ||
+                (r.powerAtMaxMW > 0 ? r.powerAtMaxMW * 0.46 : 0);
+          if (candCkt3 > pCkt3) pCkt3 = candCkt3;
+          if (r.powerAtMaxMW > pTotal) pTotal = r.powerAtMaxMW;
+        }
+        if (pTotal <= 0 && pCkt3 > 0) pTotal = pCkt3 / 0.455;
+
+        let tf = 0;
+        let tc = 0;
+        let dayBestDof = -1;
+        let dayBestPhase = '';
+
+        if (sec.sectionId === '1.6') {
+          // SECTION 1.6 (TJ1) RULE: Strictly use Tf & Tc from DOF points that DO NOT exceed 100.0 °C
+          // Inspect all DOF points across Phase A, Phase B, and Phase C on this date
+          for (const r of recsOnDate) {
+            if (r.dofTfMax && typeof r.dofTfMax === 'object') {
+              for (const [k, rawTf] of Object.entries(r.dofTfMax)) {
+                if (k.startsWith('idx_')) continue;
+                const dNum = parseFloat(k);
+                const dofTf = Number(rawTf);
+                if (isNaN(dNum) || isNaN(dofTf) || dofTf <= 0 || dofTf > 100) {
+                  continue;
+                }
+                // Apply optional Section 1.6 sub-100°C DOF filter mode
+                if (sec16DofMode === 'core_3452_3460' && dNum > 3461.0) {
+                  continue;
+                }
+                if (
+                  sec16DofMode !== 'max_sub100' &&
+                  sec16DofMode !== 'core_3452_3460' &&
+                  Math.abs(dNum - parseFloat(sec16DofMode)) > 0.5
+                ) {
+                  continue;
+                }
+
+                const rawDofTc = r.dofTcMax?.[k];
+                const dofTc =
+                  typeof rawDofTc === 'number' && !isNaN(rawDofTc) && rawDofTc > 0
+                    ? rawDofTc
+                    : evaluateSectionConductorTemp(sec, dofTf, pCkt3 || 35).tc60287;
+
+                // Strictly reject any DOF point whose Tf or Tc is above 100 °C
+                if (dofTc <= 0 || dofTc > 100) {
+                  continue;
+                }
+
+                if (dofTc > tc || (dofTc === tc && dofTf > tf)) {
+                  tf = dofTf;
+                  tc = dofTc;
+                  dayBestDof = dNum;
+                  dayBestPhase = (r.phase || '').replace(/^Phase\s+/i, '').trim();
+                }
+              }
+            }
+
+            // Fallback if a record had no dofTfMax keys populated: check record-level sub-100°C fields
+            if (tf === 0) {
+              const candTf =
+                r.tfMax > 0 && r.tfMax <= 100
+                  ? r.tfMax
+                  : r.tfMean > 0 && r.tfMean <= 100
+                  ? r.tfMean
+                  : r.tfMin > 0 && r.tfMin <= 100
+                  ? r.tfMin
+                  : 0;
+              if (candTf > 0 && candTf <= 100) {
+                const candTc =
+                  r.tcMax > 0 && r.tcMax <= 100
+                    ? r.tcMax
+                    : evaluateSectionConductorTemp(sec, candTf, pCkt3 || 35).tc60287;
+                if (candTc > 0 && candTc <= 100 && candTc > tc) {
+                  tf = candTf;
+                  tc = candTc;
+                }
+              }
+            }
+          }
+        } else {
+          // Standard sections (1.1..1.5, 2.1..2.13): take daily max across phases
+          let bestRec: OrgDatabaseRecord | null = null;
+          for (const r of recsOnDate) {
+            if (!bestRec || r.tcMax > bestRec.tcMax || r.tfMax > bestRec.tfMax) {
+              bestRec = r;
+            }
+          }
+          if (bestRec) {
+            tf = bestRec.tfMax;
+            tc =
+              bestRec.tcMax > 0
+                ? bestRec.tcMax
+                : tf > 0
+                ? evaluateSectionConductorTemp(sec, tf, pCkt3 || 35).tc60287
+                : 0;
+            if (bestRec.dofTfMax) {
+              let bestDofVal = -1;
+              for (const [k, v] of Object.entries(bestRec.dofTfMax)) {
+                if (k.startsWith('idx_')) continue;
+                const dNum = parseFloat(k);
+                if (!isNaN(dNum) && v > bestDofVal) {
+                  bestDofVal = v;
+                  dayBestDof = dNum;
+                }
+              }
+            }
+          }
+        }
 
         if (pCkt3 > 5 && tf > 15 && tc > 15) {
-          const m = parseInt(r.date.slice(5, 7), 10) || 1;
+          const m = parseInt(dateKey.slice(5, 7), 10) || 1;
           validObs.push({
-            date: r.date,
+            date: dateKey,
             month: m,
             pCkt3MW: Number(pCkt3.toFixed(2)),
-            pTotalMW: Number((r.powerAtMaxMW || pCkt3 / 0.455).toFixed(2)),
+            pTotalMW: Number(pTotal.toFixed(2)),
             p2: pCkt3 * pCkt3,
             tf: Number(tf.toFixed(2)),
             tc: Number(tc.toFixed(2)),
@@ -314,20 +441,17 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
           if (pCkt3 > histMaxP) histMaxP = pCkt3;
           if (tf > histMaxTf) {
             histMaxTf = tf;
-            if (r.dofTfMax) {
-              let bestDofVal = -1;
-              for (const [k, v] of Object.entries(r.dofTfMax)) {
-                if (k.startsWith('idx_')) continue;
-                const dNum = parseFloat(k);
-                if (!isNaN(dNum) && v > bestDofVal) {
-                  bestDofVal = v;
-                  hottestDof = dNum;
-                }
-              }
+            if (dayBestDof > 0) {
+              hottestDof = dayBestDof;
               const matchedPt = secSamplingPts.find(
                 (pt) => Math.abs(pt.dof - hottestDof) < 2.0
               );
-              if (matchedPt) hottestPos = matchedPt.pos;
+              if (matchedPt) {
+                hottestPos =
+                  sec.sectionId === '1.6' && dayBestPhase
+                    ? `${matchedPt.pos} (Ph ${dayBestPhase} ≤100°C)`
+                    : matchedPt.pos;
+              }
             }
           }
           if (tc > histMaxTc) histMaxTc = tc;
@@ -453,10 +577,15 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
           hourly.forEach((h) => {
             const pVal = h.ckt3MW || h.pCkt3MW || h.totalMW * 0.45 || 0;
             const tVal = h.maxFiberTempC || h.tfMax || 0;
+            const tcVal = h.maxConductorTempC || h.tcMax || 0;
             pSumDay += pVal;
             if (pVal > maxP) {
               maxP = pVal;
               hrP = h.hourIndex;
+            }
+            // For Section 1.6, ignore hourly rows with temperature > 100°C
+            if (sec.sectionId === '1.6' && (tVal > 100 || tcVal > 100)) {
+              return;
             }
             if (tVal > maxT) {
               maxT = tVal;
@@ -536,7 +665,7 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
     });
 
     return modelsMap;
-  }, [allOrgRecords, circuitPeaks, profileDates, historicalPowerBaseline]);
+  }, [allOrgRecords, circuitPeaks, profileDates, historicalPowerBaseline, sec16DofMode]);
 
   // ---------------------------------------------------------------------------
   // Compute Future Projected Power (MW) & Evaluate All 19 Sections
@@ -625,6 +754,152 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
       bottleneckPrediction
     );
   }, [selectedSectionId, allSectionPredictions, bottleneckPrediction]);
+
+  // ---------------------------------------------------------------------------
+  // Dual-Scenario Calculations (Scenario 1: Load Range -> Tf/Tc & ΔT/ΔP; Scenario 2: Tc Limit -> Remaining MW)
+  // ---------------------------------------------------------------------------
+  const dualScenarioData = useMemo(() => {
+    const pStart = Math.min(scen1StartMW, scen1EndMW);
+    const pEnd = Math.max(scen1StartMW, scen1EndMW);
+    const deltaPRange = Math.max(0.1, Number((pEnd - pStart).toFixed(2)));
+    const pOp = futureCkt3MW;
+
+    // 1. Step-by-step power progression from pStart to pEnd for the active section
+    const stepList: number[] = [];
+    for (let mw = pStart; mw < pEnd - 0.001; mw = Number((mw + scen1StepMW).toFixed(2))) {
+      stepList.push(mw);
+    }
+    stepList.push(Number(pEnd.toFixed(2)));
+
+    const actSec = activePrediction;
+    const stepProgression = stepList.map((mw, idx) => {
+      const p2 = mw * mw;
+      const tf = Number((actSec.ambTf + actSec.model.kf * actSec.lfMultiplier * p2).toFixed(2));
+      const tc = Number((actSec.ambTc + actSec.model.kc * actSec.lfMultiplier * p2).toFixed(2));
+
+      const prevMW = idx > 0 ? stepList[idx - 1] : mw;
+      const prevP2 = prevMW * prevMW;
+      const prevTf = Number(
+        (actSec.ambTf + actSec.model.kf * actSec.lfMultiplier * prevP2).toFixed(2)
+      );
+      const prevTc = Number(
+        (actSec.ambTc + actSec.model.kc * actSec.lfMultiplier * prevP2).toFixed(2)
+      );
+
+      const startP2 = pStart * pStart;
+      const startTf = Number(
+        (actSec.ambTf + actSec.model.kf * actSec.lfMultiplier * startP2).toFixed(2)
+      );
+      const startTc = Number(
+        (actSec.ambTc + actSec.model.kc * actSec.lfMultiplier * startP2).toFixed(2)
+      );
+
+      // Instantaneous rate dTc/dP = 2 * Kc * M_LF * P (°C per 1 MW change)
+      const dTfPerMW = Number((2 * actSec.model.kf * actSec.lfMultiplier * mw).toFixed(3));
+      const dTcPerMW = Number((2 * actSec.model.kc * actSec.lfMultiplier * mw).toFixed(3));
+
+      return {
+        stepIdx: idx,
+        mw,
+        stepDeltaMW: Number((mw - prevMW).toFixed(2)),
+        cumDeltaMW: Number((mw - pStart).toFixed(2)),
+        tf,
+        tc,
+        stepDeltaTf: Number((tf - prevTf).toFixed(2)),
+        stepDeltaTc: Number((tc - prevTc).toFixed(2)),
+        cumDeltaTf: Number((tf - startTf).toFixed(2)),
+        cumDeltaTc: Number((tc - startTc).toFixed(2)),
+        dTfPerMW,
+        dTcPerMW,
+        remainingToLimitC: Number((targetLimitTempC - tc).toFixed(2)),
+      };
+    });
+
+    // 2. Per-Section Evaluation across all 19 sections for both Scenario 1 and Scenario 2
+    const sectionRows = allSectionPredictions.map((sp) => {
+      const kfEff = sp.model.kf * sp.lfMultiplier;
+      const kcEff = sp.model.kc * sp.lfMultiplier;
+
+      // Scenario 1: Load Adjust Range (pStart -> pEnd)
+      const tfStart = Number((sp.ambTf + kfEff * pStart * pStart).toFixed(2));
+      const tcStart = Number((sp.ambTc + kcEff * pStart * pStart).toFixed(2));
+      const tfEnd = Number((sp.ambTf + kfEff * pEnd * pEnd).toFixed(2));
+      const tcEnd = Number((sp.ambTc + kcEff * pEnd * pEnd).toFixed(2));
+
+      const rangeDeltaTf = Number((tfEnd - tfStart).toFixed(2));
+      const rangeDeltaTc = Number((tcEnd - tcStart).toFixed(2));
+
+      // Change of temperature per +1 MW and per +scen1StepMW at current operating load pOp
+      const pOpPlus1 = pOp + 1;
+      const deltaTfPer1MW = Number(
+        (kfEff * (pOpPlus1 * pOpPlus1 - pOp * pOp)).toFixed(3)
+      );
+      const deltaTcPer1MW = Number(
+        (kcEff * (pOpPlus1 * pOpPlus1 - pOp * pOp)).toFixed(3)
+      );
+
+      const pOpPlusStep = pOp + scen1StepMW;
+      const deltaTfPerStep = Number(
+        (kfEff * (pOpPlusStep * pOpPlusStep - pOp * pOp)).toFixed(2)
+      );
+      const deltaTcPerStep = Number(
+        (kcEff * (pOpPlusStep * pOpPlusStep - pOp * pOp)).toFixed(2)
+      );
+
+      // Scenario 2: Set Conductor Temp Limit (targetLimitTempC) -> Max Safe Power & Remaining Power
+      const availTcRise = Math.max(0.5, targetLimitTempC - sp.ambTc);
+      const safeMaxMW = Number(Math.sqrt(availTcRise / Math.max(0.0001, kcEff)).toFixed(2));
+      const tfAtSafeMax = Number((sp.ambTf + kfEff * safeMaxMW * safeMaxMW).toFixed(2));
+      const remainingMW = Number((safeMaxMW - pOp).toFixed(2));
+      const tempMarginToLimitC = Number((targetLimitTempC - sp.predTc).toFixed(2));
+
+      return {
+        ...sp,
+        tfStart,
+        tcStart,
+        tfEnd,
+        tcEnd,
+        rangeDeltaTf,
+        rangeDeltaTc,
+        deltaTfPer1MW,
+        deltaTcPer1MW,
+        deltaTfPerStep,
+        deltaTcPerStep,
+        safeMaxMW,
+        tfAtSafeMax,
+        remainingMW,
+        tempMarginToLimitC,
+      };
+    });
+
+    const filteredSectionRows = sectionRows.filter((r) =>
+      scenSectionFilter === 'all' ? true : r.section.category === scenSectionFilter
+    );
+
+    const minSafeSection = [...sectionRows].sort((a, b) => a.safeMaxMW - b.safeMaxMW)[0];
+    const sectionsExceedingLimit = sectionRows.filter((r) => r.predTc > targetLimitTempC).length;
+
+    return {
+      pStart,
+      pEnd,
+      deltaPRange,
+      pOp,
+      stepProgression,
+      sectionRows,
+      filteredSectionRows,
+      minSafeSection,
+      sectionsExceedingLimit,
+    };
+  }, [
+    scen1StartMW,
+    scen1EndMW,
+    scen1StepMW,
+    scenSectionFilter,
+    futureCkt3MW,
+    targetLimitTempC,
+    activePrediction,
+    allSectionPredictions,
+  ]);
 
   // ---------------------------------------------------------------------------
   // SCADA 4-Circuit Optimal Dispatch Calculation (Zone 4)
@@ -798,8 +1073,8 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
             </div>
           </div>
 
-          {/* Live Predicted Output Summary Pill */}
-          <div className="flex items-center gap-3 bg-slate-950/90 border border-cyan-500/30 rounded-2xl px-4 py-2.5 font-mono">
+          {/* Live Predicted Output & Remaining Safe Power Summary Pill */}
+          <div className="flex flex-wrap items-center gap-3 bg-slate-950/90 border border-cyan-500/30 rounded-2xl px-4 py-2.5 font-mono">
             <div>
               <span className="text-[10px] uppercase text-slate-400 block font-bold">
                 Projected Ckt#3 Peak
@@ -824,6 +1099,23 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
               </span>
               <span className="text-base font-black text-amber-300">
                 {activePrediction.predTc.toFixed(1)} °C
+              </span>
+            </div>
+            <div className="h-7 w-px bg-slate-800" />
+            <div>
+              <span className="text-[10px] uppercase text-slate-400 block font-bold">
+                Remaining Power (&le;{targetLimitTempC}°C)
+              </span>
+              <span
+                className={`text-base font-black ${
+                  activePrediction.mwMargin >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                }`}
+              >
+                {activePrediction.mwMargin >= 0 ? '+' : ''}
+                {activePrediction.mwMargin.toFixed(1)} MW{' '}
+                <span className="text-[11px] font-bold text-slate-400">
+                  (Max {activePrediction.safeMaxMW.toFixed(1)} MW)
+                </span>
               </span>
             </div>
           </div>
@@ -862,9 +1154,38 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
               </optgroup>
             </select>
             <div className="text-[10px] text-slate-400 flex items-center justify-between pt-0.5">
-              <span>Hotspot DOF: {m.hottestDof.toFixed(1)}m ({m.hottestPos})</span>
+              <span>Hotspot DOF: {m.hottestDof.toFixed(2)}m ({m.hottestPos})</span>
               <span className="text-cyan-300 font-bold">{secPrefix} {activePrediction.section.sectionId}</span>
             </div>
+            {activePrediction.section.sectionId === '1.6' && (
+              <div className="pt-1.5 border-t border-slate-800/80 space-y-1">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="text-emerald-300 font-bold">
+                    ✓ Sec 1.6 Filter: DOFs &le; 100°C Only
+                  </span>
+                  <span className="text-slate-500">Excl. &gt;100°C Splice</span>
+                </div>
+                <select
+                  value={sec16DofMode}
+                  onChange={(e) => setSec16DofMode(e.target.value as any)}
+                  className="w-full bg-slate-900/90 border border-emerald-500/40 rounded-lg px-2 py-1 text-[10px] font-bold text-emerald-200 outline-none focus:border-emerald-400 cursor-pointer"
+                  title="Select which sub-100°C DOF point(s) in Section 1.6 (TJ1) to use"
+                >
+                  <option value="max_sub100">
+                    All Sub-100°C DOFs (Peak: 3462.52m Ph B, ≤82.9°C)
+                  </option>
+                  <option value="core_3452_3460">
+                    Core TJ1 DOFs 3452.31–3460.48m (Pt 1–4, ≤55.5°C)
+                  </option>
+                  <option value="3452.31">DOF 3452.31m — TJ1-Point 1 (Ph A/B/C ≤53.7°C)</option>
+                  <option value="3456.39">DOF 3456.39m — TJ1-Point 2 (Ph A/B/C ≤55.5°C)</option>
+                  <option value="3458.44">DOF 3458.44m — TJ1-Point 3 (Ph A/B/C ≤55.3°C)</option>
+                  <option value="3460.48">DOF 3460.48m — TJ1-Point 4 (Ph A/B/C ≤54.1°C)</option>
+                  <option value="3462.52">DOF 3462.52m — TJ1-Point 5 (Ph A/B ≤82.9°C, Excl. Ph C)</option>
+                  <option value="3464.56">DOF 3464.56m — TJ1-Point 6 (Ph A Only ≤31.2°C, Excl. Ph B/C)</option>
+                </select>
+              </div>
+            )}
           </div>
 
           {/* 2. Month / Seasonal Ambient Selector + Thermal Limit */}
@@ -1032,6 +1353,738 @@ export const ThermalPredictionPage: React.FC<ThermalPredictionPageProps> = ({
               ))}
             </div>
           </div>
+        </div>
+
+        {/* ===================================================================
+            DUAL-SCENARIO INTERACTIVE PREDICTION & REMAINING POWER PANEL
+            Scenario 1: Set Ckt#3 Load Adjust Range -> Predicted Tf & Tc + ΔT per ΔP for Each Section
+            Scenario 2: Set Conductor Temp Limit (Tc) -> Remaining Operable Power for Each Section
+           =================================================================== */}
+        <div className="mt-4 pt-4 border-t border-slate-800 space-y-4 font-mono">
+          {/* Panel Header & Scenario Mode Selector */}
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-950/90 border border-cyan-500/30 rounded-2xl p-3.5">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 rounded-xl bg-cyan-500/15 border border-cyan-400/40 text-cyan-300">
+                <Sliders className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs sm:text-sm font-black uppercase text-white">
+                    2-SCENARIO THERMAL PREDICTION &amp; REMAINING OPERABLE POWER CALCULATOR
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-500/40 text-[10px] font-bold">
+                    ALL 19 SECTIONS + ΔT / ΔP SENSITIVITY
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  <strong className="text-cyan-300">Scenario 1:</strong> Set Circuit #3 Load Adjust Range to predict <strong className="text-rose-300">Tf</strong> &amp; <strong className="text-amber-300">Tc</strong> and temperature change per MW step •{' '}
+                  <strong className="text-emerald-300">Scenario 2:</strong> Set Conductor Temp Limit (<strong className="text-amber-300">Tc Limit</strong>) to find remaining operable MW for each section
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Category Filter for 19 Sections */}
+              <div className="inline-flex rounded-xl bg-slate-900 p-1 border border-slate-800 text-[10px]">
+                {[
+                  { id: 'all', label: 'All (19)' },
+                  { id: 'land', label: 'Land (6)' },
+                  { id: 'submarine', label: 'Submarine (13)' },
+                ].map((cat) => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => setScenSectionFilter(cat.id as any)}
+                    className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                      scenSectionFilter === cat.id
+                        ? 'bg-slate-800 text-cyan-300 border border-cyan-500/40'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* View Mode Switcher */}
+              <div className="inline-flex rounded-xl bg-slate-900 p-1 border border-slate-800 text-[10px]">
+                {[
+                  { id: 'both', label: 'Show Both Scenarios' },
+                  { id: 'scenario1', label: 'Scenario 1: Load Range → Tf & Tc' },
+                  { id: 'scenario2', label: 'Scenario 2: Tc Limit → Remaining MW' },
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setScenarioViewTab(tab.id as any)}
+                    className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                      scenarioViewTab === tab.id
+                        ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-400/50'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* =================================================================
+              SCENARIO 1 PANEL: SET CIRCUIT #3 LOAD ADJUST RANGE -> PREDICTED TF & TC + ΔT PER POWER CHANGE
+             ================================================================= */}
+          {(scenarioViewTab === 'both' || scenarioViewTab === 'scenario1') && (
+            <div className="bg-slate-950/90 border border-cyan-500/30 rounded-2xl p-4 space-y-4">
+              {/* Scenario 1 Header & Range Sliders */}
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800/90 pb-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 text-[10px] font-black uppercase">
+                      SCENARIO 1
+                    </span>
+                    <h3 className="text-xs sm:text-sm font-black text-white uppercase">
+                      CIRCUIT #3 LOAD ADJUST RANGE &rarr; PREDICTED FIBER (Tf) &amp; CONDUCTOR (Tc) + ΔT PER MW CHANGE
+                    </h3>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Adjust Circuit #3 Start Load (<strong className="text-cyan-300">{dualScenarioData.pStart.toFixed(1)} MW</strong>) to Target Load (<strong className="text-amber-300">{dualScenarioData.pEnd.toFixed(1)} MW</strong>, ΔP = <strong className="text-emerald-300">+{dualScenarioData.deltaPRange.toFixed(1)} MW</strong>) with step size <strong className="text-cyan-300">+{scen1StepMW} MW</strong>
+                  </p>
+                </div>
+
+                {/* Quick Presets for Load Range */}
+                <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                  <span className="text-slate-400 font-bold">Quick Range:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScen1StartMW(45);
+                      setScen1EndMW(65);
+                    }}
+                    className="px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:border-cyan-400 cursor-pointer font-bold"
+                  >
+                    45 → 65 MW
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScen1StartMW(50);
+                      setScen1EndMW(75);
+                    }}
+                    className="px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:border-cyan-400 cursor-pointer font-bold"
+                  >
+                    50 → 75 MW
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScen1StartMW(historicalPowerBaseline.meanCkt3MW);
+                      setScen1EndMW(futureCkt3MW);
+                    }}
+                    className="px-2 py-1 rounded-lg bg-cyan-950/80 border border-cyan-500/40 text-cyan-200 hover:border-cyan-400 cursor-pointer font-bold"
+                  >
+                    Hist. Mean ({historicalPowerBaseline.meanCkt3MW} MW) → Target ({futureCkt3MW.toFixed(1)} MW)
+                  </button>
+                </div>
+              </div>
+
+              {/* Scenario 1 Interactive Range Controls Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-slate-900/90 border border-slate-800 rounded-xl p-3 text-xs">
+                {/* Start Load Control */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase text-slate-400">
+                      Start / Base Ckt#3 Load (P_start):
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={15}
+                        max={85}
+                        step={0.5}
+                        value={scen1StartMW}
+                        onChange={(e) =>
+                          setScen1StartMW(Math.max(15, Math.min(85, parseFloat(e.target.value) || 20)))
+                        }
+                        className="w-16 bg-slate-950 border border-cyan-500/40 rounded px-1.5 py-0.5 text-right text-xs font-black text-cyan-300 outline-none"
+                      />
+                      <span className="text-[10px] text-slate-400 font-bold">MW</span>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={20}
+                    max={80}
+                    step={0.5}
+                    value={scen1StartMW}
+                    onChange={(e) => setScen1StartMW(parseFloat(e.target.value))}
+                    className="w-full accent-cyan-400 cursor-pointer"
+                  />
+                </div>
+
+                {/* End Load Control */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase text-slate-400">
+                      End / Adjusted Ckt#3 Load (P_end):
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={20}
+                        max={95}
+                        step={0.5}
+                        value={scen1EndMW}
+                        onChange={(e) =>
+                          setScen1EndMW(Math.max(20, Math.min(95, parseFloat(e.target.value) || 60)))
+                        }
+                        className="w-16 bg-slate-950 border border-amber-500/40 rounded px-1.5 py-0.5 text-right text-xs font-black text-amber-300 outline-none"
+                      />
+                      <span className="text-[10px] text-slate-400 font-bold">MW</span>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={25}
+                    max={90}
+                    step={0.5}
+                    value={scen1EndMW}
+                    onChange={(e) => setScen1EndMW(parseFloat(e.target.value))}
+                    className="w-full accent-amber-400 cursor-pointer"
+                  />
+                </div>
+
+                {/* Power Step Increment Selector */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase text-slate-400">
+                      Power Change Step (ΔP Step):
+                    </span>
+                    <span className="text-[11px] font-black text-emerald-300">
+                      Show ΔTf &amp; ΔTc every +{scen1StepMW} MW
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1.5 pt-0.5">
+                    {([1, 2, 5, 10] as const).map((st) => (
+                      <button
+                        key={st}
+                        type="button"
+                        onClick={() => setScen1StepMW(st)}
+                        className={`py-1 rounded-lg text-[11px] font-black border transition-all cursor-pointer ${
+                          scen1StepMW === st
+                            ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200'
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        +{st} MW
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Part 1A: Step-by-Step Change of Temperature for Each Power Change (Focused Section) */}
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] font-black uppercase text-cyan-300">
+                    1A. STEP-BY-STEP CHANGE OF TEMPERATURE FOR EACH POWER CHANGE ({secPrefix} {activePrediction.section.sectionId}: {activePrediction.section.name})
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    Click any MW step to set it as the active Target Ckt#3 Load
+                  </span>
+                </div>
+                <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/60">
+                  <table className="w-full text-left border-collapse text-[11px]">
+                    <thead>
+                      <tr className="border-b border-slate-800 bg-slate-950/90 text-[10px] uppercase text-slate-400">
+                        <th className="py-2 px-2.5">Step</th>
+                        <th className="py-2 px-2.5">Ckt#3 Power (MW)</th>
+                        <th className="py-2 px-2.5">Power Change (ΔP)</th>
+                        <th className="py-2 px-2.5 text-rose-300">Predicted Fiber Tf</th>
+                        <th className="py-2 px-2.5 text-rose-400">Change of Tf (ΔTf)</th>
+                        <th className="py-2 px-2.5 text-amber-300">Predicted Conductor Tc</th>
+                        <th className="py-2 px-2.5 text-amber-400">Change of Tc (ΔTc)</th>
+                        <th className="py-2 px-2.5 text-cyan-300">Sensitivity (dTc/dP)</th>
+                        <th className="py-2 px-2.5 text-right">Margin vs {targetLimitTempC}°C</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/70">
+                      {dualScenarioData.stepProgression.map((st) => {
+                        const isExceeded = st.tc > targetLimitTempC;
+                        return (
+                          <tr
+                            key={st.mw}
+                            onClick={() => {
+                              setPredictionInputMode('direct_mw');
+                              setDirectTargetCkt3MW(st.mw);
+                            }}
+                            className={`transition-colors cursor-pointer ${
+                              Math.abs(st.mw - futureCkt3MW) < 0.6
+                                ? 'bg-cyan-950/40 hover:bg-cyan-950/60'
+                                : 'hover:bg-slate-800/50'
+                            }`}
+                          >
+                            <td className="py-1.5 px-2.5 font-bold text-slate-400">
+                              #{st.stepIdx + 1}
+                            </td>
+                            <td className="py-1.5 px-2.5 font-black text-cyan-300">
+                              {st.mw.toFixed(1)} MW
+                            </td>
+                            <td className="py-1.5 px-2.5 font-bold text-slate-300">
+                              {st.stepIdx === 0 ? (
+                                <span className="text-slate-500">Base (0.0 MW)</span>
+                              ) : (
+                                <span>
+                                  <span className="text-emerald-300">+{st.stepDeltaMW.toFixed(1)} MW</span>{' '}
+                                  <span className="text-[10px] text-slate-500">
+                                    (Cum +{st.cumDeltaMW.toFixed(1)} MW)
+                                  </span>
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-1.5 px-2.5 font-black text-rose-300">
+                              {st.tf.toFixed(2)} °C
+                            </td>
+                            <td className="py-1.5 px-2.5 font-bold">
+                              {st.stepIdx === 0 ? (
+                                <span className="text-slate-500">—</span>
+                              ) : (
+                                <span className="text-rose-400">
+                                  +{st.stepDeltaTf.toFixed(2)} °C{' '}
+                                  <span className="text-[10px] text-slate-500">
+                                    (Σ +{st.cumDeltaTf.toFixed(2)}°C)
+                                  </span>
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-1.5 px-2.5 font-black text-amber-300">
+                              {st.tc.toFixed(2)} °C
+                            </td>
+                            <td className="py-1.5 px-2.5 font-bold">
+                              {st.stepIdx === 0 ? (
+                                <span className="text-slate-500">—</span>
+                              ) : (
+                                <span className="text-amber-400">
+                                  +{st.stepDeltaTc.toFixed(2)} °C{' '}
+                                  <span className="text-[10px] text-slate-500">
+                                    (Σ +{st.cumDeltaTc.toFixed(2)}°C)
+                                  </span>
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-1.5 px-2.5 font-bold text-cyan-300">
+                              +{st.dTcPerMW.toFixed(3)} °C/MW
+                            </td>
+                            <td className="py-1.5 px-2.5 text-right font-black">
+                              <span
+                                className={`px-2 py-0.5 rounded border text-[10px] ${
+                                  !isExceeded
+                                    ? 'bg-emerald-950/70 text-emerald-300 border-emerald-500/40'
+                                    : 'bg-rose-950/80 text-rose-300 border-rose-500/40'
+                                }`}
+                              >
+                                {st.remainingToLimitC >= 0
+                                  ? `${st.remainingToLimitC.toFixed(1)}°C Below Limit`
+                                  : `+${Math.abs(st.remainingToLimitC).toFixed(1)}°C Over Limit`}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Part 1B: All 19 Sections Load Adjust Range Results Table */}
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] font-black uppercase text-amber-300">
+                    1B. ALL SECTIONS PREDICTED TEMPERATURES (Tf &amp; Tc) FOR LOAD RANGE {dualScenarioData.pStart.toFixed(1)} MW &rarr; {dualScenarioData.pEnd.toFixed(1)} MW
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    Click any row to inspect that section in detail
+                  </span>
+                </div>
+                <div className="max-h-72 overflow-y-auto overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/60">
+                  <table className="w-full text-left border-collapse text-[11px]">
+                    <thead className="sticky top-0 z-10 bg-slate-950 border-b border-slate-800 text-[10px] uppercase text-slate-400">
+                      <tr>
+                        <th className="py-2 px-2.5">Section / Zone</th>
+                        <th className="py-2 px-2.5">Hotspot DOF</th>
+                        <th className="py-2 px-2.5">
+                          At {dualScenarioData.pStart.toFixed(1)} MW (Tf / Tc)
+                        </th>
+                        <th className="py-2 px-2.5">
+                          At {dualScenarioData.pEnd.toFixed(1)} MW (Tf / Tc)
+                        </th>
+                        <th className="py-2 px-2.5 text-amber-300">
+                          Total Change (+{dualScenarioData.deltaPRange.toFixed(1)} MW)
+                        </th>
+                        <th className="py-2 px-2.5 text-cyan-300">
+                          ΔT per +1 MW Change
+                        </th>
+                        <th className="py-2 px-2.5 text-emerald-300">
+                          ΔT per +{scen1StepMW} MW Step
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/70">
+                      {dualScenarioData.filteredSectionRows.map((row) => {
+                        const isSelected =
+                          activePrediction.section.sectionId === row.section.sectionId;
+                        return (
+                          <tr
+                            key={row.section.sectionId}
+                            onClick={() => setSelectedSectionId(row.section.sectionId)}
+                            className={`transition-colors cursor-pointer ${
+                              isSelected
+                                ? 'bg-cyan-950/50 hover:bg-cyan-950/70'
+                                : 'hover:bg-slate-800/50'
+                            }`}
+                          >
+                            <td className="py-1.5 px-2.5 font-bold text-white">
+                              <span className="text-cyan-400">
+                                {row.section.category === 'land' ? 'Sec' : 'Zone'}{' '}
+                                {row.section.sectionId}
+                              </span>{' '}
+                              <span className="text-slate-300 font-normal">
+                                — {row.section.name}
+                              </span>
+                            </td>
+                            <td className="py-1.5 px-2.5 text-slate-400">
+                              {row.model.hottestDof.toFixed(2)}m ({row.model.hottestPos})
+                            </td>
+                            <td className="py-1.5 px-2.5">
+                              <span className="text-rose-300 font-bold">{row.tfStart.toFixed(1)}°C</span>
+                              <span className="text-slate-500"> / </span>
+                              <span className="text-amber-300 font-black">{row.tcStart.toFixed(1)}°C</span>
+                            </td>
+                            <td className="py-1.5 px-2.5">
+                              <span className="text-rose-300 font-bold">{row.tfEnd.toFixed(1)}°C</span>
+                              <span className="text-slate-500"> / </span>
+                              <span className="text-amber-300 font-black">{row.tcEnd.toFixed(1)}°C</span>
+                            </td>
+                            <td className="py-1.5 px-2.5 font-black">
+                              <span className="text-rose-400">ΔTf +{row.rangeDeltaTf.toFixed(2)}°C</span>
+                              <span className="text-slate-500"> | </span>
+                              <span className="text-amber-400">ΔTc +{row.rangeDeltaTc.toFixed(2)}°C</span>
+                            </td>
+                            <td className="py-1.5 px-2.5 text-cyan-300 font-bold">
+                              +{row.deltaTfPer1MW.toFixed(2)}°C / +{row.deltaTcPer1MW.toFixed(2)}°C
+                            </td>
+                            <td className="py-1.5 px-2.5 text-emerald-300 font-bold">
+                              +{row.deltaTfPerStep.toFixed(2)}°C / +{row.deltaTcPerStep.toFixed(2)}°C
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* =================================================================
+              SCENARIO 2 PANEL: SET CONDUCTOR TEMPERATURE LIMIT -> REMAINING OPERABLE POWER FOR EACH SECTION
+             ================================================================= */}
+          {(scenarioViewTab === 'both' || scenarioViewTab === 'scenario2') && (
+            <div className="bg-slate-950/90 border border-emerald-500/30 rounded-2xl p-4 space-y-4">
+              {/* Scenario 2 Header & Temperature Limit Controls */}
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800/90 pb-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 text-[10px] font-black uppercase">
+                      SCENARIO 2
+                    </span>
+                    <h3 className="text-xs sm:text-sm font-black text-white uppercase">
+                      SET CONDUCTOR TEMPERATURE LIMIT (Tc &le; {targetLimitTempC.toFixed(1)}°C) &rarr; REMAINING OPERABLE POWER PER SECTION
+                    </h3>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Calculates Max Safe Power (<strong className="text-cyan-300">P_max,safe</strong>) and Remaining Operable Power (<strong className="text-emerald-300">ΔP_remaining = P_max,safe &minus; {dualScenarioData.pOp.toFixed(1)} MW</strong>) for all 19 sections without exceeding <strong className="text-amber-300">{targetLimitTempC.toFixed(1)}°C</strong>
+                  </p>
+                </div>
+
+                {/* System Bottleneck Summary Pill for Scenario 2 */}
+                <div className="flex flex-wrap items-center gap-3 bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2 text-xs">
+                  <div>
+                    <span className="text-[9px] uppercase text-slate-400 block font-bold">
+                      Bottleneck Ceiling (@ &le;{targetLimitTempC}°C)
+                    </span>
+                    <span className="text-sm font-black text-cyan-300">
+                      {dualScenarioData.minSafeSection.safeMaxMW.toFixed(2)} MW{' '}
+                      <span className="text-[10px] text-slate-400">
+                        ({dualScenarioData.minSafeSection.section.category === 'land' ? 'Sec' : 'Zone'}{' '}
+                        {dualScenarioData.minSafeSection.section.sectionId})
+                      </span>
+                    </span>
+                  </div>
+                  <div className="h-6 w-px bg-slate-800" />
+                  <div>
+                    <span className="text-[9px] uppercase text-slate-400 block font-bold">
+                      System Remaining Operable MW
+                    </span>
+                    <span
+                      className={`text-sm font-black ${
+                        dualScenarioData.minSafeSection.remainingMW >= 0
+                          ? 'text-emerald-400'
+                          : 'text-rose-400'
+                      }`}
+                    >
+                      {dualScenarioData.minSafeSection.remainingMW >= 0 ? '+' : ''}
+                      {dualScenarioData.minSafeSection.remainingMW.toFixed(2)} MW
+                    </span>
+                  </div>
+                  <div className="h-6 w-px bg-slate-800" />
+                  <div>
+                    <span className="text-[9px] uppercase text-slate-400 block font-bold">
+                      Sections Within {targetLimitTempC}°C
+                    </span>
+                    <span className="text-sm font-black text-emerald-300">
+                      {19 - dualScenarioData.sectionsExceedingLimit} / 19 Safe
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Scenario 2 Interactive Controls: Conductor Temp Limit + Operating Load */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-slate-900/90 border border-slate-800 rounded-xl p-3 text-xs">
+                {/* Conductor Temp Limit Slider & Presets */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase text-amber-300">
+                      Set Conductor Temperature Limit (Tc Limit):
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={45}
+                        max={95}
+                        step={0.5}
+                        value={targetLimitTempC}
+                        onChange={(e) =>
+                          setTargetLimitTempC(
+                            Math.max(45, Math.min(95, parseFloat(e.target.value) || 70))
+                          )
+                        }
+                        className="w-16 bg-slate-950 border border-amber-500/40 rounded px-1.5 py-0.5 text-right text-xs font-black text-amber-300 outline-none"
+                      />
+                      <span className="text-[10px] text-slate-400 font-bold">°C</span>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={45}
+                    max={95}
+                    step={0.5}
+                    value={targetLimitTempC}
+                    onChange={(e) => setTargetLimitTempC(parseFloat(e.target.value))}
+                    className="w-full accent-amber-400 cursor-pointer"
+                  />
+                  <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                    {[55, 60, 65, 70, 75, 80, 85, 90].map((lim) => (
+                      <button
+                        key={lim}
+                        type="button"
+                        onClick={() => setTargetLimitTempC(lim)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold border transition-all cursor-pointer ${
+                          targetLimitTempC === lim
+                            ? 'bg-amber-500/25 border-amber-400 text-amber-200'
+                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {lim}°C
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Operating Circuit #3 Power Slider for Remaining MW Comparison */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase text-cyan-300">
+                      Current / Operating Ckt#3 Load (P_operating):
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min={20}
+                        max={90}
+                        step={0.5}
+                        value={futureCkt3MW}
+                        onChange={(e) => {
+                          setPredictionInputMode('direct_mw');
+                          setDirectTargetCkt3MW(
+                            Math.max(20, Math.min(90, parseFloat(e.target.value) || 55))
+                          );
+                        }}
+                        className="w-16 bg-slate-950 border border-cyan-500/40 rounded px-1.5 py-0.5 text-right text-xs font-black text-cyan-300 outline-none"
+                      />
+                      <span className="text-[10px] text-slate-400 font-bold">MW</span>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={25}
+                    max={85}
+                    step={0.5}
+                    value={futureCkt3MW}
+                    onChange={(e) => {
+                      setPredictionInputMode('direct_mw');
+                      setDirectTargetCkt3MW(parseFloat(e.target.value));
+                    }}
+                    className="w-full accent-cyan-400 cursor-pointer"
+                  />
+                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5 text-[10px]">
+                    <span className="text-slate-400">Quick Set P_op:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPredictionInputMode('direct_mw');
+                        setDirectTargetCkt3MW(historicalPowerBaseline.meanCkt3MW);
+                      }}
+                      className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 hover:border-cyan-400 cursor-pointer"
+                    >
+                      Hist. Mean ({historicalPowerBaseline.meanCkt3MW} MW)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPredictionInputMode('direct_mw');
+                        setDirectTargetCkt3MW(historicalPowerBaseline.basePeakCkt3MW);
+                      }}
+                      className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 hover:border-cyan-400 cursor-pointer"
+                    >
+                      Hist. Peak ({historicalPowerBaseline.basePeakCkt3MW} MW)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPredictionInputMode('direct_mw');
+                        setDirectTargetCkt3MW(64.1);
+                      }}
+                      className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-300 hover:border-cyan-400 cursor-pointer"
+                    >
+                      Normal Ceiling (64.1 MW)
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Scenario 2 All 19 Sections Remaining Power Table */}
+              <div className="max-h-80 overflow-y-auto overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/60">
+                <table className="w-full text-left border-collapse text-[11px]">
+                  <thead className="sticky top-0 z-10 bg-slate-950 border-b border-slate-800 text-[10px] uppercase text-slate-400">
+                    <tr>
+                      <th className="py-2 px-2.5">Section / Zone</th>
+                      <th className="py-2 px-2.5">
+                        At {dualScenarioData.pOp.toFixed(1)} MW (Tf / Tc)
+                      </th>
+                      <th className="py-2 px-2.5 text-amber-300">
+                        Temp Margin to {targetLimitTempC}°C
+                      </th>
+                      <th className="py-2 px-2.5 text-cyan-300">
+                        Max Safe Power (&le;{targetLimitTempC}°C)
+                      </th>
+                      <th className="py-2 px-2.5 text-emerald-300">
+                        Remaining Power That Can Operate (ΔP_rem)
+                      </th>
+                      <th className="py-2 px-2.5">
+                        ΔTc per +1 MW / +{scen1StepMW} MW
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/70">
+                    {dualScenarioData.filteredSectionRows.map((row) => {
+                      const isSelected =
+                        activePrediction.section.sectionId === row.section.sectionId;
+                      const isSafe = row.remainingMW >= 0;
+                      const utilPct = Math.min(
+                        100,
+                        Math.max(5, (dualScenarioData.pOp / Math.max(1, row.safeMaxMW)) * 100)
+                      );
+                      return (
+                        <tr
+                          key={row.section.sectionId}
+                          onClick={() => setSelectedSectionId(row.section.sectionId)}
+                          className={`transition-colors cursor-pointer ${
+                            isSelected
+                              ? 'bg-emerald-950/40 hover:bg-emerald-950/60'
+                              : 'hover:bg-slate-800/50'
+                          }`}
+                        >
+                          <td className="py-1.5 px-2.5 font-bold text-white">
+                            <span className="text-cyan-400">
+                              {row.section.category === 'land' ? 'Sec' : 'Zone'}{' '}
+                              {row.section.sectionId}
+                            </span>{' '}
+                            <span className="text-slate-300 font-normal">
+                              — {row.section.name}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2.5">
+                            <span className="text-rose-300 font-bold">{row.predTf.toFixed(1)}°C</span>
+                            <span className="text-slate-500"> / </span>
+                            <span className="text-amber-300 font-black">{row.predTc.toFixed(1)}°C</span>
+                          </td>
+                          <td className="py-1.5 px-2.5 font-bold">
+                            <span
+                              className={
+                                row.tempMarginToLimitC >= 0 ? 'text-emerald-300' : 'text-rose-400'
+                              }
+                            >
+                              {row.tempMarginToLimitC >= 0
+                                ? `${row.tempMarginToLimitC.toFixed(2)}°C Below Limit`
+                                : `+${Math.abs(row.tempMarginToLimitC).toFixed(2)}°C Exceeded`}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2.5">
+                            <span className="text-cyan-300 font-black">
+                              {row.safeMaxMW.toFixed(2)} MW
+                            </span>{' '}
+                            <span className="text-[10px] text-slate-400">
+                              (Tf {row.tfAtSafeMax.toFixed(1)}°C)
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2.5">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`px-2 py-0.5 rounded border text-[11px] font-black min-w-[115px] text-center ${
+                                  isSafe
+                                    ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/40'
+                                    : 'bg-rose-950/80 text-rose-300 border-rose-500/40'
+                                }`}
+                              >
+                                {isSafe
+                                  ? `+${row.remainingMW.toFixed(2)} MW Available`
+                                  : `${row.remainingMW.toFixed(2)} MW Over`}
+                              </span>
+                              <div className="hidden sm:block w-20 h-2 rounded-full bg-slate-800 overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${
+                                    isSafe ? 'bg-emerald-400' : 'bg-rose-500'
+                                  }`}
+                                  style={{ width: `${utilPct}%` }}
+                                />
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-1.5 px-2.5 text-slate-300 font-bold">
+                            <span className="text-amber-300">+{row.deltaTcPer1MW.toFixed(2)}°C/MW</span>
+                            <span className="text-slate-500"> | </span>
+                            <span className="text-cyan-300">
+                              +{row.deltaTcPerStep.toFixed(2)}°C/{scen1StepMW}MW
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
