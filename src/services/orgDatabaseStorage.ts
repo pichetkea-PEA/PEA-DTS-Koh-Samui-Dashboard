@@ -927,7 +927,7 @@ export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<
       memoryPage26OpCondDataset = bestOp;
       memoryPanel4Info = {
         sourceType: 'googledrive',
-        name: bestOp.fileName || 'Power_Operating_Condition_Database_Updated_2026-10-26_to_2026-10-31.xlsx',
+        name: bestOp.fileName || 'Power_Operating_Condition_Database_Updated_2026-10-31_to_2026-11-07.xlsx',
         remoteUrl: bestOp.folderUrl || 'https://drive.google.com/drive/folders/1xGm5ZH9mkNQhTAuXmmBCsCnORL0un4nE?usp=sharing',
         updatedAt: bestOp.updatedAt || new Date().toISOString(),
         totalDates: bestOp.totalDates || bestOp.dates.length,
@@ -947,7 +947,7 @@ export async function ensurePage26DatasetsLoaded(forceRefresh = false): Promise<
       memoryPage26LoadCurveDataset = bestLc;
       memoryPanel5Info = {
         sourceType: 'googledrive',
-        name: bestLc.fileName || 'Hourly_Load_Curve_Database_Updated_2026-10-26_to_2026-10-31.xlsx',
+        name: bestLc.fileName || 'Hourly_Load_Curve_Database_Updated_2026-10-31_to_2026-11-07.xlsx',
         remoteUrl: bestLc.folderUrl || 'https://drive.google.com/drive/folders/1OCCulyWoTU5hnRltkH9J7ZcsNdXDbCeo?usp=sharing',
         updatedAt: bestLc.updatedAt || new Date().toISOString(),
         totalDates: bestLc.totalDates || bestLc.dates.length,
@@ -1003,13 +1003,13 @@ export function getPanel4SourceInfo(): DataPanelSourceInfo {
   const ds = getPage26OpCondDataset();
   return {
     sourceType: 'googledrive',
-    name: ds.fileName || 'Power_Operating_Condition_Database_Updated_2026-10-26_to_2026-10-31.xlsx',
+    name: ds.fileName || 'Power_Operating_Condition_Database_Updated_2026-10-31_to_2026-11-07.xlsx',
     remoteUrl: ds.folderUrl || 'https://drive.google.com/drive/folders/1xGm5ZH9mkNQhTAuXmmBCsCnORL0un4nE?usp=sharing',
     updatedAt: ds.updatedAt || new Date().toISOString(),
     totalDates: ds.totalDates || ds.dates.length,
     dateRange: ds.dateRange || {
       firstDate: ds.dates[0] || '2021-11-28',
-      latestDate: ds.dates[ds.dates.length - 1] || '2026-10-31',
+      latestDate: ds.dates[ds.dates.length - 1] || '2026-11-07',
     },
     recordCount: (ds.totalDates || ds.dates.length) * 4,
     fileId: ds.fileId,
@@ -1030,13 +1030,13 @@ export function getPanel5SourceInfo(): DataPanelSourceInfo {
   const ds = getPage26LoadCurveDataset();
   return {
     sourceType: 'googledrive',
-    name: ds.fileName || 'Hourly_Load_Curve_Database_Updated_2026-10-26_to_2026-10-31.xlsx',
+    name: ds.fileName || 'Hourly_Load_Curve_Database_Updated_2026-10-31_to_2026-11-07.xlsx',
     remoteUrl: ds.folderUrl || 'https://drive.google.com/drive/folders/1OCCulyWoTU5hnRltkH9J7ZcsNdXDbCeo?usp=sharing',
     updatedAt: ds.updatedAt || new Date().toISOString(),
     totalDates: ds.totalDates || ds.dates.length,
     dateRange: ds.dateRange || {
       firstDate: ds.dates[0] || '2021-11-28',
-      latestDate: ds.dates[ds.dates.length - 1] || '2026-10-31',
+      latestDate: ds.dates[ds.dates.length - 1] || '2026-11-07',
     },
     recordCount: (ds.totalDates || ds.dates.length) * 48,
     fileId: ds.fileId,
@@ -1290,8 +1290,9 @@ export async function saveAllCurrentPanelsAsDefaultDataSource(): Promise<void> {
     const p3Info = getPanel3SourceInfo();
     payload.panel3 = {
       records: memorySectionProfileRecords,
+      ...(memorySectionProfileDates.length > 0 ? { allDates: memorySectionProfileDates } : {}),
       info: p3Info,
-    };
+    } as any;
   }
 
   await syncLatestThreeFilesToDefaultStore(payload);
@@ -1666,35 +1667,67 @@ function initFromStorage() {
   if (memoryConfig !== null) return;
 
   try {
+    const isStaleRemoteInfo = (info: DataPanelSourceInfo | null | undefined) => {
+      if (!info) return false;
+      if (info.sourceType === 'local_file') return false;
+      const latest = info.dateRange?.latestDate || extractMaxDateFromText(info.name) || '';
+      return Boolean(latest && latest < '2026-11-07');
+    };
+
     const rawP1 = localStorage.getItem(STORAGE_KEY_PANEL1_INFO);
     if (rawP1) {
-      try { memoryPanel1Info = JSON.parse(rawP1); } catch (e) {}
+      try {
+        const parsed = JSON.parse(rawP1);
+        if (isStaleRemoteInfo(parsed)) localStorage.removeItem(STORAGE_KEY_PANEL1_INFO);
+        else memoryPanel1Info = parsed;
+      } catch (e) {}
     }
     const rawP2 = localStorage.getItem(STORAGE_KEY_PANEL2_INFO);
     if (rawP2) {
-      try { memoryPanel2Info = JSON.parse(rawP2); } catch (e) {}
+      try {
+        const parsed = JSON.parse(rawP2);
+        if (isStaleRemoteInfo(parsed)) localStorage.removeItem(STORAGE_KEY_PANEL2_INFO);
+        else memoryPanel2Info = parsed;
+      } catch (e) {}
     }
     const rawP3 = localStorage.getItem(STORAGE_KEY_PANEL3_INFO);
     if (rawP3) {
-      try { memoryPanel3Info = JSON.parse(rawP3); } catch (e) {}
+      try {
+        const parsed = JSON.parse(rawP3);
+        if (isStaleRemoteInfo(parsed)) {
+          localStorage.removeItem(STORAGE_KEY_PANEL3_INFO);
+          localStorage.removeItem(STORAGE_KEY_SECTION_PROFILE_DATES);
+        } else {
+          memoryPanel3Info = parsed;
+        }
+      } catch (e) {}
     }
     const rawP4 = localStorage.getItem(STORAGE_KEY_PANEL4_INFO);
     if (rawP4) {
-      try { memoryPanel4Info = JSON.parse(rawP4); } catch (e) {}
+      try {
+        const parsed = JSON.parse(rawP4);
+        if (isStaleRemoteInfo(parsed)) localStorage.removeItem(STORAGE_KEY_PANEL4_INFO);
+        else memoryPanel4Info = parsed;
+      } catch (e) {}
     }
     const rawP5 = localStorage.getItem(STORAGE_KEY_PANEL5_INFO);
     if (rawP5) {
-      try { memoryPanel5Info = JSON.parse(rawP5); } catch (e) {}
+      try {
+        const parsed = JSON.parse(rawP5);
+        if (isStaleRemoteInfo(parsed)) localStorage.removeItem(STORAGE_KEY_PANEL5_INFO);
+        else memoryPanel5Info = parsed;
+      } catch (e) {}
     }
 
     const rawCfg = localStorage.getItem(STORAGE_KEY_CONFIG);
     if (rawCfg) {
       const parsedCfg = JSON.parse(rawCfg);
-      // Discard legacy synthetic seed or empty config if present
+      // Discard legacy synthetic seed, stale remote seed, or empty config if present
       if (
         parsedCfg?.databaseFileName === 'Samui_Submarine_Daily_Max_Temp_2024-2026.xlsx' ||
         !parsedCfg?.hasDatabase ||
-        !parsedCfg?.totalRecords
+        !parsedCfg?.totalRecords ||
+        (parsedCfg?.dateRange?.latestDate && parsedCfg.dateRange.latestDate < '2026-11-07' && !memoryPanel1Info)
       ) {
         localStorage.removeItem(STORAGE_KEY_CONFIG);
         localStorage.removeItem(STORAGE_KEY_DATA);
@@ -3419,14 +3452,36 @@ export async function syncPanel1FromFastEndpoint(url: string): Promise<{
   config: OrgDatabaseConfig;
 } | null> {
   try {
-    await fetch('/api/scan-and-sync-public-folders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ panel1Url: url }),
-    }).catch(() => null);
+    const [scanRes, metaRes] = await Promise.all([
+      fetch(`/api/scan-and-sync-public-folders?t=${Date.now()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ panel1Url: url }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+      fetch(`/api/fetch-shared-database?metaOnly=1&url=${encodeURIComponent(url)}&t=${Date.now()}`, {
+        cache: 'no-store',
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ]);
+
+    const liveDateInName =
+      metaRes?.latestDateInName ||
+      extractMaxDateFromText(metaRes?.fileName || scanRes?.panel1?.fileName) ||
+      '';
 
     const cachedDb = await fetchSharedServerDefaultDatabases(true);
     const p1 = cachedDb?.panel1;
+    const p1Latest = p1?.config?.dateRange?.latestDate || p1?.info?.dateRange?.latestDate || '';
+
+    // If the live Google Drive folder has a newer file than cachedDb, return null so caller downloads the new file directly
+    if (liveDateInName && p1Latest && liveDateInName > p1Latest) {
+      return null;
+    }
+
     if (
       p1 &&
       Array.isArray(p1.records) &&
@@ -3446,13 +3501,16 @@ export async function syncPanel1FromFastEndpoint(url: string): Promise<{
       void idbSet('panel1', p1);
       rebuildIndexes();
       const fileName =
+        metaRes?.fileName ||
+        scanRes?.panel1?.fileName ||
         p1.info?.name ||
         p1.config.databaseFileName ||
-        'DTS_Circuit3_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx';
+        'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-11-07.xlsx';
       const info: DataPanelSourceInfo = {
         ...(p1.info || {}),
         sourceType: 'remote_link',
         name: fileName,
+        fileId: metaRes?.fileId || scanRes?.panel1?.fileId || p1.info?.fileId,
         remoteUrl: url,
         updatedAt: new Date().toISOString(),
         totalDates: p1.config.totalDates,
@@ -3487,14 +3545,41 @@ export async function syncPanel2FromFastEndpoint(url: string): Promise<{
   dateRange: { firstDate: string; latestDate: string };
 } | null> {
   try {
-    await fetch('/api/scan-and-sync-public-folders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ panel2Url: url }),
-    }).catch(() => null);
+    const [scanRes, metaRes] = await Promise.all([
+      fetch(`/api/scan-and-sync-public-folders?t=${Date.now()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ panel2Url: url }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+      fetch(`/api/fetch-shared-database?metaOnly=1&format=csv&url=${encodeURIComponent(url)}&t=${Date.now()}`, {
+        cache: 'no-store',
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ]);
+
+    const liveDateInName =
+      metaRes?.latestDateInName ||
+      extractMaxDateFromText(metaRes?.fileName || scanRes?.panel2?.fileName) ||
+      '';
 
     const cachedDb = await fetchSharedServerDefaultDatabases(true);
     const p2 = cachedDb?.panel2;
+    const sortedCachedDates = Array.isArray(p2?.peaks)
+      ? p2.peaks.map((p: CircuitDailyPeakPower) => p.date).sort()
+      : [];
+    const p2Latest =
+      p2?.info?.dateRange?.latestDate ||
+      sortedCachedDates[sortedCachedDates.length - 1] ||
+      '';
+
+    if (liveDateInName && p2Latest && liveDateInName > p2Latest) {
+      return null;
+    }
+
     if (
       p2 &&
       Array.isArray(p2.peaks) &&
@@ -3517,16 +3602,19 @@ export async function syncPanel2FromFastEndpoint(url: string): Promise<{
       rebuildIndexes();
       const sortedDates = p2.peaks.map((p: CircuitDailyPeakPower) => p.date).sort();
       const fileName =
+        metaRes?.fileName ||
+        scanRes?.panel2?.fileName ||
         p2.info?.name ||
-        'Daily_Maximum_Power_Consumption_Database_Updated_2025-07-31_to_2026-10-26.csv';
+        'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-31_to_2026-11-07.csv';
       const dateRange = p2.info?.dateRange || {
         firstDate: sortedDates[0] || '2021-11-28',
-        latestDate: sortedDates[sortedDates.length - 1] || '2026-10-26',
+        latestDate: sortedDates[sortedDates.length - 1] || '2026-11-07',
       };
       const info: DataPanelSourceInfo = {
         ...(p2.info || {}),
         sourceType: 'remote_link',
         name: fileName,
+        fileId: metaRes?.fileId || scanRes?.panel2?.fileId || p2.info?.fileId,
         remoteUrl: url,
         updatedAt: new Date().toISOString(),
         totalDates: p2.peaks.length,
@@ -3560,18 +3648,35 @@ export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
   dateRange: { firstDate: string; latestDate: string };
 } | null> {
   try {
-    await fetch('/api/scan-and-sync-public-folders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ panel3Url: url }),
-    }).catch(() => null);
+    const [scanRes, metaRes] = await Promise.all([
+      fetch(`/api/scan-and-sync-public-folders?t=${Date.now()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ panel3Url: url }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+      fetch(`/api/fetch-shared-database?metaOnly=1&url=${encodeURIComponent(url)}&t=${Date.now()}`, {
+        cache: 'no-store',
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ]);
 
-    const fastRes = await fetch(`/api/fetch-shared-section-profiles?url=${encodeURIComponent(url)}`)
-      .then((r) => (r.ok && (r.headers.get('content-type') || '').includes('application/json') ? r.json() : null))
-      .catch(() => null);
+    const [fastRes, cachedDb] = await Promise.all([
+      fetch(`/api/fetch-shared-section-profiles?refresh=1&url=${encodeURIComponent(url)}&t=${Date.now()}`, {
+        cache: 'no-store',
+      })
+        .then((r) => (r.ok && (r.headers.get('content-type') || '').includes('application/json') ? r.json() : null))
+        .catch(() => null),
+      fetchSharedServerDefaultDatabases(true),
+    ]);
 
-    const cachedDb = await fetchSharedServerDefaultDatabases(true);
     const p3Cached = cachedDb?.panel3;
+    const liveFileName = metaRes?.fileName || scanRes?.panel3?.fileName || '';
+    const liveFileId = metaRes?.fileId || scanRes?.panel3?.fileId || '';
+    const liveDateInName = metaRes?.latestDateInName || extractMaxDateFromText(liveFileName) || '';
 
     const recordsToUse: OrgSectionHourlyRecord[] =
       fastRes && fastRes.success && Array.isArray(fastRes.records) && fastRes.records.length > 0
@@ -3580,42 +3685,82 @@ export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
           ? p3Cached.records
           : [];
 
+    const fastDates: string[] = Array.isArray(fastRes?.allDates) ? fastRes.allDates : [];
+    const cachedDates: string[] = Array.isArray(p3Cached?.allDates)
+      ? p3Cached.allDates
+      : Array.isArray(p3Cached?.dates)
+        ? p3Cached.dates
+        : [];
     const allDatesToUse: string[] =
-      fastRes && Array.isArray(fastRes.allDates) && fastRes.allDates.length > 0
-        ? fastRes.allDates
-        : p3Cached && Array.isArray(p3Cached.allDates) && p3Cached.allDates.length > 0
-          ? p3Cached.allDates
-          : p3Cached && Array.isArray(p3Cached.dates) && p3Cached.dates.length > 0
-            ? p3Cached.dates
-            : [];
+      fastDates.length >= cachedDates.length &&
+      (fastDates[fastDates.length - 1] || '') >= (cachedDates[cachedDates.length - 1] || '')
+        ? fastDates
+        : cachedDates;
 
-    if (recordsToUse.length > 0) {
-      memorySectionProfileRecords = recordsToUse;
+    const candidateLatestDate =
+      allDatesToUse[allDatesToUse.length - 1] ||
+      fastRes?.dateRange?.latestDate ||
+      p3Cached?.info?.dateRange?.latestDate ||
+      '';
+
+    // If the live Google Drive folder has a newer file than what the fast endpoint returned, return null so caller downloads and parses the new file directly
+    if (liveDateInName && candidateLatestDate && liveDateInName > candidateLatestDate) {
+      return null;
+    }
+
+    if (recordsToUse.length > 0 || allDatesToUse.length > 0) {
+      fetchingDates.clear();
+      if (recordsToUse.length > 0) {
+        memorySectionProfileRecords = recordsToUse;
+      }
       if (allDatesToUse.length > 0) {
         memorySectionProfileAllDates = allDatesToUse;
         memorySectionProfileDates = [...allDatesToUse];
       }
       rebuildSectionProfileIndexes();
+
+      if (fastRes?.stats && Array.isArray(fastRes.stats.dates) && fastRes.stats.dates.length > 0) {
+        memoryPanel3StatsSummary = fastRes.stats;
+        void idbSet('panel3_stats', fastRes.stats);
+      } else {
+        void ensurePanel3StatisticsSummaryLoaded(true);
+      }
+
       const totalDates =
-        fastRes?.totalDates ||
         allDatesToUse.length ||
+        scanRes?.panel3?.totalDates ||
+        fastRes?.totalDates ||
         p3Cached?.info?.totalDates ||
         memorySectionProfileDates.length;
-      const dateRange = fastRes?.dateRange ||
+      const dateRange =
+        (allDatesToUse.length > 0
+          ? {
+              firstDate: allDatesToUse[0],
+              latestDate: allDatesToUse[allDatesToUse.length - 1],
+            }
+          : null) ||
+        scanRes?.panel3?.dateRange ||
+        fastRes?.dateRange ||
         p3Cached?.info?.dateRange || {
-          firstDate: memorySectionProfileDates[0] || '2025-07-01',
-          latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-23',
+          firstDate: memorySectionProfileDates[0] || '2021-11-28',
+          latestDate: memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-11-07',
         };
-      const recordCount = fastRes?.recordCount || p3Cached?.info?.recordCount || totalDates * 744;
+      const recordCount =
+        scanRes?.panel3?.recordCount ||
+        fastRes?.recordCount ||
+        p3Cached?.info?.recordCount ||
+        totalDates * 744;
       const fileName =
+        liveFileName ||
         fastRes?.fileName ||
         p3Cached?.info?.name ||
-        'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx';
+        'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-11-07.xlsx';
 
       const info: DataPanelSourceInfo = {
         ...(p3Cached?.info || {}),
         sourceType: 'remote_link',
         name: fileName,
+        fileId: liveFileId || fastRes?.fileId || p3Cached?.info?.fileId,
         remoteUrl: url,
         updatedAt: new Date().toISOString(),
         totalDates,
@@ -3624,9 +3769,10 @@ export async function syncSectionProfileFromFastEndpoint(url: string): Promise<{
       };
       memoryPanel3Info = info;
       savedDefaultPanel3 = {
-        records: recordsToUse,
+        records: memorySectionProfileRecords,
         allDates: memorySectionProfileDates,
         info,
+        stats: memoryPanel3StatsSummary || undefined,
       };
       try {
         localStorage.setItem(STORAGE_KEY_PANEL3_INFO, JSON.stringify(info));
@@ -3782,32 +3928,32 @@ export const KNOWN_DEFAULT_GOOGLE_DRIVE_FILES: Record<
 > = {
   // Folder 1: Daily Peak Temp
   '1CMSH2f5hAl0N6F3PHhpr9mwStcX29kgS': {
-    fileId: '1Ya1JFd4CuINtfrbfH0H1KiZG10qf6xJ0',
-    fileName: 'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-10-31.xlsx',
+    fileId: '1Grvta1kwbq_Q4ro_IwFXbzMuGGT9XAK4',
+    fileName: 'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-11-07.xlsx',
     format: 'xlsx',
   },
   // Folder 2: 4-Circuit Power Record
   '1jqS95Z-nF1SivlJFuka8CcIKiyFBMrZ6': {
-    fileId: '1xdb2zFsdWDkWeAOr7VYYvVv9ovlKz3vN',
-    fileName: 'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-26_to_2026-10-31.csv',
+    fileId: '1GjkPWPB5WL189T7lqungJFo3qdXKThru',
+    fileName: 'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-31_to_2026-11-07.csv',
     format: 'csv',
   },
   // Folder 3: 24-Hour Section Profile
   '15rgLYl3V7sqPDNPY8zOLEz9eDBtZLj2_': {
-    fileId: '1Lt8jRjIpQJ1D0r7az7cNZ2ey_noOUZeE',
-    fileName: 'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-10-31.xlsx',
+    fileId: '1p5TQMS7dr4G0fU_ZvijxBEeZKec7BaEx',
+    fileName: 'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-11-07.xlsx',
     format: 'xlsx',
   },
   // Folder 4 (Page 2.6 Chart 1): Operation Condition Database
   '1xGm5ZH9mkNQhTAuXmmBCsCnORL0un4nE': {
-    fileId: '1U8JX9NmtNmO7Xw8CmsZ8yoGuu32NlRb1',
-    fileName: 'Power_Operating_Condition_Database_Updated_2026-10-26_to_2026-10-31.xlsx',
+    fileId: '1e6JRyZVkTOZzC3UJsyxjOE8D7-loR3s4',
+    fileName: 'Power_Operating_Condition_Database_Updated_2026-10-31_to_2026-11-07.xlsx',
     format: 'xlsx',
   },
   // Folder 5 (Page 2.6 Chart 2): 30-Min Load Curve Database
   '1OCCulyWoTU5hnRltkH9J7ZcsNdXDbCeo': {
-    fileId: '1nae0hRouMpxNT8kYb9YARnlXQIDVvVwv',
-    fileName: 'Hourly_Load_Curve_Database_Updated_2026-10-26_to_2026-10-31.xlsx',
+    fileId: '1WHEm2UlbnXg0UFi3atPqicIso8WxHCiQ',
+    fileName: 'Hourly_Load_Curve_Database_Updated_2026-10-31_to_2026-11-07.xlsx',
     format: 'xlsx',
   },
 };
@@ -3855,7 +4001,29 @@ export async function fetchRemoteDatabaseFile(
   const folderMatch = cleanUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
   if (folderMatch && folderMatch[1]) {
     const fId = folderMatch[1];
-    if (KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId]) {
+    // Try live folder metadata scan first so any newly dropped file in the shared folder is discovered immediately
+    try {
+      const metaRes = await fetch(
+        `/api/fetch-shared-database?metaOnly=1&format=${preferredFormat}&url=${encodeURIComponent(cleanUrl)}&t=${Date.now()}`,
+        { cache: 'no-store' }
+      );
+      if (metaRes.ok && (metaRes.headers.get('content-type') || '').includes('application/json')) {
+        const metaJson = await metaRes.json();
+        if (metaJson?.success && metaJson?.fileId && metaJson?.fileName) {
+          directFileId = metaJson.fileId;
+          directFileName = metaJson.fileName;
+          if (KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId]) {
+            KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId] = {
+              ...KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId],
+              fileId: metaJson.fileId,
+              fileName: metaJson.fileName,
+            };
+          }
+        }
+      }
+    } catch {}
+
+    if (!directFileId && KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId]) {
       directFileId = KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId].fileId;
       directFileName = KNOWN_DEFAULT_GOOGLE_DRIVE_FILES[fId].fileName;
     }
@@ -4309,7 +4477,7 @@ export async function syncAllPublicSharedTargetFolders(
               ? liveP1.fileName
               : p1Cached.info?.name ||
                 p1Cached.config.databaseFileName ||
-                'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-10-31.xlsx',
+                'DTS_Circuit3_19Sheets_Updated_2021-11-28_to_2026-11-07.xlsx',
           fileId: liveP1?.fileId || p1Cached.info?.fileId,
           remoteUrl: links.panel1Url,
           updatedAt: p1Cached.info?.updatedAt || new Date().toISOString(),
@@ -4422,7 +4590,7 @@ export async function syncAllPublicSharedTargetFolders(
         void idbSet('panel2', p2Cached);
 
         const sortedP2Dates = p2Cached.peaks.map((p: CircuitDailyPeakPower) => p.date).sort();
-        const latestP2Date = sortedP2Dates[sortedP2Dates.length - 1] || '2026-10-31';
+        const latestP2Date = sortedP2Dates[sortedP2Dates.length - 1] || '2026-11-07';
         const p2Info: DataPanelSourceInfo = {
           ...(p2Cached.info || {}),
           sourceType: 'googledrive',
@@ -4430,7 +4598,7 @@ export async function syncAllPublicSharedTargetFolders(
             liveP2?.fileName && (!liveP2.latestDateInName || liveP2.latestDateInName >= latestP2Date)
               ? liveP2.fileName
               : p2Cached.info?.name ||
-                'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-26_to_2026-10-31.csv',
+                'Daily_Maximum_Power_Consumption_Database_Updated_2026-10-31_to_2026-11-07.csv',
           fileId: liveP2?.fileId || p2Cached.info?.fileId,
           remoteUrl: links.panel2Url,
           updatedAt: p2Cached.info?.updatedAt || new Date().toISOString(),
@@ -4528,9 +4696,13 @@ export async function syncAllPublicSharedTargetFolders(
             ? p3Cached.dates
             : [];
 
-      if (recordsToUse.length === 0 || allDatesToUse.length === 0) {
+      if (
+        recordsToUse.length === 0 ||
+        allDatesToUse.length === 0 ||
+        (liveP3?.latestDateInName && liveP3.latestDateInName > (allDatesToUse[allDatesToUse.length - 1] || ''))
+      ) {
         const fastRes = await fetch(
-          `/api/fetch-shared-section-profiles?url=${encodeURIComponent(links.panel3Url)}&t=${Date.now()}`,
+          `/api/fetch-shared-section-profiles?refresh=1&url=${encodeURIComponent(links.panel3Url)}&t=${Date.now()}`,
           { cache: 'no-store' }
         )
           .then((r) => (r.ok && (r.headers.get('content-type') || '').includes('application/json') ? r.json() : null))
@@ -4539,7 +4711,7 @@ export async function syncAllPublicSharedTargetFolders(
           if (Array.isArray(fastRes.records) && fastRes.records.length > 0) {
             recordsToUse = fastRes.records;
           }
-          if (Array.isArray(fastRes.allDates) && fastRes.allDates.length > 0) {
+          if (Array.isArray(fastRes.allDates) && fastRes.allDates.length > allDatesToUse.length) {
             allDatesToUse = fastRes.allDates;
           }
         }
@@ -4563,7 +4735,11 @@ export async function syncAllPublicSharedTargetFolders(
         }
         rebuildSectionProfileIndexes();
 
-        if (p3Cached?.stats && Array.isArray(p3Cached.stats.dates) && p3Cached.stats.dates.length > 0) {
+        if (
+          p3Cached?.stats &&
+          Array.isArray(p3Cached.stats.dates) &&
+          p3Cached.stats.dates.length >= memorySectionProfileDates.length
+        ) {
           memoryPanel3StatsSummary = p3Cached.stats;
           void idbSet('panel3_stats', p3Cached.stats);
         } else {
@@ -4574,7 +4750,7 @@ export async function syncAllPublicSharedTargetFolders(
           allDatesToUse.length ||
           p3Cached?.info?.totalDates ||
           memorySectionProfileDates.length;
-        const latestP3Date = memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-10-31';
+        const latestP3Date = memorySectionProfileDates[memorySectionProfileDates.length - 1] || '2026-11-07';
 
         const defaultP3Info: DataPanelSourceInfo = {
           ...(p3Cached?.info || {}),
@@ -4583,18 +4759,19 @@ export async function syncAllPublicSharedTargetFolders(
             liveP3?.fileName && (!liveP3.latestDateInName || liveP3.latestDateInName >= latestP3Date)
               ? liveP3.fileName
               : p3Cached?.info?.name ||
-                'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-10-31.xlsx',
+                'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-11-07.xlsx',
           fileId: liveP3?.fileId || p3Cached?.info?.fileId,
           remoteUrl: links.panel3Url,
           updatedAt: p3Cached?.info?.updatedAt || new Date().toISOString(),
           totalDates: totalDatesCount,
-          dateRange: p3Cached?.info?.dateRange || {
-            firstDate: memorySectionProfileDates[0] || '2021-11-28',
+          dateRange: {
+            firstDate: memorySectionProfileDates[0] || p3Cached?.info?.dateRange?.firstDate || '2021-11-28',
             latestDate: latestP3Date,
           },
           recordCount:
-            p3Cached?.info?.recordCount ||
-            totalDatesCount * 744,
+            p3Cached?.info?.recordCount && p3Cached.info.totalDates === totalDatesCount
+              ? p3Cached.info.recordCount
+              : totalDatesCount * 744,
         };
 
         savedDefaultPanel3 = {

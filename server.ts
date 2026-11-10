@@ -1261,21 +1261,46 @@ function expandCompactProfileRow(date: string, tupleOrObj: any) {
 
 function hydrateServerCachesFromStaticDataBundle() {
   try {
-    // 1. Seed PUBLIC_DEFAULT_DB_FILE and gzipped response cache if not already present
+    // 1. Seed PUBLIC_DEFAULT_DB_FILE and gzipped response cache, keeping whichever is newer
     const staticDefaultGz = path.join(STATIC_PUBLIC_DATA_DIR, 'public-default-databases.json.gz');
-    if (!fs.existsSync(PUBLIC_DEFAULT_DB_FILE) && fs.existsSync(staticDefaultGz)) {
-      const compressed = fs.readFileSync(staticDefaultGz);
-      const rawJson = zlib.gunzipSync(compressed).toString('utf-8');
-      fs.writeFileSync(PUBLIC_DEFAULT_DB_FILE, rawJson, 'utf-8');
-      cachedPublicDefaultDbResponseJson = `{"success":true,"data":${rawJson}}`;
+    const staticDefaultJson = path.join(STATIC_PUBLIC_DATA_DIR, 'public-default-databases.json');
+    let staticRawJson = '';
+    if (fs.existsSync(staticDefaultGz)) {
+      try {
+        staticRawJson = zlib.gunzipSync(fs.readFileSync(staticDefaultGz)).toString('utf-8');
+      } catch {}
+    } else if (fs.existsSync(staticDefaultJson)) {
+      try {
+        staticRawJson = fs.readFileSync(staticDefaultJson, 'utf-8');
+      } catch {}
+    }
+
+    if (!fs.existsSync(PUBLIC_DEFAULT_DB_FILE) && staticRawJson) {
+      fs.writeFileSync(PUBLIC_DEFAULT_DB_FILE, staticRawJson, 'utf-8');
+      cachedPublicDefaultDbResponseJson = `{"success":true,"data":${staticRawJson}}`;
       cachedPublicDefaultDbResponseGzip = zlib.gzipSync(Buffer.from(cachedPublicDefaultDbResponseJson, 'utf-8'));
-    } else if (fs.existsSync(PUBLIC_DEFAULT_DB_FILE) && !cachedPublicDefaultDbResponseJson) {
-      const rawJson = fs.readFileSync(PUBLIC_DEFAULT_DB_FILE, 'utf-8');
-      cachedPublicDefaultDbResponseJson = `{"success":true,"data":${rawJson}}`;
+    } else if (fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
+      let runtimeRawJson = fs.readFileSync(PUBLIC_DEFAULT_DB_FILE, 'utf-8');
+      if (staticRawJson) {
+        try {
+          const runtimeObj = JSON.parse(runtimeRawJson);
+          const staticObj = JSON.parse(staticRawJson);
+          const runtimeP3Date = runtimeObj?.panel3?.info?.dateRange?.latestDate || '';
+          const staticP3Date = staticObj?.panel3?.info?.dateRange?.latestDate || '';
+          if (staticP3Date > runtimeP3Date) {
+            runtimeRawJson = staticRawJson;
+            fs.writeFileSync(PUBLIC_DEFAULT_DB_FILE, runtimeRawJson, 'utf-8');
+          } else if (runtimeP3Date > staticP3Date && fs.existsSync(STATIC_PUBLIC_DATA_DIR)) {
+            fs.writeFileSync(staticDefaultJson, runtimeRawJson, 'utf-8');
+            fs.writeFileSync(staticDefaultGz, zlib.gzipSync(Buffer.from(runtimeRawJson, 'utf-8')));
+          }
+        } catch {}
+      }
+      cachedPublicDefaultDbResponseJson = `{"success":true,"data":${runtimeRawJson}}`;
       cachedPublicDefaultDbResponseGzip = zlib.gzipSync(Buffer.from(cachedPublicDefaultDbResponseJson, 'utf-8'));
     }
 
-    // 2. Load compact 484-date section profiles into memory for <1ms date queries
+    // 2. Load compact section profiles into memory for <1ms date queries
     const staticProfilesGz = path.join(STATIC_PUBLIC_DATA_DIR, 'section_profiles_compact.json.gz');
     if (fs.existsSync(staticProfilesGz)) {
       const rawProfiles = zlib.gunzipSync(fs.readFileSync(staticProfilesGz)).toString('utf-8');
@@ -1287,13 +1312,37 @@ function hydrateServerCachesFromStaticDataBundle() {
       if (mapObj && typeof mapObj === 'object') {
         compactSectionProfilesByDate = mapObj;
       }
-      if (!fs.existsSync(SECTION_PROFILES_DIR)) {
-        fs.mkdirSync(SECTION_PROFILES_DIR, { recursive: true });
-      }
-      const allDatesPath = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
-      if (!fs.existsSync(allDatesPath) && compactSectionProfileAllDates.length > 0) {
-        fs.writeFileSync(allDatesPath, JSON.stringify(compactSectionProfileAllDates), 'utf-8');
-      }
+    }
+
+    // Reconcile with SECTION_PROFILES_DIR if runtime cache has newer dates (e.g. 2026-11-07)
+    if (!fs.existsSync(SECTION_PROFILES_DIR)) {
+      fs.mkdirSync(SECTION_PROFILES_DIR, { recursive: true });
+    }
+    const allDatesPath = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
+    if (fs.existsSync(allDatesPath)) {
+      try {
+        const runtimeDates = JSON.parse(fs.readFileSync(allDatesPath, 'utf-8'));
+        if (
+          Array.isArray(runtimeDates) &&
+          runtimeDates.length > 0 &&
+          (runtimeDates.length > compactSectionProfileAllDates.length ||
+            runtimeDates[runtimeDates.length - 1] > (compactSectionProfileAllDates[compactSectionProfileAllDates.length - 1] || ''))
+        ) {
+          compactSectionProfileAllDates = runtimeDates;
+          for (const d of runtimeDates) {
+            if (!compactSectionProfilesByDate[d]) {
+              const df = path.join(SECTION_PROFILES_DIR, `${d}.json`);
+              if (fs.existsSync(df)) {
+                try {
+                  compactSectionProfilesByDate[d] = JSON.parse(fs.readFileSync(df, 'utf-8'));
+                } catch {}
+              }
+            }
+          }
+        }
+      } catch {}
+    } else if (compactSectionProfileAllDates.length > 0) {
+      fs.writeFileSync(allDatesPath, JSON.stringify(compactSectionProfileAllDates), 'utf-8');
     }
 
     // 2b. Load or pre-compute Panel 3 Daily Statistics Summary for Page 2.5 & Page 2.6
@@ -1310,7 +1359,9 @@ function hydrateServerCachesFromStaticDataBundle() {
       } catch {}
     }
     if (
-      (!cachedPanel3StatsSummary || !cachedPanel3StatsSummary.dates?.length) &&
+      (!cachedPanel3StatsSummary ||
+        !cachedPanel3StatsSummary.dates?.length ||
+        cachedPanel3StatsSummary.dates.length < compactSectionProfileAllDates.length) &&
       compactSectionProfileAllDates.length > 0
     ) {
       cachedPanel3StatsSummary = buildPanel3StatsSummaryFromDates(
@@ -2423,23 +2474,14 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
         scanSharedDriveFolderMetadata(panel3Url, 'xlsx', authHeader),
       ]);
 
-      // Also verify that section_profiles_by_date/all_dates.json or compactSectionProfileAllDates is populated and matches panel3
-      let allDatesPopulated =
+      // Also verify that compactSectionProfileAllDates in memory is populated and matches panel3
+      const expectedP3TotalDates = currentDb?.panel3?.info?.totalDates || 0;
+      const expectedP3LatestDate = currentDb?.panel3?.info?.dateRange?.latestDate || '';
+      const allDatesPopulated =
         compactSectionProfileAllDates.length > 0 &&
-        compactSectionProfileAllDates.length === (currentDb?.panel3?.info?.totalDates || 0);
-      if (!allDatesPopulated) {
-        const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
-        if (fs.existsSync(allDatesFile)) {
-          try {
-            const ad = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
-            if (Array.isArray(ad) && ad.length > 0 && ad.length === (currentDb?.panel3?.info?.totalDates || 0)) {
-              allDatesPopulated = true;
-            }
-          } catch {
-            allDatesPopulated = false;
-          }
-        }
-      }
+        compactSectionProfileAllDates.length >= expectedP3TotalDates &&
+        (!expectedP3LatestDate ||
+          compactSectionProfileAllDates[compactSectionProfileAllDates.length - 1] >= expectedP3LatestDate);
 
       const forceDl = Boolean(options?.forceDownload);
       const p1Changed =
@@ -2701,9 +2743,31 @@ app.post('/api/public-default-databases', (req, res) => {
         // ignore parse error
       }
     }
-    if (incoming.panel1 !== undefined) current.panel1 = incoming.panel1;
-    if (incoming.panel2 !== undefined) current.panel2 = incoming.panel2;
-    if (incoming.panel3 !== undefined) current.panel3 = incoming.panel3;
+    if (incoming.panel1 !== undefined) {
+      const curLatest = current.panel1?.info?.dateRange?.latestDate || '';
+      const incLatest = incoming.panel1?.info?.dateRange?.latestDate || '';
+      if (!curLatest || incLatest >= curLatest || incoming.panel1?.info?.sourceType === 'local_file') {
+        current.panel1 = incoming.panel1;
+      }
+    }
+    if (incoming.panel2 !== undefined) {
+      const curLatest = current.panel2?.info?.dateRange?.latestDate || '';
+      const incLatest = incoming.panel2?.info?.dateRange?.latestDate || '';
+      if (!curLatest || incLatest >= curLatest || incoming.panel2?.info?.sourceType === 'local_file') {
+        current.panel2 = incoming.panel2;
+      }
+    }
+    if (incoming.panel3 !== undefined) {
+      const curLatest = current.panel3?.info?.dateRange?.latestDate || '';
+      const incLatest = incoming.panel3?.info?.dateRange?.latestDate || '';
+      if (!curLatest || incLatest >= curLatest || incoming.panel3?.info?.sourceType === 'local_file') {
+        current.panel3 = {
+          ...(current.panel3 || {}),
+          ...incoming.panel3,
+          allDates: incoming.panel3?.allDates || current.panel3?.allDates || compactSectionProfileAllDates,
+        };
+      }
+    }
     if (incoming.linksConfig !== undefined) current.linksConfig = incoming.linksConfig;
     current.updatedAt = new Date().toISOString();
     const rawOut = JSON.stringify(current);
@@ -2739,15 +2803,17 @@ app.get('/api/section-daily-profile', (req, res) => {
   try {
     const dateQuery = String(req.query.date || '').trim();
     if (req.query.allDates === '1' || req.query.dates === 'list') {
-      if (compactSectionProfileAllDates.length > 0) {
-        return res.json({ success: true, dates: compactSectionProfileAllDates });
-      }
       const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
       if (fs.existsSync(allDatesFile)) {
-        const dates = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
-        if (Array.isArray(dates) && dates.length > 0) {
-          return res.json({ success: true, dates });
-        }
+        try {
+          const dates = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
+          if (Array.isArray(dates) && dates.length > compactSectionProfileAllDates.length) {
+            compactSectionProfileAllDates = dates;
+          }
+        } catch {}
+      }
+      if (compactSectionProfileAllDates.length > 0) {
+        return res.json({ success: true, dates: compactSectionProfileAllDates });
       }
       if (fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
         try {
@@ -2806,26 +2872,70 @@ app.get('/api/section-daily-profile', (req, res) => {
 });
 
 // Dedicated fast endpoint to fetch Section Daily Profile database for Public Dashboard 2.2 & 2.3
-app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
+app.get('/api/fetch-shared-section-profiles', async (req, res) => {
   try {
+    const forceRefresh = req.query.refresh === '1' || req.query.force === '1';
+    if (forceRefresh) {
+      await scanAndSyncThreePublicSharedFolders({
+        panel3Url: req.query.url ? String(req.query.url) : undefined,
+      }).catch(() => null);
+    }
+
     if (
+      !forceRefresh &&
       cachedSectionProfilesFastResponse &&
       Array.isArray(cachedSectionProfilesFastResponse.records) &&
       cachedSectionProfilesFastResponse.records.length > 0 &&
       Array.isArray(cachedSectionProfilesFastResponse.allDates) &&
-      cachedSectionProfilesFastResponse.allDates.length > 0
+      cachedSectionProfilesFastResponse.allDates.length > 0 &&
+      cachedSectionProfilesFastResponse.allDates.length >= compactSectionProfileAllDates.length
     ) {
       return res.json(cachedSectionProfilesFastResponse);
     }
 
     let allDates: string[] = [...compactSectionProfileAllDates];
-    if (allDates.length === 0) {
-      const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
-      if (fs.existsSync(allDatesFile)) {
-        try {
-          allDates = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
-        } catch {}
-      }
+    const allDatesFile = path.join(SECTION_PROFILES_DIR, 'all_dates.json');
+    if (fs.existsSync(allDatesFile)) {
+      try {
+        const diskDates = JSON.parse(fs.readFileSync(allDatesFile, 'utf-8'));
+        if (
+          Array.isArray(diskDates) &&
+          diskDates.length > 0 &&
+          (diskDates.length > allDates.length ||
+            diskDates[diskDates.length - 1] > (allDates[allDates.length - 1] || ''))
+        ) {
+          allDates = diskDates;
+          compactSectionProfileAllDates = diskDates;
+        }
+      } catch {}
+    }
+
+    let fileName = 'DTS_Section_Daily_Profile_19Sheets_Updated_2021-11-28_to_2026-11-07.xlsx';
+    let fileId = '';
+    let versionSignature = '';
+    let p3RecordCount = 0;
+
+    // Check PUBLIC_DEFAULT_DB_FILE (.dts-public-default-databases.json) for metadata & fallback
+    if (fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(PUBLIC_DEFAULT_DB_FILE, 'utf-8'));
+        const p3 = parsed?.panel3;
+        if (p3) {
+          if (
+            Array.isArray(p3.allDates) &&
+            p3.allDates.length > 0 &&
+            (p3.allDates.length > allDates.length ||
+              p3.allDates[p3.allDates.length - 1] > (allDates[allDates.length - 1] || ''))
+          ) {
+            allDates = p3.allDates;
+            compactSectionProfileAllDates = p3.allDates;
+          }
+          if (p3.info?.name) fileName = p3.info.name;
+          if (p3.info?.fileId) fileId = p3.info.fileId;
+          if (p3.info?.versionSignature) versionSignature = p3.info.versionSignature;
+          if (p3.info?.recordCount) p3RecordCount = p3.info.recordCount;
+        }
+      } catch {}
     }
 
     // Return the latest 5 dates of records for instant in-memory rendering; any other date is fetched on demand in <5ms
@@ -2846,25 +2956,11 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
       }
     }
 
-    let fileName = 'DTS_Section_Daily_Profile_19Sheets_Updated_2025-07-01_to_2026-10-23.xlsx';
-    let fileId = '';
-    let versionSignature = '';
-
-    // Check PUBLIC_DEFAULT_DB_FILE (.dts-public-default-databases.json) for metadata & fallback
-    if (fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
+    if (recentRecords.length === 0 && fs.existsSync(PUBLIC_DEFAULT_DB_FILE)) {
       try {
         const parsed = JSON.parse(fs.readFileSync(PUBLIC_DEFAULT_DB_FILE, 'utf-8'));
-        const p3 = parsed?.panel3;
-        if (p3) {
-          if (allDates.length === 0 && Array.isArray(p3.allDates) && p3.allDates.length > 0) {
-            allDates = p3.allDates;
-          }
-          if (recentRecords.length === 0 && Array.isArray(p3.records) && p3.records.length > 0) {
-            recentRecords = p3.records;
-          }
-          if (p3.info?.name) fileName = p3.info.name;
-          if (p3.info?.fileId) fileId = p3.info.fileId;
-          if (p3.info?.versionSignature) versionSignature = p3.info.versionSignature;
+        if (Array.isArray(parsed?.panel3?.records) && parsed.panel3.records.length > 0) {
+          recentRecords = parsed.panel3.records;
         }
       } catch {}
     }
@@ -2879,10 +2975,10 @@ app.get('/api/fetch-shared-section-profiles', async (_req, res) => {
       stats: cachedPanel3StatsSummary,
       totalDates: allDates.length,
       dateRange: {
-        firstDate: allDates[0] || '2025-07-01',
-        latestDate: allDates[allDates.length - 1] || '2026-10-23',
+        firstDate: allDates[0] || '2021-11-28',
+        latestDate: allDates[allDates.length - 1] || '2026-11-07',
       },
-      recordCount: allDates.length * 744,
+      recordCount: p3RecordCount || allDates.length * 744,
     };
 
     if (recentRecords.length > 0 && allDates.length > 0) {
