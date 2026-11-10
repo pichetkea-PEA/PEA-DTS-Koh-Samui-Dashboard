@@ -5,15 +5,13 @@ import {
   HardDrive,
   ExternalLink,
   LogOut,
-  ShieldCheck,
   Menu,
-  ChevronLeft,
-  ChevronRight,
   Layers,
-  Sparkles,
   RefreshCw,
   Smartphone,
   Monitor,
+  Database,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface TopGlobalHeaderProps {
@@ -29,6 +27,7 @@ interface TopGlobalHeaderProps {
   onRefreshPublicData?: () => Promise<void> | void;
   isRefreshingPublicData?: boolean;
   refreshProgress?: number;
+  refreshStatusText?: string;
   viewDeviceMode?: 'desktop' | 'mobile';
   onChangeViewDeviceMode?: (mode: 'desktop' | 'mobile') => void;
 }
@@ -46,10 +45,22 @@ export const TopGlobalHeader: React.FC<TopGlobalHeaderProps> = ({
   onRefreshPublicData,
   isRefreshingPublicData = false,
   refreshProgress = 0,
+  refreshStatusText = '',
   viewDeviceMode = 'desktop',
   onChangeViewDeviceMode,
 }) => {
   const isMobileView = viewDeviceMode === 'mobile';
+  const clampedPct = Math.min(100, Math.max(0, Math.round(refreshProgress)));
+  const currentFolderStep =
+    clampedPct < 20
+      ? '1/5'
+      : clampedPct < 42
+        ? '2/5'
+        : clampedPct < 64
+          ? '3/5'
+          : clampedPct < 84
+            ? '4/5'
+            : '5/5';
 
   return (
     <header className="sticky top-0 z-30 w-full bg-slate-950/90 backdrop-blur-xl border-b border-cyan-500/20 shadow-[0_4px_25px_rgba(6,182,212,0.06)] px-3 sm:px-5 py-2.5 transition-colors">
@@ -143,42 +154,53 @@ export const TopGlobalHeader: React.FC<TopGlobalHeaderProps> = ({
               </div>
             )}
 
-            {/* Public Data Refresh Button with 0-100% Progress Tracking */}
+            {/* Enhanced 5-Folder Public Data Refresh Button with 0-100% Progress & Folder Step Badge */}
             {onRefreshPublicData && (
               <button
                 id="header-refresh-data-btn"
                 type="button"
                 onClick={onRefreshPublicData}
                 disabled={isRefreshingPublicData}
-                title="Automatically read and load latest data from shared Google Drive target folders (Daily Peak Temp, 4-Circuit Power, and Section Daily Profile)"
-                className={`relative overflow-hidden inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3 py-1.5 ${
-                  isMobileView ? 'min-w-[88px]' : 'min-w-[110px] sm:min-w-[140px]'
-                } text-xs font-bold font-mono text-emerald-100 bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 active:from-emerald-700 active:to-cyan-700 disabled:opacity-90 rounded-xl shadow-[0_0_15px_rgba(16,185,129,0.3)] border border-emerald-400/40 transition-all cursor-pointer`}
+                title="Scan all 5 Shared Google Drive folders and automatically load any newer version or newly uploaded database file"
+                className={`relative overflow-hidden inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3.5 py-1.5 ${
+                  isMobileView ? 'min-w-[104px]' : 'min-w-[135px] sm:min-w-[175px]'
+                } text-xs font-bold font-mono text-emerald-100 bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 active:from-emerald-700 active:to-cyan-700 disabled:opacity-95 rounded-xl shadow-[0_0_18px_rgba(16,185,129,0.35)] border border-emerald-400/50 transition-all cursor-pointer`}
               >
-                {/* Inner progress fill tracking 0 - 100% */}
+                {/* SVG progress fill tracking 0 - 100% */}
                 {isRefreshingPublicData && (
-                  <div
-                    className="absolute inset-y-0 left-0 bg-white/20 border-r border-emerald-200/50 transition-all duration-300 ease-out pointer-events-none"
-                    style={{ width: `${Math.min(100, Math.max(0, refreshProgress))}%` }}
-                  />
+                  <svg
+                    className="absolute inset-0 w-full h-full pointer-events-none"
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                  >
+                    <rect
+                      x="0"
+                      y="0"
+                      width={clampedPct}
+                      height="100"
+                      className="fill-white/25 transition-all duration-200 ease-out"
+                    />
+                  </svg>
                 )}
                 <RefreshCw
-                  className={`relative z-10 w-3.5 h-3.5 text-emerald-200 shrink-0 ${
+                  className={`relative z-10 w-3.5 h-3.5 text-emerald-100 shrink-0 ${
                     isRefreshingPublicData ? 'animate-spin' : ''
                   }`}
                 />
                 {!isMobileView ? (
                   <>
                     <span className="relative z-10 hidden sm:inline">
-                      {isRefreshingPublicData ? `REFRESHING ${Math.round(refreshProgress)}%` : 'REFRESH DATA'}
+                      {isRefreshingPublicData
+                        ? `SYNCING ${currentFolderStep} · ${clampedPct}%`
+                        : 'REFRESH 5 DB FOLDERS'}
                     </span>
                     <span className="relative z-10 sm:hidden">
-                      {isRefreshingPublicData ? `${Math.round(refreshProgress)}%` : 'REFRESH'}
+                      {isRefreshingPublicData ? `${currentFolderStep} ${clampedPct}%` : 'REFRESH DB'}
                     </span>
                   </>
                 ) : (
                   <span className="relative z-10 text-[11px]">
-                    {isRefreshingPublicData ? `${Math.round(refreshProgress)}%` : 'REFRESH'}
+                    {isRefreshingPublicData ? `${currentFolderStep} · ${clampedPct}%` : 'REFRESH 5 DB'}
                   </span>
                 )}
               </button>
@@ -199,7 +221,7 @@ export const TopGlobalHeader: React.FC<TopGlobalHeaderProps> = ({
                         ? 'bg-cyan-950/70 text-cyan-300 border-cyan-500/40 shadow-[0_0_12px_rgba(6,182,212,0.25)] hover:bg-cyan-900/50'
                         : 'bg-emerald-950/70 text-emerald-300 border-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.25)] hover:bg-emerald-900/50'
                     }`}
-                    title="Switch between Admin Suite (Pages 1-7) and Public View"
+                    title="Switch between Admin Suite (Pages 1-9) and Public View"
                   >
                     <Layers className="w-3.5 h-3.5" />
                     <span>{isAdminModeActive ? 'ENGINEERING SUITE' : 'PUBLIC TELEMETRY'}</span>
@@ -247,7 +269,7 @@ export const TopGlobalHeader: React.FC<TopGlobalHeaderProps> = ({
                 type="button"
                 onClick={onLogin}
                 disabled={isLoggingIn}
-                title="Sign in with authorized Google Account to access Internal Suite (Pages 1–7)"
+                title="Sign in with authorized Google Account to access Internal Suite (Pages 1–9)"
                 className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-[11px] sm:text-xs font-bold font-mono text-cyan-100 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:from-cyan-700 active:to-blue-700 disabled:opacity-50 rounded-xl shadow-[0_0_15px_rgba(6,182,212,0.3)] border border-cyan-400/40 transition-all cursor-pointer"
               >
                 <HardDrive className="w-3.5 h-3.5 text-cyan-200" />
@@ -268,7 +290,7 @@ export const TopGlobalHeader: React.FC<TopGlobalHeaderProps> = ({
           </div>
         </div>
 
-        {/* Mobile View Title Banner (Centered below top action bar so it never truncates or crowds controls) */}
+        {/* Mobile View Title Banner */}
         {isMobileView && (
           <div className="text-center pt-1.5 border-t border-slate-800/80">
             <h1 className="text-xs font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-slate-100 via-cyan-100 to-slate-200 tracking-tight leading-tight">
@@ -280,6 +302,71 @@ export const TopGlobalHeader: React.FC<TopGlobalHeaderProps> = ({
           </div>
         )}
       </div>
+
+      {/* Live 5-Folder Database Update Progress Strip (Appears while refreshing public databases) */}
+      {isRefreshingPublicData && (
+        <div className="max-w-[1920px] mx-auto mt-2 pt-2 border-t border-emerald-500/30 animate-in fade-in duration-150">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono mb-1.5">
+            <div className="flex items-center gap-2 text-emerald-300 font-bold">
+              <Database className="w-3.5 h-3.5 text-emerald-400 animate-pulse shrink-0" />
+              <span>
+                5-SHARED-FOLDER AUTO-VERSION CHECK &amp; SYNC ({currentFolderStep}):
+              </span>
+              <span className="text-cyan-200 font-semibold truncate max-w-xl">
+                {refreshStatusText || 'Scanning 5 shared Google Drive folders for newer file versions...'}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-bold tabular-nums">
+                {clampedPct}% COMPLETE
+              </span>
+            </div>
+          </div>
+
+          {/* 5-Folder Segmented Progress Bar */}
+          <div className="grid grid-cols-5 gap-1.5">
+            {[
+              { id: 1, label: 'Folder 1: Peak Temp', threshold: 20 },
+              { id: 2, label: 'Folder 2: 4-Ckt Power', threshold: 40 },
+              { id: 3, label: 'Folder 3: 24-Hr Profile', threshold: 60 },
+              { id: 4, label: 'Folder 4: Op Condition', threshold: 80 },
+              { id: 5, label: 'Folder 5: Load Curve', threshold: 100 },
+            ].map((step) => {
+              const prevThreshold = step.threshold - 20;
+              const segPct =
+                clampedPct >= step.threshold
+                  ? 100
+                  : clampedPct <= prevThreshold
+                    ? 0
+                    : Math.round(((clampedPct - prevThreshold) / 20) * 100);
+              return (
+                <div key={step.id} className="bg-slate-900/90 border border-slate-800 rounded-lg p-1.5">
+                  <div className="flex items-center justify-between text-[9px] font-mono text-slate-300 mb-1">
+                    <span className="truncate">{step.label}</span>
+                    <span className="text-emerald-400 font-bold flex items-center gap-0.5 shrink-0">
+                      {segPct >= 100 && <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />}
+                      {segPct}%
+                    </span>
+                  </div>
+                  <svg
+                    className="h-1 w-full rounded-full overflow-hidden bg-slate-800"
+                    viewBox="0 0 100 4"
+                    preserveAspectRatio="none"
+                  >
+                    <rect
+                      x="0"
+                      y="0"
+                      width={segPct}
+                      height="4"
+                      className="fill-emerald-400 transition-all duration-150"
+                    />
+                  </svg>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </header>
   );
 };

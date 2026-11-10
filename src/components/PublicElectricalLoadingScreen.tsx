@@ -9,15 +9,19 @@ import {
   Radio,
   Clock,
   Loader2,
+  Activity,
+  FileSpreadsheet,
 } from 'lucide-react';
 import {
   getPanel1SourceInfo,
   getPanel2SourceInfo,
   getPanel3SourceInfo,
+  getPanel4SourceInfo,
+  getPanel5SourceInfo,
 } from '../services/orgDatabaseStorage';
 
 export interface PublicElectricalLoadingScreenProps {
-  syncProgress: number; // 0..100 reported by syncAllPublicSharedTargetFolders
+  syncProgress: number; // 0..100 reported by syncAllPublicSharedTargetFolders across all 5 Shared Drive folders
   syncStatusText: string;
   isSyncComplete: boolean;
   onComplete: () => void;
@@ -38,6 +42,8 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
   const p1Info = getPanel1SourceInfo();
   const p2Info = getPanel2SourceInfo();
   const p3Info = getPanel3SourceInfo();
+  const p4Info = getPanel4SourceInfo();
+  const p5Info = getPanel5SourceInfo();
 
   const triggerCompleteTransition = () => {
     if (hasTriggeredCompleteRef.current) return;
@@ -57,7 +63,7 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
       setElapsedSec(elapsedMs / 1000);
 
       setDisplayProgress((prev) => {
-        const canComplete = isSyncComplete || syncProgress >= 100 || elapsedMs >= 3500;
+        const canComplete = isSyncComplete || syncProgress >= 100 || elapsedMs >= 3800;
 
         if (prev >= 100 && canComplete) {
           clearInterval(timer);
@@ -96,26 +102,38 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
   const roundedPct = Math.min(100, Math.max(0, Math.round(displayProgress)));
   const energizedCells = Math.round((roundedPct / 100) * 25);
 
-  // Per-folder charging progress (0..100% each, smoothly sequential across Folder 1 -> Folder 2 -> Folder 3)
+  // Per-folder charging progress (0..100% each, smoothly sequential across Folder 1 -> Folder 5)
   const folder1Pct =
     roundedPct >= 100
       ? 100
-      : Math.min(100, Math.max(0, Math.round((displayProgress / 35) * 100)));
+      : Math.min(100, Math.max(0, Math.round((displayProgress / 20) * 100)));
   const folder2Pct =
     roundedPct >= 100
       ? 100
-      : displayProgress <= 35
+      : displayProgress <= 20
         ? 0
-        : Math.min(100, Math.max(0, Math.round(((displayProgress - 35) / 30) * 100)));
+        : Math.min(100, Math.max(0, Math.round(((displayProgress - 20) / 20) * 100)));
   const folder3Pct =
     roundedPct >= 100
       ? 100
-      : displayProgress <= 65
+      : displayProgress <= 40
         ? 0
-        : Math.min(100, Math.max(0, Math.round(((displayProgress - 65) / 35) * 100)));
+        : Math.min(100, Math.max(0, Math.round(((displayProgress - 40) / 20) * 100)));
+  const folder4Pct =
+    roundedPct >= 100
+      ? 100
+      : displayProgress <= 60
+        ? 0
+        : Math.min(100, Math.max(0, Math.round(((displayProgress - 60) / 20) * 100)));
+  const folder5Pct =
+    roundedPct >= 100
+      ? 100
+      : displayProgress <= 80
+        ? 0
+        : Math.min(100, Math.max(0, Math.round(((displayProgress - 80) / 20) * 100)));
 
   // Calculate clear Estimated Time Remaining (seconds) so user always knows how long to wait
-  const totalEstimatedDurationSec = 2.4;
+  const totalEstimatedDurationSec = 2.6;
   const remainingFraction = Math.max(0, (100 - displayProgress) / 100);
   const estRemainingSec =
     roundedPct >= 100
@@ -124,25 +142,33 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
 
   const activeFolderStep =
     roundedPct >= 100
-      ? 'ALL 3 FOLDERS SYNCHRONIZED (3 / 3)'
-      : syncProgress < 12
-        ? 'AUTO-SCANNING 3 SHARED GOOGLE DRIVE FOLDERS FOR UPDATES'
+      ? 'ALL 5 SHARED FOLDERS VERIFIED & SYNCHRONIZED (5 / 5)'
+      : syncProgress < 10
+        ? 'AUTO-SCANNING 5 SHARED GOOGLE DRIVE FOLDERS FOR NEWER FILES / VERSIONS'
         : folder1Pct < 100
-          ? 'STEP 1 OF 3 · LOADING SHARED FOLDER 1'
+          ? 'FOLDER 1 OF 5 · CHECKING & LOADING DAILY PEAK TEMP DB'
           : folder2Pct < 100
-            ? 'STEP 2 OF 3 · LOADING SHARED FOLDER 2'
-            : 'STEP 3 OF 3 · LOADING SHARED FOLDER 3';
+            ? 'FOLDER 2 OF 5 · CHECKING & LOADING 4-CIRCUIT POWER DB'
+            : folder3Pct < 100
+              ? 'FOLDER 3 OF 5 · CHECKING & LOADING 24-HR SECTION PROFILE DB'
+              : folder4Pct < 100
+                ? 'FOLDER 4 OF 5 · CHECKING & LOADING OPERATION CONDITION DB (2.6 CHART 1)'
+                : 'FOLDER 5 OF 5 · CHECKING & LOADING 30-MIN LOAD CURVE DB (2.6 CHART 2)';
 
   const dynamicStatusHeadline =
     roundedPct >= 100
-      ? 'All 3 Shared Google Drive Telemetry Folders Synchronized (100%)'
+      ? 'All 5 Shared Google Drive Telemetry Folders Verified & Auto-Selected (100%)'
       : syncStatusText
         ? syncStatusText
         : folder1Pct < 100
-          ? 'Reading Shared Folder 1: Daily Peak Fiber & Conductor Temp (19 Sections)...'
+          ? 'Checking Shared Folder 1/5: Daily Peak Fiber & Conductor Temp (19 Sections)...'
           : folder2Pct < 100
-            ? 'Reading Shared Folder 2: 4-Circuit Submarine Power Load (115kV & 33kV)...'
-            : 'Reading Shared Folder 3: 24-Hour Section Daily Profile & Ckt #3 MW...';
+            ? 'Checking Shared Folder 2/5: 4-Circuit Submarine Power Load (115kV & 33kV)...'
+            : folder3Pct < 100
+              ? 'Checking Shared Folder 3/5: 24-Hour Section Daily Profile & Ckt #3 MW...'
+              : folder4Pct < 100
+                ? 'Checking Shared Folder 4/5: Operation Condition Database (4 Sheets)...'
+                : 'Checking Shared Folder 5/5: 30-Min Load Curve Database (48 Half-Hr Slots)...';
 
   const radius = 86;
   const circumference = 2 * Math.PI * radius;
@@ -150,15 +176,15 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
 
   return (
     <div
-      className={`fixed inset-0 z-50 bg-[#050912] text-slate-100 flex flex-col justify-between p-4 sm:p-8 overflow-y-auto select-none transition-all duration-500 ease-out ${
+      className={`fixed inset-0 z-50 bg-[#050912] text-slate-100 flex flex-col justify-between p-4 sm:p-6 overflow-y-auto select-none transition-all duration-500 ease-out ${
         isFadingOut ? 'opacity-0 scale-[1.02] pointer-events-none' : 'opacity-100 scale-100'
       }`}
     >
       {/* Subtle High-Voltage Grid & Radial Energy Field */}
       <div className="fixed inset-0 pointer-events-none opacity-25 bg-[radial-gradient(circle_at_50%_38%,rgba(6,182,212,0.22)_0%,rgba(59,130,246,0.08)_38%,transparent_72%)]" />
 
-      {/* Top System Telemetry Bar (Clean header without the 3 right-side bus/load/fiber parameters) */}
-      <div className="relative z-10 w-full max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800/80">
+      {/* Top System Telemetry Bar */}
+      <div className="relative z-10 w-full max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-slate-800/80">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-cyan-950/80 border border-cyan-500/40 flex items-center justify-center shadow-[0_0_20px_rgba(6,182,212,0.3)]">
             <Zap className="w-5 h-5 text-cyan-400 animate-pulse" />
@@ -168,16 +194,20 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
               115 kV Khanom – Koh Samui Submarine Cable System
             </div>
             <h1 className="text-base sm:text-lg font-bold text-white tracking-tight">
-              Public Telemetry Grid · Shared Database Charging Sequence
+              Public Telemetry Grid · 5-Shared-Folder Auto-Version Check &amp; Charging Sequence
             </h1>
           </div>
+        </div>
+        <div className="px-3 py-1 rounded-xl bg-emerald-950/70 border border-emerald-500/40 text-[11px] font-mono text-emerald-300 font-bold flex items-center gap-1.5">
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Auto-Selects Newest File Version Across All 5 Shared Folders</span>
         </div>
       </div>
 
       {/* Center Focal Anchor: High-Voltage Electrical Charging Reactor + 0-100% Capacitor Bank */}
-      <div className="relative z-10 my-auto py-6 w-full max-w-5xl mx-auto flex flex-col items-center">
+      <div className="relative z-10 my-auto py-4 w-full max-w-6xl mx-auto flex flex-col items-center">
         {/* Circular High-Voltage Capacitor Core */}
-        <div className="relative w-56 h-56 sm:w-64 sm:h-64 flex items-center justify-center">
+        <div className="relative w-48 h-48 sm:w-56 sm:h-56 flex items-center justify-center">
           {/* Outer Rotating Energy Ring */}
           <div className="absolute inset-0 rounded-full border border-dashed border-cyan-500/30 animate-[spin_14s_linear_infinite]" />
           <div className="absolute inset-3 rounded-full border border-amber-500/20 animate-[spin_9s_linear_infinite_reverse]" />
@@ -262,7 +292,7 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
         </div>
 
         {/* Live Operation Status Headline + Estimated Wait Countdown */}
-        <div className="mt-5 text-center space-y-2 max-w-2xl">
+        <div className="mt-4 text-center space-y-2 max-w-3xl">
           <div className="flex items-center justify-center gap-2 text-xs sm:text-sm font-mono text-cyan-300 font-semibold">
             <Radio className="w-4 h-4 text-cyan-400 animate-pulse shrink-0" />
             <span>{dynamicStatusHeadline}</span>
@@ -283,21 +313,21 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
           </div>
 
           <p className="text-xs text-slate-400">
-            Automatically reading and indexing shared databases for Heat Map (2.1), 24-Hr Daily Temperature Curve (2.2), 3D Thermal Surface (2.3), and 4-Circuit Yearly Comparison (2.4)
+            Automatically scanning all 5 shared Google Drive folders and selecting the newest database file version for Heat Map (2.1), Daily Curve (2.2), 3D Surface (2.3), Yearly Comparison (2.4), Temp Stats (2.5), and Power Statistics (2.6)
           </p>
         </div>
 
         {/* 25-Cell Segmented High-Voltage Capacitor Charging Bar */}
-        <div className="w-full max-w-3xl mt-5 bg-slate-900/90 border border-slate-800 rounded-2xl p-3.5 shadow-[0_0_30px_rgba(6,182,212,0.08)]">
+        <div className="w-full max-w-4xl mt-4 bg-slate-900/90 border border-slate-800 rounded-2xl p-3 shadow-[0_0_30px_rgba(6,182,212,0.08)]">
           <div className="flex items-center justify-between text-xs font-mono tabular-nums mb-2">
             <span className="text-slate-400 font-semibold">
-              HIGH-VOLTAGE CAPACITOR BANK CHARGE
+              5-SHARED-FOLDER CAPACITOR BANK SYNCHRONIZATION
             </span>
             <span className="text-cyan-300 font-bold">
               {roundedPct}% ({energizedCells}/25 CELLS ENERGIZED)
             </span>
           </div>
-          <div className="grid grid-cols-[repeat(25,minmax(0,1fr))] gap-1 h-4">
+          <div className="grid grid-cols-[repeat(25,minmax(0,1fr))] gap-1 h-3.5">
             {Array.from({ length: 25 }).map((_, i) => {
               const isLit = i < energizedCells;
               const isHigh = i >= 17;
@@ -320,11 +350,11 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
           </div>
         </div>
 
-        {/* 3 Shared Folder Conduits (Folder 1, Folder 2, Folder 3) */}
-        <div className="w-full max-w-5xl mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* 5 Shared Folder Conduits (Folder 1 to Folder 5) */}
+        <div className="w-full max-w-6xl mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           {/* Conduit 1: Shared Folder 1 */}
           <div
-            className={`rounded-2xl p-4 border transition-all ${
+            className={`rounded-2xl p-3.5 border transition-all flex flex-col justify-between ${
               folder1Pct >= 100
                 ? 'bg-slate-900/90 border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.08)]'
                 : folder1Pct > 0
@@ -332,29 +362,35 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
                   : 'bg-slate-900/50 border-slate-800/80'
             }`}
           >
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <div className="flex items-center gap-2">
-                <Thermometer className="w-4 h-4 text-cyan-400 shrink-0" />
-                <span className="text-xs font-mono font-bold text-slate-200">
-                  01. SHARED FOLDER 1
-                </span>
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Thermometer className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <span className="text-[11px] font-mono font-bold text-slate-200">
+                    01. FOLDER 1
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {folder1Pct >= 100 ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
+                  )}
+                  <span className="text-[11px] font-mono tabular-nums font-bold text-cyan-300">
+                    {folder1Pct}%
+                  </span>
+                </div>
               </div>
-              <div className="flex items-center gap-1.5">
-                {folder1Pct >= 100 ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                ) : (
-                  <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
-                )}
-                <span className="text-xs font-mono tabular-nums font-bold text-cyan-300">
-                  {folder1Pct}%
-                </span>
+              <div className="text-xs font-bold text-white mb-1 leading-snug">
+                Daily Peak Fiber &amp; Conductor Temp
               </div>
-            </div>
-            <div className="text-sm font-bold text-white mb-1">
-              Daily Peak Fiber &amp; Conductor Temp
-            </div>
-            <div className="text-xs text-slate-400 font-mono tabular-nums mb-3">
-              {p1Info.totalDates} Dates · {p1Info.recordCount.toLocaleString()} Section Records · Feeds [2.1] &amp; [2.4]
+              <div className="text-[10px] text-cyan-300/90 font-mono truncate mb-1" title={p1Info.name}>
+                <FileSpreadsheet className="w-3 h-3 inline mr-1 text-cyan-400" />
+                {p1Info.name}
+              </div>
+              <div className="text-[10px] text-slate-400 font-mono tabular-nums mb-2.5">
+                {p1Info.totalDates} Dates · Feeds [2.1] &amp; [2.4]
+              </div>
             </div>
             <svg className="h-1.5 w-full rounded-full overflow-hidden bg-slate-800" viewBox="0 0 100 6" preserveAspectRatio="none">
               <rect x="0" y="0" width={folder1Pct} height="6" className="fill-cyan-400 transition-all duration-150" />
@@ -363,46 +399,52 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
 
           {/* Conduit 2: Shared Folder 2 */}
           <div
-            className={`rounded-2xl p-4 border transition-all ${
+            className={`rounded-2xl p-3.5 border transition-all flex flex-col justify-between ${
               folder2Pct >= 100
                 ? 'bg-slate-900/90 border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.08)]'
                 : folder2Pct > 0
-                  ? 'bg-slate-900/90 border-amber-500/40 shadow-[0_0_20px_rgba(245,158,11,0.1)]'
+                  ? 'bg-slate-900/90 border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.1)]'
                   : 'bg-slate-900/50 border-slate-800/80'
             }`}
           >
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <div className="flex items-center gap-2">
-                <Zap className="w-4 h-4 text-amber-400 shrink-0" />
-                <span className="text-xs font-mono font-bold text-slate-200">
-                  02. SHARED FOLDER 2
-                </span>
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span className="text-[11px] font-mono font-bold text-slate-200">
+                    02. FOLDER 2
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {folder2Pct >= 100 ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : folder2Pct > 0 ? (
+                    <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
+                  ) : null}
+                  <span className="text-[11px] font-mono tabular-nums font-bold text-emerald-300">
+                    {folder2Pct}%
+                  </span>
+                </div>
               </div>
-              <div className="flex items-center gap-1.5">
-                {folder2Pct >= 100 ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                ) : folder2Pct > 0 ? (
-                  <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
-                ) : null}
-                <span className="text-xs font-mono tabular-nums font-bold text-amber-300">
-                  {folder2Pct}%
-                </span>
+              <div className="text-xs font-bold text-white mb-1 leading-snug">
+                4-Circuit Daily Max Power DB
               </div>
-            </div>
-            <div className="text-sm font-bold text-white mb-1">
-              4-Circuit Submarine Power Load
-            </div>
-            <div className="text-xs text-slate-400 font-mono tabular-nums mb-3">
-              {p2Info.totalDates} Dates · 115kV Ckt #3/#2 &amp; 33kV · Feeds [2.4]
+              <div className="text-[10px] text-emerald-300/90 font-mono truncate mb-1" title={p2Info.name}>
+                <FileSpreadsheet className="w-3 h-3 inline mr-1 text-emerald-400" />
+                {p2Info.name}
+              </div>
+              <div className="text-[10px] text-slate-400 font-mono tabular-nums mb-2.5">
+                {p2Info.totalDates} Dates · Feeds [2.4]
+              </div>
             </div>
             <svg className="h-1.5 w-full rounded-full overflow-hidden bg-slate-800" viewBox="0 0 100 6" preserveAspectRatio="none">
-              <rect x="0" y="0" width={folder2Pct} height="6" className="fill-amber-400 transition-all duration-150" />
+              <rect x="0" y="0" width={folder2Pct} height="6" className="fill-emerald-400 transition-all duration-150" />
             </svg>
           </div>
 
           {/* Conduit 3: Shared Folder 3 */}
           <div
-            className={`rounded-2xl p-4 border transition-all ${
+            className={`rounded-2xl p-3.5 border transition-all flex flex-col justify-between ${
               folder3Pct >= 100
                 ? 'bg-slate-900/90 border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.08)]'
                 : folder3Pct > 0
@@ -410,50 +452,146 @@ export const PublicElectricalLoadingScreen: React.FC<PublicElectricalLoadingScre
                   : 'bg-slate-900/50 border-slate-800/80'
             }`}
           >
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <div className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-purple-400 shrink-0" />
-                <span className="text-xs font-mono font-bold text-slate-200">
-                  03. SHARED FOLDER 3
-                </span>
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                  <span className="text-[11px] font-mono font-bold text-slate-200">
+                    03. FOLDER 3
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {folder3Pct >= 100 ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : folder3Pct > 0 ? (
+                    <Loader2 className="w-3.5 h-3.5 text-purple-400 animate-spin" />
+                  ) : null}
+                  <span className="text-[11px] font-mono tabular-nums font-bold text-purple-300">
+                    {folder3Pct}%
+                  </span>
+                </div>
               </div>
-              <div className="flex items-center gap-1.5">
-                {folder3Pct >= 100 ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                ) : folder3Pct > 0 ? (
-                  <Loader2 className="w-3.5 h-3.5 text-purple-400 animate-spin" />
-                ) : null}
-                <span className="text-xs font-mono tabular-nums font-bold text-purple-300">
-                  {folder3Pct}%
-                </span>
+              <div className="text-xs font-bold text-white mb-1 leading-snug">
+                24-Hour Section Daily Profile DB
               </div>
-            </div>
-            <div className="text-sm font-bold text-white mb-1">
-              24-Hour Section Daily Profile &amp; Statistics Counter
-            </div>
-            <div className="text-xs text-slate-400 font-mono tabular-nums mb-3">
-              {p3Info.totalDates} Dates · 24-Hr Curve &amp; 4-Ckt MW · Feeds [2.2], [2.3], [2.5] &amp; [2.6]
+              <div className="text-[10px] text-purple-300/90 font-mono truncate mb-1" title={p3Info.name}>
+                <FileSpreadsheet className="w-3 h-3 inline mr-1 text-purple-400" />
+                {p3Info.name}
+              </div>
+              <div className="text-[10px] text-slate-400 font-mono tabular-nums mb-2.5">
+                {p3Info.totalDates} Dates · Feeds [2.2], [2.3] &amp; [2.5]
+              </div>
             </div>
             <svg className="h-1.5 w-full rounded-full overflow-hidden bg-slate-800" viewBox="0 0 100 6" preserveAspectRatio="none">
               <rect x="0" y="0" width={folder3Pct} height="6" className="fill-purple-400 transition-all duration-150" />
+            </svg>
+          </div>
+
+          {/* Conduit 4: Shared Folder 4 (Page 2.6 Chart 1) */}
+          <div
+            className={`rounded-2xl p-3.5 border transition-all flex flex-col justify-between ${
+              folder4Pct >= 100
+                ? 'bg-slate-900/90 border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.08)]'
+                : folder4Pct > 0
+                  ? 'bg-slate-900/90 border-amber-500/40 shadow-[0_0_20px_rgba(245,158,11,0.1)]'
+                  : 'bg-slate-900/50 border-slate-800/80'
+            }`}
+          >
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Activity className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="text-[11px] font-mono font-bold text-slate-200">
+                    04. FOLDER 4
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {folder4Pct >= 100 ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : folder4Pct > 0 ? (
+                    <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                  ) : null}
+                  <span className="text-[11px] font-mono tabular-nums font-bold text-amber-300">
+                    {folder4Pct}%
+                  </span>
+                </div>
+              </div>
+              <div className="text-xs font-bold text-white mb-1 leading-snug">
+                Operation Condition DB (4 Sheets)
+              </div>
+              <div className="text-[10px] text-amber-300/90 font-mono truncate mb-1" title={p4Info.name}>
+                <FileSpreadsheet className="w-3 h-3 inline mr-1 text-amber-400" />
+                {p4Info.name}
+              </div>
+              <div className="text-[10px] text-slate-400 font-mono tabular-nums mb-2.5">
+                {p4Info.totalDates} Dates · Feeds [2.6] Chart 1
+              </div>
+            </div>
+            <svg className="h-1.5 w-full rounded-full overflow-hidden bg-slate-800" viewBox="0 0 100 6" preserveAspectRatio="none">
+              <rect x="0" y="0" width={folder4Pct} height="6" className="fill-amber-400 transition-all duration-150" />
+            </svg>
+          </div>
+
+          {/* Conduit 5: Shared Folder 5 (Page 2.6 Chart 2) */}
+          <div
+            className={`rounded-2xl p-3.5 border transition-all flex flex-col justify-between ${
+              folder5Pct >= 100
+                ? 'bg-slate-900/90 border-emerald-500/40 shadow-[0_0_20px_rgba(16,185,129,0.08)]'
+                : folder5Pct > 0
+                  ? 'bg-slate-900/90 border-sky-500/40 shadow-[0_0_20px_rgba(14,165,233,0.1)]'
+                  : 'bg-slate-900/50 border-slate-800/80'
+            }`}
+          >
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                  <span className="text-[11px] font-mono font-bold text-slate-200">
+                    05. FOLDER 5
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {folder5Pct >= 100 ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : folder5Pct > 0 ? (
+                    <Loader2 className="w-3.5 h-3.5 text-sky-400 animate-spin" />
+                  ) : null}
+                  <span className="text-[11px] font-mono tabular-nums font-bold text-sky-300">
+                    {folder5Pct}%
+                  </span>
+                </div>
+              </div>
+              <div className="text-xs font-bold text-white mb-1 leading-snug">
+                30-Min Load Curve DB (48 Slots)
+              </div>
+              <div className="text-[10px] text-sky-300/90 font-mono truncate mb-1" title={p5Info.name}>
+                <FileSpreadsheet className="w-3 h-3 inline mr-1 text-sky-400" />
+                {p5Info.name}
+              </div>
+              <div className="text-[10px] text-slate-400 font-mono tabular-nums mb-2.5">
+                {p5Info.totalDates} Dates · Feeds [2.6] Chart 2
+              </div>
+            </div>
+            <svg className="h-1.5 w-full rounded-full overflow-hidden bg-slate-800" viewBox="0 0 100 6" preserveAspectRatio="none">
+              <rect x="0" y="0" width={folder5Pct} height="6" className="fill-sky-400 transition-all duration-150" />
             </svg>
           </div>
         </div>
       </div>
 
       {/* Bottom Action & Range Footer */}
-      <div className="relative z-10 w-full max-w-6xl mx-auto pt-4 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-4">
+      <div className="relative z-10 w-full max-w-6xl mx-auto pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-2 text-xs font-mono tabular-nums text-slate-400">
           <Database className="w-4 h-4 text-cyan-400" />
           <span>
             ACTIVE TELEMETRY WINDOW: {p3Info.dateRange.firstDate || '2025-07-01'} TO{' '}
-            {p3Info.dateRange.latestDate || '2026-10-18'}
+            {p4Info.dateRange.latestDate || p3Info.dateRange.latestDate || '2026-10-26'}
           </span>
           {roundedPct >= 100 && (
             <>
               <span aria-hidden="true">·</span>
               <span className="text-emerald-400 font-bold flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Ready
+                <CheckCircle2 className="w-3.5 h-3.5" /> All 5 Shared Folders Ready
               </span>
             </>
           )}

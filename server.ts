@@ -1369,15 +1369,47 @@ export interface ScannedDriveFileMetadata {
 }
 
 function extractLatestDateFromFileName(name: string): string {
-  const matches = [...(name || '').matchAll(/(\d{4}[-_.]\d{2}[-_.]\d{2})/g)].map((m) =>
-    m[1].replace(/[_.]/g, '-')
-  );
-  if (matches.length > 0) {
-    matches.sort();
-    return matches[matches.length - 1];
+  const clean = name || '';
+  const isoDates: string[] = [];
+
+  // Match YYYY-MM-DD, YYYY_MM_DD, YYYY.MM.DD
+  for (const m of clean.matchAll(/(\d{4})[-_.](\d{2})[-_.](\d{2})/g)) {
+    const yr = parseInt(m[1], 10);
+    const mo = parseInt(m[2], 10);
+    const da = parseInt(m[3], 10);
+    if (yr >= 2000 && yr <= 2100 && mo >= 1 && mo <= 12 && da >= 1 && da <= 31) {
+      isoDates.push(`${m[1]}-${m[2]}-${m[3]}`);
+    }
+  }
+
+  // Match DD-MM-YYYY, DD_MM_YYYY, DD.MM.YYYY
+  for (const m of clean.matchAll(/(?<!\d)(\d{2})[-_.](\d{2})[-_.](\d{4})(?!\d)/g)) {
+    const p1 = parseInt(m[1], 10);
+    const p2 = parseInt(m[2], 10);
+    const yr = parseInt(m[3], 10);
+    if (yr >= 2000 && yr <= 2100) {
+      if (p2 >= 1 && p2 <= 12 && p1 >= 1 && p1 <= 31) {
+        isoDates.push(`${m[3]}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`);
+      } else if (p1 >= 1 && p1 <= 12 && p2 >= 1 && p2 <= 31) {
+        isoDates.push(`${m[3]}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`);
+      }
+    }
+  }
+
+  if (isoDates.length > 0) {
+    isoDates.sort();
+    return isoDates[isoDates.length - 1];
   }
   return '';
 }
+
+const BASELINE_KNOWN_FILE_IDS = new Set([
+  '1Ya1JFd4CuINtfrbfH0H1KiZG10qf6xJ0',
+  '1xdb2zFsdWDkWeAOr7VYYvVv9ovlKz3vN',
+  '1Lt8jRjIpQJ1D0r7az7cNZ2ey_noOUZeE',
+  '1U8JX9NmtNmO7Xw8CmsZ8yoGuu32NlRb1',
+  '1nae0hRouMpxNT8kYb9YARnlXQIDVvVwv',
+]);
 
 /**
  * Live scanner for a shared Google Drive folder, file, or Google Sheet link.
@@ -1495,14 +1527,22 @@ async function scanSharedDriveFolderMetadata(
       return null;
     }
 
-    // Sort candidates so the file with the newest date in its filename (or preferred extension) is selected first
+    // Sort candidates so:
+    // 1. Any file with a newer date in its filename comes first
+    // 2. If multiple files exist and one is a newly uploaded file (not the baseline default fileId), prefer the new file
+    // 3. Prefer higher version numbers (e.g. v2, v3, updated) or preferred extension
     foundFiles.sort((a, b) => {
       const dateA = extractLatestDateFromFileName(a.name);
       const dateB = extractLatestDateFromFileName(b.name);
+      if (dateA && dateB && dateA !== dateB) return dateB.localeCompare(dateA);
+      const aIsNew = !BASELINE_KNOWN_FILE_IDS.has(a.id) ? 1 : 0;
+      const bIsNew = !BASELINE_KNOWN_FILE_IDS.has(b.id) ? 1 : 0;
+      if (aIsNew !== bIsNew) return bIsNew - aIsNew;
       if (dateA !== dateB) return dateB.localeCompare(dateA);
       const aPref = a.name.toLowerCase().endsWith(`.${preferredFormat}`) ? 1 : 0;
       const bPref = b.name.toLowerCase().endsWith(`.${preferredFormat}`) ? 1 : 0;
-      return bPref - aPref;
+      if (aPref !== bPref) return bPref - aPref;
+      return b.name.localeCompare(a.name);
     });
 
     const chosen = foundFiles[0];
@@ -2317,6 +2357,8 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
   panel1Url?: string;
   panel2Url?: string;
   panel3Url?: string;
+  panel4Url?: string;
+  panel5Url?: string;
   authHeader?: string;
   forceDownload?: boolean;
 }): Promise<{
@@ -2326,6 +2368,9 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
   panel1: { changed: boolean; updated: boolean; fileName: string; fileId: string; totalDates: number; dateRange: any; recordCount: number };
   panel2: { changed: boolean; updated: boolean; fileName: string; fileId: string; totalDates: number; dateRange: any; recordCount: number };
   panel3: { changed: boolean; updated: boolean; fileName: string; fileId: string; totalDates: number; dateRange: any; recordCount: number };
+  panel4?: { changed: boolean; updated: boolean; fileName: string; fileId: string; totalDates: number; dateRange: any };
+  panel5?: { changed: boolean; updated: boolean; fileName: string; fileId: string; totalDates: number; dateRange: any };
+  page26?: any;
 }> {
   if (activePublicFolderSyncPromise) {
     return activePublicFolderSyncPromise;
@@ -2361,9 +2406,17 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
         options?.panel3Url ||
         currentDb?.linksConfig?.panel3Url ||
         DEFAULT_PUBLIC_THREE_PANEL_LINKS.panel3Url;
+      const panel4Url =
+        options?.panel4Url ||
+        currentDb?.linksConfig?.panel4Url ||
+        DEFAULT_PAGE26_OP_COND_FOLDER_URL;
+      const panel5Url =
+        options?.panel5Url ||
+        currentDb?.linksConfig?.panel5Url ||
+        DEFAULT_PAGE26_LOAD_CURVE_FOLDER_URL;
       const authHeader = options?.authHeader || '';
 
-      // 1. Scan all 3 shared Google Drive folders concurrently
+      // 1. Scan all 3 primary shared Google Drive folders concurrently (Folders 4 & 5 scanned via scanAndSyncPage26SharedFolders)
       const [scan1, scan2, scan3] = await Promise.all([
         scanSharedDriveFolderMetadata(panel1Url, 'xlsx', authHeader),
         scanSharedDriveFolderMetadata(panel2Url, 'csv', authHeader),
@@ -2462,6 +2515,8 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
           panel1Url,
           panel2Url,
           panel3Url,
+          panel4Url,
+          panel5Url,
           updatedAt: currentDb.updatedAt,
         };
         const rawOut = JSON.stringify(currentDb);
@@ -2506,10 +2561,12 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
         }
       }
 
-      // Also scan & sync Page 2.6's 2 shared Google Drive folders concurrently
+      // Also scan & sync Folders 4 & 5 (Page 2.6 Operation Condition & 30-Min Load Curve) concurrently
       let p26SyncRes: any = null;
       try {
         p26SyncRes = await scanAndSyncPage26SharedFolders({
+          opCondFolderUrl: panel4Url,
+          loadCurveFolderUrl: panel5Url,
           authHeader,
           forceDownload: forceDl,
         });
@@ -2552,6 +2609,8 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
           dateRange: p3Info.dateRange || { firstDate: '', latestDate: '' },
           recordCount: p3Info.recordCount || 0,
         },
+        panel4: p26SyncRes?.opCond || undefined,
+        panel5: p26SyncRes?.loadCurve || undefined,
         page26: p26SyncRes || undefined,
       };
     } finally {
@@ -2562,7 +2621,7 @@ async function scanAndSyncThreePublicSharedFolders(options?: {
   return activePublicFolderSyncPromise;
 }
 
-// Endpoint to automatically scan the 3 shared Google Drive folders and sync any changed/new database files
+// Endpoint to automatically scan all 5 shared Google Drive folders and sync any changed/new database files
 app.get('/api/scan-and-sync-public-folders', async (req, res) => {
   try {
     const authHeader = req.headers.authorization || (req.query.token ? `Bearer ${req.query.token}` : '');
@@ -2570,6 +2629,8 @@ app.get('/api/scan-and-sync-public-folders', async (req, res) => {
       panel1Url: req.query.panel1Url ? String(req.query.panel1Url) : undefined,
       panel2Url: req.query.panel2Url ? String(req.query.panel2Url) : undefined,
       panel3Url: req.query.panel3Url ? String(req.query.panel3Url) : undefined,
+      panel4Url: req.query.panel4Url ? String(req.query.panel4Url) : undefined,
+      panel5Url: req.query.panel5Url ? String(req.query.panel5Url) : undefined,
       authHeader,
       forceDownload: req.query.force === '1',
     });
@@ -2589,6 +2650,8 @@ app.post('/api/scan-and-sync-public-folders', async (req, res) => {
       panel1Url: req.body?.panel1Url,
       panel2Url: req.body?.panel2Url,
       panel3Url: req.body?.panel3Url,
+      panel4Url: req.body?.panel4Url,
+      panel5Url: req.body?.panel5Url,
       authHeader,
       forceDownload: Boolean(req.body?.force),
     });

@@ -93,6 +93,7 @@ interface PeriodBucket {
 
 interface PublicPowerStatisticsPageProps {
   dbConfig: OrgDatabaseConfig;
+  onOpenDataSetting?: () => void;
 }
 
 const ALL_CIRCUIT_KEYS: PowerCircuitKey[] = ['ckt3', 'ckt2', 'nkt33', 'oil33'];
@@ -115,7 +116,9 @@ function classifyCircuitCondition(circuit: PowerCircuitMeta, mw: number): {
   return { key: 'normal', label: 'Normal Condition', color: '#3b82f6' };
 }
 
-export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps> = () => {
+export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps> = ({
+  onOpenDataSetting,
+}) => {
   const [opCondData, setOpCondData] = useState<Page26OpCondDataset>(() => {
     const storeOp = getPage26OpCondDataset();
     return storeOp?.dates?.length ? storeOp : BUNDLED_PAGE26_OP_COND;
@@ -813,8 +816,8 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
-      {/* Page 2.6 Header Banner + 2 Shared Google Drive Data Sources */}
-      <div className="rounded-2xl border border-amber-500/30 bg-gradient-to-r from-slate-950 via-slate-900 to-amber-950/35 p-4 sm:p-5 shadow-[0_0_30px_rgba(245,158,11,0.1)] space-y-4">
+      {/* Page 2.6 Header Banner (Chart 1-2 Database panels moved to Public Data Setting Panel) */}
+      <div className="rounded-2xl border border-amber-500/30 bg-gradient-to-r from-slate-950 via-slate-900 to-amber-950/35 p-4 sm:p-5 shadow-[0_0_30px_rgba(245,158,11,0.1)]">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3.5">
             <div className="w-11 h-11 rounded-2xl bg-amber-500/15 border border-amber-400/40 flex items-center justify-center text-amber-300 shadow-[0_0_18px_rgba(245,158,11,0.3)]">
@@ -830,8 +833,7 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
                 </h2>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Dual-Database Analytics powered by Shared Google Drive Folder 1 (Operation Condition Database) &amp;
-                Shared Google Drive Folder 2 (30-Min Load Curve Database)
+                Dual-Database Analytics powered by Operation Condition Database (Chart 1) &amp; 30-Min Load Curve Database (Chart 2) — Configured in Public Data Setting
               </p>
             </div>
           </div>
@@ -845,67 +847,17 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
               <Database className="w-3.5 h-3.5 text-amber-400" />
               <span>{(opCondData?.totalDates || allDatesChart1.length).toLocaleString()} Recorded Days</span>
             </div>
-          </div>
-        </div>
-
-        {/* Active 2 Shared Google Drive Folder Data Sources */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 pt-1">
-          {/* Shared Folder 1 Badge */}
-          <div className="rounded-xl bg-slate-900/90 border border-cyan-500/30 p-3 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <Database className="w-4 h-4 text-cyan-400 shrink-0" />
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5 text-[10px] font-mono font-bold text-cyan-300 uppercase">
-                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                  <span>Chart 1 Source · Operation Condition Database (4 Sheets)</span>
-                </div>
-                <div className="text-xs font-mono text-white truncate mt-0.5">
-                  {opCondData?.fileName || 'Power_Operating_Condition_Database_Updated_2025-07-31_to_2026-10-26.xlsx'}
-                </div>
-                <div className="text-[10px] font-mono text-slate-400">
-                  {opCondData?.totalDates || allDatesChart1.length} Dates ({opCondData?.dateRange?.firstDate || '2021-11-28'} to{' '}
-                  {opCondData?.dateRange?.latestDate || '2026-10-26'})
-                </div>
-              </div>
-            </div>
-            <a
-              href={SHARED_FOLDER_1_OP_COND_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-cyan-300 border border-cyan-500/30 text-[10px] font-mono font-bold flex items-center gap-1 shrink-0"
-            >
-              <span>Drive Folder 1</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
-          </div>
-
-          {/* Shared Folder 2 Badge */}
-          <div className="rounded-xl bg-slate-900/90 border border-amber-500/30 p-3 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <Clock className="w-4 h-4 text-amber-400 shrink-0" />
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5 text-[10px] font-mono font-bold text-amber-300 uppercase">
-                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                  <span>Chart 2 Source · 30-Min Load Curve Database (48 Half-Hour Intervals/Day)</span>
-                </div>
-                <div className="text-xs font-mono text-white truncate mt-0.5">
-                  {loadCurveData?.fileName || 'Hourly_Load_Curve_Database_Updated_2025-07-04_to_2026-10-26.xlsx'}
-                </div>
-                <div className="text-[10px] font-mono text-slate-400">
-                  {loadCurveData?.totalDates || allDatesChart2.length} Dates ({loadCurveData?.dateRange?.firstDate || '2021-11-28'} to{' '}
-                  {loadCurveData?.dateRange?.latestDate || '2026-10-26'})
-                </div>
-              </div>
-            </div>
-            <a
-              href={SHARED_FOLDER_2_LOAD_CURVE_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-amber-300 border border-amber-500/30 text-[10px] font-mono font-bold flex items-center gap-1 shrink-0"
-            >
-              <span>Drive Folder 2</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
+            {onOpenDataSetting && (
+              <button
+                type="button"
+                onClick={onOpenDataSetting}
+                className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 font-bold flex items-center gap-1.5 transition-all cursor-pointer"
+                title="Manage Operation Condition DB (Chart 1) & 30-Min Load Curve DB (Chart 2) in Public Data Setting"
+              >
+                <Database className="w-3.5 h-3.5 text-amber-400" />
+                <span>Chart 1–2 DB in Data Setting</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

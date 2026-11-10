@@ -2495,7 +2495,7 @@ export default function App() {
   );
   const [isInitialPublicSyncComplete, setIsInitialPublicSyncComplete] = useState<boolean>(false);
 
-  // Automatic backdoor sync from the 3 shared Google Drive folders on initial web app launch
+  // Automatic backdoor sync from all 5 shared Google Drive folders on initial web app launch
   // All initial data loading finishes inside PublicElectricalLoadingScreen before entering the Public Dashboard
   useEffect(() => {
     let cancelled = false;
@@ -2517,7 +2517,7 @@ export default function App() {
           setRefreshProgress(100);
           setPublicSyncStatusText(
             res.success
-              ? 'All 3 Shared Telemetry Conduits Synchronized (100%)'
+              ? 'All 5 Shared Telemetry Folders Verified & Synchronized (100%)'
               : res.message || 'Telemetry Grid Ready'
           );
         }
@@ -2573,7 +2573,7 @@ export default function App() {
         ? 'bg-[#070b14] text-slate-100 selection:bg-cyan-500 selection:text-slate-950'
         : 'bg-slate-100/60 text-slate-900'
     }`}>
-      {/* Public Dashboard Electrical Charging Loading Screen (0 - 100% while backdoor loads 3 shared folders) */}
+      {/* Public Dashboard Electrical Charging Loading Screen (0 - 100% while backdoor loads all 5 shared folders) */}
       {showPublicChargingScreen && isPublicView && (
         <PublicElectricalLoadingScreen
           syncProgress={refreshProgress}
@@ -2611,6 +2611,7 @@ export default function App() {
         onRefreshPublicData={handleRefreshPublicData}
         isRefreshingPublicData={isRefreshingPublicData && !showPublicChargingScreen}
         refreshProgress={showPublicChargingScreen ? 0 : refreshProgress}
+        refreshStatusText={publicSyncStatusText}
         viewDeviceMode={viewDeviceMode}
         onChangeViewDeviceMode={(mode) => setViewDeviceMode(mode)}
       />
@@ -2765,12 +2766,19 @@ export default function App() {
             ) : publicTab === 'tempstats' ? (
               <PublicTempStatisticsPage dbConfig={dbConfig} />
             ) : publicTab === 'powerstats' ? (
-              <PublicPowerStatisticsPage dbConfig={dbConfig} />
+              <PublicPowerStatisticsPage
+                dbConfig={dbConfig}
+                onOpenDataSetting={() => setIsDataSettingPwdModalOpen(true)}
+              />
             ) : (
               <PublicDataSettingPage
                 dbConfig={dbConfig}
                 onDatabaseUpdated={(newConfig) => setDbConfig(newConfig)}
                 onNavigateToChart={(tab) => setPublicTab(tab)}
+                onRefreshPublicData={handleRefreshPublicData}
+                isRefreshingPublicData={isRefreshingPublicData && !showPublicChargingScreen}
+                refreshProgress={showPublicChargingScreen ? 0 : refreshProgress}
+                refreshStatusText={publicSyncStatusText}
               />
             )}
           </main>
