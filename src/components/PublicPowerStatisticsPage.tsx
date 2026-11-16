@@ -213,8 +213,8 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
   const [showCriteriaTable, setShowCriteriaTable] = useState<boolean>(true);
   const [showHighestCallout, setShowHighestCallout] = useState<boolean>(true);
   const [hoveredBarId, setHoveredBarId] = useState<string | null>(null);
-  const [isGlobalFilterMinimized, setIsGlobalFilterMinimized] = useState<boolean>(false);
-  const [isLocalFilterMinimized, setIsLocalFilterMinimized] = useState<boolean>(false);
+  const [isGlobalFilterMinimized, setIsGlobalFilterMinimized] = useState<boolean>(true);
+  const [isLocalFilterMinimized, setIsLocalFilterMinimized] = useState<boolean>(true);
 
   const prevLatestChart1DateRef = React.useRef<string>(
     BUNDLED_PAGE26_OP_COND.dates[BUNDLED_PAGE26_OP_COND.dates.length - 1] || ''
@@ -669,7 +669,7 @@ export const PublicPowerStatisticsPage: React.FC<PublicPowerStatisticsPageProps>
     () => BUNDLED_PAGE26_LOAD_CURVE.dates[Math.max(0, BUNDLED_PAGE26_LOAD_CURVE.dates.length - 2)] || '2026-10-30'
   );
   const [chart2CircuitKey, setChart2CircuitKey] = useState<PowerCircuitKey>('ckt3');
-  const [isChart2FilterMinimized, setIsChart2FilterMinimized] = useState<boolean>(false);
+  const [isChart2FilterMinimized, setIsChart2FilterMinimized] = useState<boolean>(true);
 
   const prevLatestChart2DateRef = React.useRef<string>(
     BUNDLED_PAGE26_LOAD_CURVE.dates[BUNDLED_PAGE26_LOAD_CURVE.dates.length - 1] || ''

@@ -144,56 +144,50 @@ export const PublicSidebar: React.FC<PublicSidebarProps> = ({
           <button
             type="button"
             onClick={onToggleCollapse}
-            className="px-2 py-1 rounded-lg text-[10px] font-mono font-bold text-slate-300 hover:text-cyan-300 bg-slate-900 border border-slate-800 cursor-pointer"
+            className="px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold text-cyan-300 hover:text-cyan-200 bg-slate-900 border border-cyan-500/30 cursor-pointer"
           >
-            {isCollapsed ? 'Show Menu ▼' : 'Compact ▲'}
+            {isCollapsed ? 'Show Menu ▼' : 'Hide Menu ▲'}
           </button>
         </div>
 
-        <nav
-          className={`p-2 ${
-            isCollapsed
-              ? 'flex items-center gap-1.5 overflow-x-auto no-scrollbar'
-              : 'grid grid-cols-2 gap-1.5'
-          }`}
-        >
-          {tabs.map((tab) => {
-            const isActive = activeTab === tab.id;
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => onTabChange(tab.id)}
-                className={`group relative rounded-xl transition-all cursor-pointer flex items-center gap-2 px-2.5 py-2 text-left shrink-0 ${
-                  isActive
-                    ? 'bg-cyan-950/70 text-cyan-200 border border-cyan-500/50 shadow-[0_0_12px_rgba(6,182,212,0.18)] font-bold'
-                    : 'text-slate-400 bg-slate-900/50 hover:bg-slate-900 hover:text-slate-200 border border-slate-800/80'
-                }`}
-              >
-                <div
-                  className={`p-1.5 rounded-lg shrink-0 ${
+        {!isCollapsed && (
+          <nav className="p-2 grid grid-cols-2 gap-1.5">
+            {tabs.map((tab) => {
+              const isActive = activeTab === tab.id;
+              const Icon = tab.icon;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => onTabChange(tab.id)}
+                  className={`group relative rounded-xl transition-all cursor-pointer flex items-center gap-2 px-2.5 py-2 text-left shrink-0 ${
                     isActive
-                      ? 'bg-cyan-900/60 text-cyan-300 border border-cyan-400/30'
-                      : 'bg-slate-950 text-slate-400 border border-slate-800'
+                      ? 'bg-cyan-950/70 text-cyan-200 border border-cyan-500/50 shadow-[0_0_12px_rgba(6,182,212,0.18)] font-bold'
+                      : 'text-slate-400 bg-slate-900/50 hover:bg-slate-900 hover:text-slate-200 border border-slate-800/80'
                   }`}
                 >
-                  <Icon className="w-3.5 h-3.5" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className={`text-[11px] leading-tight truncate ${isActive ? 'text-cyan-100 font-bold' : 'text-slate-200 font-medium'}`}>
-                    {isCollapsed ? tab.shortTitle : tab.title}
+                  <div
+                    className={`p-1.5 rounded-lg shrink-0 ${
+                      isActive
+                        ? 'bg-cyan-900/60 text-cyan-300 border border-cyan-400/30'
+                        : 'bg-slate-950 text-slate-400 border border-slate-800'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
                   </div>
-                  {!isCollapsed && (
+                  <div className="min-w-0 flex-1">
+                    <div className={`text-[11px] leading-tight truncate ${isActive ? 'text-cyan-100 font-bold' : 'text-slate-200 font-medium'}`}>
+                      {tab.title}
+                    </div>
                     <div className="text-[9px] text-slate-500 truncate mt-0.5">
                       {tab.subtitle}
                     </div>
-                  )}
-                </div>
-              </button>
-            );
-          })}
-        </nav>
+                  </div>
+                </button>
+              );
+            })}
+          </nav>
+        )}
       </aside>
     );
   }

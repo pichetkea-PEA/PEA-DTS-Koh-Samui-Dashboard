@@ -113,7 +113,7 @@ const IndividualTempBarChartCard: React.FC<{
   const dropdownRef = useRef<HTMLDivElement | null>(null);
   const [hoveredSlotKey, setHoveredSlotKey] = useState<string | null>(null);
   const [showHighestCallout, setShowHighestCallout] = useState<boolean>(true);
-  const [isLocalFilterMinimized, setIsLocalFilterMinimized] = useState<boolean>(false);
+  const [isLocalFilterMinimized, setIsLocalFilterMinimized] = useState<boolean>(true);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -1423,7 +1423,7 @@ export const PublicTempStatisticsPage: React.FC<PublicTempStatisticsPageProps> =
 
   // Global Filter State (Affects BOTH Chart 1 & Chart 2)
   const [globalMode, setGlobalMode] = useState<GlobalStatFilterMode>('year_to_year');
-  const [isGlobalFilterMinimized, setIsGlobalFilterMinimized] = useState<boolean>(false);
+  const [isGlobalFilterMinimized, setIsGlobalFilterMinimized] = useState<boolean>(true);
   const [selectedYears, setSelectedYears] = useState<string[]>([]);
   const [selectedMonthAcrossYears, setSelectedMonthAcrossYears] = useState<string>('09');
   const [selectedSingleYearForMonths, setSelectedSingleYearForMonths] = useState<string>('2026');

@@ -47,6 +47,7 @@ export interface PublicHeatMapPageProps {
   powerSummariesByDate?: Map<string, DailyPowerSummary>;
   selectedDateFilter?: string;
   isMobileView?: boolean;
+  isEmbedMode?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +282,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   powerSummariesByDate,
   selectedDateFilter = 'all',
   isMobileView = false,
+  isEmbedMode = false,
 }) => {
   const [dbVersion, setDbVersion] = useState<number>(0);
 
@@ -317,8 +319,8 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   const [selectedSectionFilter, setSelectedSectionFilter] = useState<string>('all');
   const [selectedPhaseFilter, setSelectedPhaseFilter] = useState<'all' | 'A' | 'B' | 'C'>('all');
   const [highlightedLandmark, setHighlightedLandmark] = useState<string | null>(null);
-  const [isTopPanelMinimized, setIsTopPanelMinimized] = useState<boolean>(false);
-  const [isLocationsPanelMinimized, setIsLocationsPanelMinimized] = useState<boolean>(false);
+  const [isTopPanelMinimized, setIsTopPanelMinimized] = useState<boolean>(true);
+  const [isLocationsPanelMinimized, setIsLocationsPanelMinimized] = useState<boolean>(true);
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -1182,7 +1184,7 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
   return (
     <div className="space-y-3 animate-in fade-in duration-300">
       {/* Top Filter and Context Bar (Minimizable to expand Heat Map Chart size) */}
-      {isTopPanelMinimized ? (
+      {isTopPanelMinimized || isEmbedMode ? (
         <div className="bg-slate-900/90 backdrop-blur-xl px-4 py-2.5 rounded-2xl border border-cyan-500/20 shadow-[0_4px_20px_rgba(6,182,212,0.06)] flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
             <span className="p-1.5 rounded-lg bg-rose-950/60 text-rose-400 border border-rose-500/30">
@@ -1191,9 +1193,24 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
             <span className="font-black text-slate-100 tracking-tight">
               [2.1] DAILY MAXIMUM HEAT MAP CHART
             </span>
-            <span className="px-2 py-0.5 rounded-md bg-slate-950 border border-slate-800 text-cyan-300 font-bold">
-              Date: {selectedDate}
-            </span>
+
+            {/* Interactive Date Selector directly accessible in Minimized & Embed Mode */}
+            <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1 rounded-lg border border-cyan-500/30">
+              <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-[11px] text-slate-400 font-mono">DATE:</span>
+              <select
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="text-xs font-mono font-bold text-cyan-300 bg-transparent border-none outline-none cursor-pointer"
+              >
+                {availableDates.map((d) => (
+                  <option key={d} value={d} className="bg-slate-900 text-slate-200">
+                    {d}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <span className="px-2 py-0.5 rounded-md bg-rose-950/50 border border-rose-500/30 text-rose-300 font-bold">
               Peak Tf: {summaryStats.maxTf > 0 ? `${summaryStats.maxTf.toFixed(1)} °C` : '-'}
             </span>
@@ -1205,16 +1222,18 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
             </span>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setIsTopPanelMinimized(false)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/40 text-xs font-mono font-bold transition-all cursor-pointer shadow-[0_0_12px_rgba(6,182,212,0.2)]"
-            title="Expand Filter and KPI Panel"
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-            <span>Show Panel</span>
-            <ChevronDown className="w-3.5 h-3.5" />
-          </button>
+          {!isEmbedMode && (
+            <button
+              type="button"
+              onClick={() => setIsTopPanelMinimized(false)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/40 text-xs font-mono font-bold transition-all cursor-pointer shadow-[0_0_12px_rgba(6,182,212,0.2)]"
+              title="Expand Filter and KPI Panel"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+              <span>Show Filter &amp; KPI Panel</span>
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       ) : (
         <div className="bg-slate-900/90 backdrop-blur-xl p-4 rounded-2xl border border-cyan-500/20 shadow-[0_4px_25px_rgba(6,182,212,0.06)] flex flex-wrap items-center justify-between gap-3">
@@ -1583,16 +1602,18 @@ export const PublicHeatMapPage: React.FC<PublicHeatMapPageProps> = ({
         </div>
       )}
 
-      {/* Satellite Map Container — Increases height when top panel is minimized */}
+      {/* Satellite Map Container — Increases height when top panel is minimized or in embed mode */}
       <div
         className={`relative bg-slate-950 rounded-3xl border border-cyan-500/20 overflow-hidden shadow-[0_0_35px_rgba(6,182,212,0.08)] ${
-          isTopPanelMinimized
-            ? isMobileView
-              ? 'h-[520px]'
-              : 'h-[calc(100vh-145px)] min-h-[780px]'
-            : isMobileView
-            ? 'h-[450px]'
-            : 'h-[600px]'
+          isEmbedMode
+            ? 'h-[calc(100vh-82px)] min-h-[540px]'
+            : isTopPanelMinimized
+              ? isMobileView
+                ? 'h-[520px]'
+                : 'h-[calc(100vh-145px)] min-h-[780px]'
+              : isMobileView
+                ? 'h-[450px]'
+                : 'h-[600px]'
         }`}
       >
         <div

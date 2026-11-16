@@ -50,6 +50,18 @@ function writeUserMemoryStore(store: Record<string, StoredUserPreference>) {
 
 app.use(express.json({ limit: '100mb' }));
 
+// Allow cross-origin embedding (e.g., Google Sites) and public API access
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.removeHeader('X-Frame-Options');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 // Lazy initialization of Gemini client
 let aiClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI {

@@ -111,13 +111,31 @@ export default function App() {
   // Navigation tab for Admin Internal Suite: 'management' (Page 1) to 'yearly' (Page 7)
   const [activeTab, setActiveTab] = useState<AppPageTab>('management');
 
+  // Detect standalone Google Sites Heat Map Embed Mode (?embed=heatmap or ?embed=1)
+  const isEmbedHeatmap = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const val = (params.get('embed') || '').toLowerCase();
+      return val === 'heatmap' || val === '1' || val === 'true';
+    } catch {
+      return false;
+    }
+  }, []);
+
   // Navigation tab for Public Dashboard: 'heatmap' (2.1), 'dailycurve' (2.2), 'powertemp3d' (2.3), 'yearly' (2.4)
   const [publicTab, setPublicTab] = useState<PublicDashboardTab>('heatmap');
   const [isDataSettingPwdModalOpen, setIsDataSettingPwdModalOpen] = useState<boolean>(false);
-  const [isPublicSidebarCollapsed, setIsPublicSidebarCollapsed] = useState<boolean>(false);
+  // Keep sidebar menu minimized/hidden first when Public Dashboard opens up
+  const [isPublicSidebarCollapsed, setIsPublicSidebarCollapsed] = useState<boolean>(true);
   const [adminViewMode, setAdminViewMode] = useState<'internal' | 'public'>('internal');
   const [viewDeviceMode, setViewDeviceMode] = useState<'desktop' | 'mobile'>(() => {
     if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const embedVal = (params.get('embed') || '').toLowerCase();
+      if (embedVal === 'heatmap' || embedVal === '1' || embedVal === 'true') {
+        return 'desktop';
+      }
       return window.innerWidth < 768 ? 'mobile' : 'desktop';
     }
     return 'desktop';
@@ -2489,7 +2507,7 @@ export default function App() {
 
   const [isRefreshingPublicData, setIsRefreshingPublicData] = useState(false);
   const [refreshProgress, setRefreshProgress] = useState<number>(0);
-  const [showPublicChargingScreen, setShowPublicChargingScreen] = useState<boolean>(true);
+  const [showPublicChargingScreen, setShowPublicChargingScreen] = useState<boolean>(() => !isEmbedHeatmap);
   const [publicSyncStatusText, setPublicSyncStatusText] = useState<string>(
     'Initializing 115 kV Submarine Cable Telemetry Grid...'
   );
@@ -2589,32 +2607,34 @@ export default function App() {
         />
       )}
 
-      {/* Global Top Header strictly centered with reduced-size top-right login & new tab */}
-      <TopGlobalHeader
-        user={user}
-        isAuthenticated={!needsAuth}
-        isLoggingIn={isLoggingIn}
-        onLogin={handleLogin}
-        onLogout={() => handleLogout()}
-        isAdminModeActive={!needsAuth && adminViewMode === 'internal'}
-        onToggleAdminViewMode={
-          !needsAuth
-            ? () => setAdminViewMode((prev) => (prev === 'internal' ? 'public' : 'internal'))
-            : undefined
-        }
-        onToggleSidebar={
-          isPublicView
-            ? () => setIsPublicSidebarCollapsed((prev) => !prev)
-            : undefined
-        }
-        isSidebarCollapsed={isPublicSidebarCollapsed}
-        onRefreshPublicData={handleRefreshPublicData}
-        isRefreshingPublicData={isRefreshingPublicData && !showPublicChargingScreen}
-        refreshProgress={showPublicChargingScreen ? 0 : refreshProgress}
-        refreshStatusText={publicSyncStatusText}
-        viewDeviceMode={viewDeviceMode}
-        onChangeViewDeviceMode={(mode) => setViewDeviceMode(mode)}
-      />
+      {/* Global Top Header strictly centered with reduced-size top-right login & new tab (Hidden in standalone embed mode) */}
+      {!isEmbedHeatmap && (
+        <TopGlobalHeader
+          user={user}
+          isAuthenticated={!needsAuth}
+          isLoggingIn={isLoggingIn}
+          onLogin={handleLogin}
+          onLogout={() => handleLogout()}
+          isAdminModeActive={!needsAuth && adminViewMode === 'internal'}
+          onToggleAdminViewMode={
+            !needsAuth
+              ? () => setAdminViewMode((prev) => (prev === 'internal' ? 'public' : 'internal'))
+              : undefined
+          }
+          onToggleSidebar={
+            isPublicView
+              ? () => setIsPublicSidebarCollapsed((prev) => !prev)
+              : undefined
+          }
+          isSidebarCollapsed={isPublicSidebarCollapsed}
+          onRefreshPublicData={handleRefreshPublicData}
+          isRefreshingPublicData={isRefreshingPublicData && !showPublicChargingScreen}
+          refreshProgress={showPublicChargingScreen ? 0 : refreshProgress}
+          refreshStatusText={publicSyncStatusText}
+          viewDeviceMode={viewDeviceMode}
+          onChangeViewDeviceMode={(mode) => setViewDeviceMode(mode)}
+        />
+      )}
 
       {/* Toast Notification */}
       {notification && !showGameLoadingScreen && !showPublicChargingScreen && (
@@ -2635,7 +2655,7 @@ export default function App() {
       )}
 
       {/* Sci-Fi Loading Screen after passing Admin Login Session (0-100% Date Scanning in Target Folder 1 & 2) */}
-      {showGameLoadingScreen && !needsAuth && (
+      {showGameLoadingScreen && !needsAuth && !isEmbedHeatmap && (
         <VideoGameLoadingScreen
           scannedFiles={scannedFiles}
           parsedFiles={parsedFiles}
@@ -2655,47 +2675,55 @@ export default function App() {
       )}
 
       {/* Main Body Layout */}
-      {isPublicView ? (
+      {isPublicView || isEmbedHeatmap ? (
         /* PUBLIC DASHBOARD: Adapts between Desktop View (Left Sidebar + Wide Workspace) and Mobile View (Stacked Mobile Arrangement) */
         <div
-          className={`flex-1 min-h-[calc(100vh-64px)] ${
-            viewDeviceMode === 'mobile'
-              ? 'flex flex-col w-full max-w-[560px] mx-auto md:border-x md:border-cyan-500/20 md:shadow-[0_0_45px_rgba(6,182,212,0.08)]'
-              : 'flex flex-row min-w-[1120px] lg:min-w-0 overflow-x-auto'
+          className={`flex-1 ${isEmbedHeatmap ? 'min-h-screen' : 'min-h-[calc(100vh-64px)]'} ${
+            isEmbedHeatmap
+              ? 'flex flex-col w-full'
+              : viewDeviceMode === 'mobile'
+                ? 'flex flex-col w-full max-w-[560px] mx-auto md:border-x md:border-cyan-500/20 md:shadow-[0_0_45px_rgba(6,182,212,0.08)]'
+                : 'flex flex-row min-w-[1120px] lg:min-w-0 overflow-x-auto'
           }`}
         >
-          <PublicSidebar
-            activeTab={publicTab}
-            onTabChange={(tab) => {
-              if (tab === 'datasetting') {
-                setIsDataSettingPwdModalOpen(true);
-              } else {
-                setPublicTab(tab);
-              }
-            }}
-            isCollapsed={isPublicSidebarCollapsed}
-            onToggleCollapse={() => setIsPublicSidebarCollapsed((prev) => !prev)}
-            dbConfig={dbConfig}
-            isMobileView={viewDeviceMode === 'mobile'}
-          />
+          {!isEmbedHeatmap && (
+            <PublicSidebar
+              activeTab={publicTab}
+              onTabChange={(tab) => {
+                if (tab === 'datasetting') {
+                  setIsDataSettingPwdModalOpen(true);
+                } else {
+                  setPublicTab(tab);
+                }
+              }}
+              isCollapsed={isPublicSidebarCollapsed}
+              onToggleCollapse={() => setIsPublicSidebarCollapsed((prev) => !prev)}
+              dbConfig={dbConfig}
+              isMobileView={viewDeviceMode === 'mobile'}
+            />
+          )}
 
-          <DataSettingPasswordModal
-            isOpen={isDataSettingPwdModalOpen}
-            onSuccess={() => {
-              setIsDataSettingPwdModalOpen(false);
-              setPublicTab('datasetting');
-            }}
-            onCancel={() => setIsDataSettingPwdModalOpen(false)}
-          />
+          {!isEmbedHeatmap && (
+            <DataSettingPasswordModal
+              isOpen={isDataSettingPwdModalOpen}
+              onSuccess={() => {
+                setIsDataSettingPwdModalOpen(false);
+                setPublicTab('datasetting');
+              }}
+              onCancel={() => setIsDataSettingPwdModalOpen(false)}
+            />
+          )}
 
           <main
             className={`flex-1 min-w-0 w-full mx-auto ${
-              viewDeviceMode === 'mobile'
-                ? 'px-2.5 py-3 space-y-4'
-                : 'max-w-[1880px] px-2.5 sm:px-4 lg:px-6 py-4 sm:py-5 space-y-5'
+              isEmbedHeatmap
+                ? 'p-2 sm:p-3 space-y-2'
+                : viewDeviceMode === 'mobile'
+                  ? 'px-2.5 py-3 space-y-4'
+                  : 'max-w-[1880px] px-2.5 sm:px-4 lg:px-6 py-4 sm:py-5 space-y-5'
             }`}
           >
-            {publicTab === 'heatmap' ? (
+            {isEmbedHeatmap || publicTab === 'heatmap' ? (
               <PublicHeatMapPage
                 dbConfig={dbConfig}
                 onAdminLoginClick={handleLogin}
@@ -2708,7 +2736,8 @@ export default function App() {
                 activeDailyPowerSummary={null}
                 powerSummariesByDate={new Map()}
                 selectedDateFilter="all"
-                isMobileView={viewDeviceMode === 'mobile'}
+                isMobileView={!isEmbedHeatmap && viewDeviceMode === 'mobile'}
+                isEmbedMode={isEmbedHeatmap}
               />
             ) : publicTab === 'dailycurve' ? (
               <PublicDailyCurvePage
