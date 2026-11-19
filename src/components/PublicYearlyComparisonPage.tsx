@@ -12,6 +12,7 @@ import {
   Legend,
   ReferenceLine,
   ReferenceDot,
+  ReferenceArea,
 } from 'recharts';
 import {
   CalendarRange,
@@ -44,6 +45,9 @@ import {
   getAllOrgRecords,
   CircuitDailyPeakPower,
   subscribeOrgDatabase,
+  POWER_CIRCUITS_META,
+  POWER_OPERATING_RANGES_4,
+  PowerCircuitMeta,
 } from '../services/orgDatabaseStorage';
 import { DailyPowerSummary } from '../services/powerConsumptionParser';
 import { NoDatabaseEmptyState } from './NoDatabaseEmptyState';
@@ -170,6 +174,17 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
   const [customEndDate, setCustomEndDate] = useState<string>('');
   const [activeChartTab, setActiveChartTab] = useState<'both' | 'temp' | 'power'>('both');
   const [selectedPowerCircuit, setSelectedPowerCircuit] = useState<PowerCircuitFilter>('combination');
+  const activePowerCircuitMeta: PowerCircuitMeta | null = useMemo(() => {
+    if (
+      selectedPowerCircuit === 'ckt3' ||
+      selectedPowerCircuit === 'ckt2' ||
+      selectedPowerCircuit === 'nkt33' ||
+      selectedPowerCircuit === 'oil33'
+    ) {
+      return POWER_CIRCUITS_META.find((c) => c.key === selectedPowerCircuit) || null;
+    }
+    return null;
+  }, [selectedPowerCircuit]);
   const [isTempPeakCardOpen, setIsTempPeakCardOpen] = useState<boolean>(true);
   const [isPowerPeakCardOpen, setIsPowerPeakCardOpen] = useState<boolean>(true);
   const [tempCardOffset, setTempCardOffset] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
@@ -678,17 +693,43 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
       }
     });
 
-    if (vals.length === 0) return [0, 100];
+    if (vals.length === 0) {
+      if (activePowerCircuitMeta) {
+        const { criticalMax } = activePowerCircuitMeta.thresholds;
+        const top =
+          criticalMax > 40
+            ? Math.ceil((criticalMax * 1.15) / 5) * 5
+            : Number((Math.ceil((criticalMax * 1.15) * 2) / 2).toFixed(1));
+        return [0, top];
+      }
+      return [0, 100];
+    }
     const minVal = Math.min(...vals);
     const maxVal = Math.max(...vals);
     const span = Math.max(2, maxVal - minVal);
     const step = maxVal <= 20 ? 1 : span <= 15 ? 2 : 5;
     const padBottom = Math.max(step, span * 0.15);
     const padTop = Math.max(step, span * 0.18);
-    const lower = Math.max(0, Math.floor((minVal - padBottom) / step) * step);
-    const upper = Math.max(lower + step * 3, Math.ceil((maxVal + padTop) / step) * step);
-    return [lower, upper];
-  }, [chart2PowerData, isChronologicalMode, availableYears, selectedPowerCircuit]);
+    const rawLower = Math.max(0, Math.floor((minVal - padBottom) / step) * step);
+    const rawUpper = Math.max(rawLower + step * 3, Math.ceil((maxVal + padTop) / step) * step);
+
+    if (activePowerCircuitMeta) {
+      const { normalMax, criticalMax } = activePowerCircuitMeta.thresholds;
+      const normalFloor =
+        normalMax > 40
+          ? Math.floor((normalMax * 0.65) / 5) * 5
+          : Math.max(0, Math.floor(normalMax * 0.65));
+      const lower = Math.min(rawLower, normalFloor);
+      const minCriticalCeiling =
+        criticalMax > 40
+          ? Math.ceil((criticalMax * 1.15) / 5) * 5
+          : Number((Math.ceil((criticalMax * 1.15) * 2) / 2).toFixed(1));
+      const upper = Math.max(rawUpper, minCriticalCeiling);
+      return [lower, upper];
+    }
+
+    return [rawLower, rawUpper];
+  }, [chart2PowerData, isChronologicalMode, availableYears, selectedPowerCircuit, activePowerCircuitMeta]);
 
   // Render marker on multi-year charts to identify Increase (▲) or Decrease (▼) from previous year
   const renderPowerComparisonMarker = (prefix: string, yrIndex: number, strokeColor: string) => {
@@ -2254,6 +2295,42 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                 </div>
               </div>
 
+              {activePowerCircuitMeta ? (
+                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/75 border border-slate-800/80 text-[11px] font-mono">
+                  <span className="text-slate-400 font-bold uppercase tracking-wide flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                    {activePowerCircuitMeta.label} Operation Conditions (Power Stats Scale):
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {POWER_OPERATING_RANGES_4.map((r) => (
+                      <span
+                        key={r.key}
+                        className="px-2 py-0.5 rounded-lg flex items-center gap-1.5 text-[10px]"
+                        style={{
+                          backgroundColor: `${r.hexColor}22`,
+                          border: `1px solid ${r.hexColor}88`,
+                          color: '#f8fafc',
+                        }}
+                      >
+                        <span
+                          className="w-2.5 h-2.5 rounded-sm shrink-0"
+                          style={{ backgroundColor: r.hexColor }}
+                        />
+                        <span className="font-bold">{r.shortLabel}:</span>
+                        <span>{activePowerCircuitMeta.rangeLabels[r.key]}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-slate-950/60 border border-slate-800/70 text-[10px] font-mono text-slate-400">
+                  <span className="flex items-center gap-1.5">
+                    <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    Select an individual circuit above (115kV Ckt #3, 115kV Ckt #2, 33kV NKT, or 33kV Oil) to display its 4 Power Stats operation condition background zones &amp; boundary lines.
+                  </span>
+                </div>
+              )}
+
               <div className="overflow-x-auto w-full pb-2">
                 <div
                   style={{
@@ -2268,6 +2345,76 @@ export const PublicYearlyComparisonPage: React.FC<PublicYearlyComparisonPageProp
                       margin={{ top: powerTopBandHeight, right: 30, left: 10, bottom: 20 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.7} />
+                      {activePowerCircuitMeta && (() => {
+                        const [yMin, yMax] = chart2YDomain;
+                        const { normalMax, emergencyMax, criticalMax } = activePowerCircuitMeta.thresholds;
+                        const bands = [
+                          { key: 'normal', y1: Math.max(yMin, 0), y2: Math.min(yMax, normalMax), fill: '#3b82f6', fillOpacity: 0.16 },
+                          { key: 'emergency', y1: Math.max(yMin, normalMax), y2: Math.min(yMax, emergencyMax), fill: '#eab308', fillOpacity: 0.22 },
+                          { key: 'critical', y1: Math.max(yMin, emergencyMax), y2: Math.min(yMax, criticalMax), fill: '#ef4444', fillOpacity: 0.24 },
+                          { key: 'overload', y1: Math.max(yMin, criticalMax), y2: yMax, fill: '#991b1b', fillOpacity: 0.32 },
+                        ];
+                        return (
+                          <>
+                            {bands.map((b) =>
+                              b.y2 > b.y1 ? (
+                                <ReferenceArea
+                                  key={`op-zone-${b.key}`}
+                                  y1={b.y1}
+                                  y2={b.y2}
+                                  fill={b.fill}
+                                  fillOpacity={b.fillOpacity}
+                                  ifOverflow="hidden"
+                                />
+                              ) : null
+                            )}
+                            {normalMax >= yMin && normalMax <= yMax && (
+                              <ReferenceLine
+                                y={normalMax}
+                                stroke="#eab308"
+                                strokeWidth={1.75}
+                                strokeDasharray="6 4"
+                                label={{
+                                  value: `Emergency Boundary (${normalMax} MW)`,
+                                  position: 'insideBottomRight',
+                                  fill: '#fde047',
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                }}
+                              />
+                            )}
+                            {emergencyMax >= yMin && emergencyMax <= yMax && (
+                              <ReferenceLine
+                                y={emergencyMax}
+                                stroke="#ef4444"
+                                strokeWidth={1.75}
+                                strokeDasharray="6 4"
+                                label={{
+                                  value: `Critical Boundary (${emergencyMax} MW)`,
+                                  position: 'insideBottomRight',
+                                  fill: '#fca5a5',
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                }}
+                              />
+                            )}
+                            {criticalMax >= yMin && criticalMax <= yMax && (
+                              <ReferenceLine
+                                y={criticalMax}
+                                stroke="#dc2626"
+                                strokeWidth={2}
+                                label={{
+                                  value: `Overload Boundary (${criticalMax} MW)`,
+                                  position: 'insideTopRight',
+                                  fill: '#fecaca',
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                }}
+                              />
+                            )}
+                          </>
+                        );
+                      })()}
                       <XAxis
                         dataKey={!isChronologicalMode ? 'monthDay' : 'date'}
                         stroke="#64748b"

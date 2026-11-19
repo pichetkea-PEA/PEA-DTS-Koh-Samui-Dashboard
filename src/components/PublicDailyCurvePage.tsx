@@ -9,6 +9,7 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
+  ReferenceArea,
   ReferenceLine,
 } from 'recharts';
 import {
@@ -43,6 +44,8 @@ import {
   getOrgSectionDailyProfileDates,
   fetchSectionDailyProfileForDate,
   subscribeOrgDatabase,
+  POWER_CIRCUITS_META,
+  POWER_OPERATING_RANGES_4,
 } from '../services/orgDatabaseStorage';
 import { ParsedTeprFile } from '../services/teprParser';
 import { DailyPowerSummary } from '../services/powerConsumptionParser';
@@ -478,6 +481,8 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
     };
   }, [telemetryDate1, telemetryDate2, comparisonData]);
 
+  const ckt3Meta = POWER_CIRCUITS_META[0]; // 115kV Circuit #3 thresholds: Normal < 64.1, Emergency 64.1-68.11, Critical 68.11-80.13, Overload > 80.13 MW
+
   // Dynamic Vertical Scale Calculation:
   // Separates Circuit 3 Power into the Upper Zone and Cable Temperatures into the Lower Zone to eliminate overlay!
   const verticalScale = useMemo(() => {
@@ -516,29 +521,35 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
     const tempDomainMax = Math.max(68, Math.ceil(tempDomainMin + rawSpan / 0.44));
 
     // For Power Axis (Upper Band 55% to 95% of height):
-    const powerSpan = Math.max(25, maxP - minP + 8);
+    // Ensure upper ceiling reaches above criticalMax (80.13 MW) so all 4 Circuit #3 operating condition bands are visible
+    const powerBandFloor = Math.max(0, Math.floor(Math.min(minP - 2, 56)));
+    const powerDomainMax = Math.max(Math.ceil(maxP + 6), 88);
+    const powerSpan = Math.max(25, powerDomainMax - powerBandFloor);
     const totalPowerDomainSpan = powerSpan / 0.40;
-    const powerDomainMax = Math.ceil(maxP + 6);
     const powerDomainMin = Math.floor(powerDomainMax - totalPowerDomainSpan);
 
     // Dedicated pure scales for Stacked Charts mode
     const pureTempMin = Math.max(15, Math.floor(minT - 2));
     const pureTempMax = Math.ceil(Math.max(65, maxT + 3));
-    const purePowerMin = Math.max(0, Math.floor(minP - 5));
-    const purePowerMax = Math.ceil(maxP + 5);
+    const purePowerMin = Math.max(0, Math.floor(Math.min(minP, 55) - 5));
+    const purePowerMax = Math.max(Math.ceil(maxP + 6), 90);
 
     return {
       split: {
-        tempDomain: [tempDomainMin, tempDomainMax],
-        powerDomain: [powerDomainMin, powerDomainMax],
+        tempDomain: [tempDomainMin, tempDomainMax] as [number, number],
+        powerDomain: [powerDomainMin, powerDomainMax] as [number, number],
+        powerBandFloor,
+        powerDomainMax,
         minTemp: minT,
         maxTemp: maxT,
         minPower: minP,
         maxPower: maxP,
       },
       pure: {
-        tempDomain: [pureTempMin, pureTempMax],
-        powerDomain: [purePowerMin, purePowerMax],
+        tempDomain: [pureTempMin, pureTempMax] as [number, number],
+        powerDomain: [purePowerMin, purePowerMax] as [number, number],
+        purePowerMin,
+        purePowerMax,
       },
     };
   }, [comparisonData]);
@@ -862,6 +873,34 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
               </div>
             </div>
 
+            {/* 115kV Circuit #3 Power Operation Condition Legend (Matching Power Stats 2.6 Colors) */}
+            <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/75 border border-slate-800/80 text-[11px] font-mono">
+              <span className="text-slate-400 font-bold uppercase tracking-wide flex items-center gap-1.5">
+                <Zap className="w-3.5 h-3.5 text-purple-400" />
+                {ckt3Meta.label} Power Operation Conditions:
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                {POWER_OPERATING_RANGES_4.map((r) => (
+                  <span
+                    key={r.key}
+                    className="px-2 py-0.5 rounded-lg flex items-center gap-1.5 text-[10px]"
+                    style={{
+                      backgroundColor: `${r.hexColor}22`,
+                      border: `1px solid ${r.hexColor}88`,
+                      color: '#f8fafc',
+                    }}
+                  >
+                    <span
+                      className="w-2.5 h-2.5 rounded-sm shrink-0"
+                      style={{ backgroundColor: r.hexColor }}
+                    />
+                    <span className="font-bold">{r.shortLabel}:</span>
+                    <span>{ckt3Meta.rangeLabels[r.key]}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+
             {/* Chart Area */}
             {hasSingleData ? (
               <div className="h-[430px] w-full pt-2">
@@ -877,6 +916,83 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.7} />
+
+                    {/* 4 Operation Condition Background Zones for 115kV Circuit #3 (Power Axis 0..110 MW) */}
+                    <ReferenceArea
+                      yAxisId="powerAxis"
+                      y1={0}
+                      y2={ckt3Meta.thresholds.normalMax}
+                      fill="#3b82f6"
+                      fillOpacity={0.16}
+                      ifOverflow="hidden"
+                    />
+                    <ReferenceArea
+                      yAxisId="powerAxis"
+                      y1={ckt3Meta.thresholds.normalMax}
+                      y2={ckt3Meta.thresholds.emergencyMax}
+                      fill="#eab308"
+                      fillOpacity={0.22}
+                      ifOverflow="hidden"
+                    />
+                    <ReferenceArea
+                      yAxisId="powerAxis"
+                      y1={ckt3Meta.thresholds.emergencyMax}
+                      y2={ckt3Meta.thresholds.criticalMax}
+                      fill="#ef4444"
+                      fillOpacity={0.24}
+                      ifOverflow="hidden"
+                    />
+                    <ReferenceArea
+                      yAxisId="powerAxis"
+                      y1={ckt3Meta.thresholds.criticalMax}
+                      y2={110}
+                      fill="#991b1b"
+                      fillOpacity={0.32}
+                      ifOverflow="hidden"
+                    />
+
+                    {/* Horizontal Boundary Lines Between Each Operation Condition */}
+                    <ReferenceLine
+                      yAxisId="powerAxis"
+                      y={ckt3Meta.thresholds.normalMax}
+                      stroke="#eab308"
+                      strokeWidth={1.75}
+                      strokeDasharray="6 4"
+                      label={{
+                        value: `Emergency Boundary (${ckt3Meta.thresholds.normalMax} MW)`,
+                        position: 'insideBottomRight',
+                        fill: '#fde047',
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                      }}
+                    />
+                    <ReferenceLine
+                      yAxisId="powerAxis"
+                      y={ckt3Meta.thresholds.emergencyMax}
+                      stroke="#ef4444"
+                      strokeWidth={1.75}
+                      strokeDasharray="6 4"
+                      label={{
+                        value: `Critical Boundary (${ckt3Meta.thresholds.emergencyMax} MW)`,
+                        position: 'insideBottomRight',
+                        fill: '#fca5a5',
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                      }}
+                    />
+                    <ReferenceLine
+                      yAxisId="powerAxis"
+                      y={ckt3Meta.thresholds.criticalMax}
+                      stroke="#dc2626"
+                      strokeWidth={2}
+                      label={{
+                        value: `Overload Boundary (${ckt3Meta.thresholds.criticalMax} MW)`,
+                        position: 'insideTopRight',
+                        fill: '#fecaca',
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                      }}
+                    />
                     <XAxis
                       dataKey="time"
                       stroke="#64748b"
@@ -1403,6 +1519,34 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
               )}
             </div>
 
+            {/* 115kV Circuit #3 Power Operation Condition Legend (Matching Power Stats 2.6 Colors) */}
+            <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/75 border border-slate-800/80 text-[11px] font-mono">
+              <span className="text-slate-400 font-bold uppercase tracking-wide flex items-center gap-1.5">
+                <Zap className="w-3.5 h-3.5 text-cyan-400" />
+                {ckt3Meta.label} Power Operation Conditions:
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                {POWER_OPERATING_RANGES_4.map((r) => (
+                  <span
+                    key={r.key}
+                    className="px-2 py-0.5 rounded-lg flex items-center gap-1.5 text-[10px]"
+                    style={{
+                      backgroundColor: `${r.hexColor}22`,
+                      border: `1px solid ${r.hexColor}88`,
+                      color: '#f8fafc',
+                    }}
+                  >
+                    <span
+                      className="w-2.5 h-2.5 rounded-sm shrink-0"
+                      style={{ backgroundColor: r.hexColor }}
+                    />
+                    <span className="font-bold">{r.shortLabel}:</span>
+                    <span>{ckt3Meta.rangeLabels[r.key]}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+
             {/* Comparison Chart Visualization */}
             {hasCompareData ? (
               <div className="space-y-5">
@@ -1414,7 +1558,7 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full" style={{ backgroundColor: themeColors.date2.power }} />
                         <span className="font-bold text-slate-300">UPPER ZONE: Circuit 3 Power Flow (MW)</span>
-                        <span className="text-slate-500">(Right Y-Axis · Scaled out of thermal range to prevent overlay)</span>
+                        <span className="text-slate-500">(Right Y-Axis · Operation Condition Zones Shown)</span>
                       </div>
                       <div className="flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full" style={{ backgroundColor: themeColors.date2.conductor }} />
@@ -1423,7 +1567,7 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
                       </div>
                     </div>
 
-                    <div className="h-[490px] w-full pt-1">
+                    <div className="h-[510px] w-full pt-1">
                       <ResponsiveContainer width="100%" height="100%">
                         <ComposedChart
                           data={comparisonData}
@@ -1437,6 +1581,97 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
                           </defs>
 
                           <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.7} />
+
+                          {/* Upper Zone Operation Condition Background Bands for Circuit #3 */}
+                          {verticalScale.split.powerBandFloor < ckt3Meta.thresholds.normalMax && (
+                            <ReferenceArea
+                              yAxisId="powerAxis"
+                              y1={verticalScale.split.powerBandFloor}
+                              y2={Math.min(verticalScale.split.powerDomainMax, ckt3Meta.thresholds.normalMax)}
+                              fill="#3b82f6"
+                              fillOpacity={0.16}
+                              ifOverflow="hidden"
+                            />
+                          )}
+                          {verticalScale.split.powerBandFloor < ckt3Meta.thresholds.emergencyMax && (
+                            <ReferenceArea
+                              yAxisId="powerAxis"
+                              y1={Math.max(verticalScale.split.powerBandFloor, ckt3Meta.thresholds.normalMax)}
+                              y2={Math.min(verticalScale.split.powerDomainMax, ckt3Meta.thresholds.emergencyMax)}
+                              fill="#eab308"
+                              fillOpacity={0.22}
+                              ifOverflow="hidden"
+                            />
+                          )}
+                          {verticalScale.split.powerBandFloor < ckt3Meta.thresholds.criticalMax && (
+                            <ReferenceArea
+                              yAxisId="powerAxis"
+                              y1={Math.max(verticalScale.split.powerBandFloor, ckt3Meta.thresholds.emergencyMax)}
+                              y2={Math.min(verticalScale.split.powerDomainMax, ckt3Meta.thresholds.criticalMax)}
+                              fill="#ef4444"
+                              fillOpacity={0.24}
+                              ifOverflow="hidden"
+                            />
+                          )}
+                          {verticalScale.split.powerDomainMax > ckt3Meta.thresholds.criticalMax && (
+                            <ReferenceArea
+                              yAxisId="powerAxis"
+                              y1={Math.max(verticalScale.split.powerBandFloor, ckt3Meta.thresholds.criticalMax)}
+                              y2={verticalScale.split.powerDomainMax}
+                              fill="#991b1b"
+                              fillOpacity={0.32}
+                              ifOverflow="hidden"
+                            />
+                          )}
+
+                          {/* Upper Zone Operation Condition Horizontal Boundary Lines */}
+                          {ckt3Meta.thresholds.normalMax >= verticalScale.split.powerBandFloor && (
+                            <ReferenceLine
+                              yAxisId="powerAxis"
+                              y={ckt3Meta.thresholds.normalMax}
+                              stroke="#eab308"
+                              strokeWidth={1.75}
+                              strokeDasharray="6 4"
+                              label={{
+                                value: `Emergency Boundary (${ckt3Meta.thresholds.normalMax} MW)`,
+                                position: 'insideBottomRight',
+                                fill: '#fde047',
+                                fontSize: 10,
+                                fontFamily: 'monospace',
+                              }}
+                            />
+                          )}
+                          {ckt3Meta.thresholds.emergencyMax >= verticalScale.split.powerBandFloor && (
+                            <ReferenceLine
+                              yAxisId="powerAxis"
+                              y={ckt3Meta.thresholds.emergencyMax}
+                              stroke="#ef4444"
+                              strokeWidth={1.75}
+                              strokeDasharray="6 4"
+                              label={{
+                                value: `Critical Boundary (${ckt3Meta.thresholds.emergencyMax} MW)`,
+                                position: 'insideBottomRight',
+                                fill: '#fca5a5',
+                                fontSize: 10,
+                                fontFamily: 'monospace',
+                              }}
+                            />
+                          )}
+                          {ckt3Meta.thresholds.criticalMax >= verticalScale.split.powerBandFloor && (
+                            <ReferenceLine
+                              yAxisId="powerAxis"
+                              y={ckt3Meta.thresholds.criticalMax}
+                              stroke="#dc2626"
+                              strokeWidth={2}
+                              label={{
+                                value: `Overload Boundary (${ckt3Meta.thresholds.criticalMax} MW)`,
+                                position: 'insideTopRight',
+                                fill: '#fecaca',
+                                fontSize: 10,
+                                fontFamily: 'monospace',
+                              }}
+                            />
+                          )}
 
                           <XAxis
                             dataKey="time"
@@ -1596,13 +1831,13 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
 
                           {/* Zone Partition Boundary Line */}
                           <ReferenceLine
-                            yAxisId="tempAxis"
-                            y={verticalScale.split.tempDomain[1] * 0.96}
-                            stroke="#334155"
+                            yAxisId="powerAxis"
+                            y={verticalScale.split.powerBandFloor}
+                            stroke="#475569"
                             strokeDasharray="4 4"
                             label={{
                               value: '▲ Power Flow Zone (Upper Band)  /  Thermal Zone (Lower Band) ▼',
-                              fill: '#64748b',
+                              fill: '#94a3b8',
                               fontSize: 9.5,
                               fontFamily: 'monospace',
                               position: 'insideBottom',
@@ -1707,7 +1942,7 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
                           </span>
                         </div>
                       </div>
-                      <div className="h-[230px] w-full pt-1">
+                      <div className="h-[270px] w-full pt-1">
                         <ResponsiveContainer width="100%" height="100%">
                           <ComposedChart
                             data={comparisonData}
@@ -1720,6 +1955,84 @@ export const PublicDailyCurvePage: React.FC<PublicDailyCurvePageProps> = ({
                               </linearGradient>
                             </defs>
                             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" opacity={0.7} />
+
+                            {/* 4 Operation Condition Background Zones for Circuit #3 */}
+                            {verticalScale.pure.purePowerMin < ckt3Meta.thresholds.normalMax && (
+                              <ReferenceArea
+                                y1={verticalScale.pure.purePowerMin}
+                                y2={Math.min(verticalScale.pure.purePowerMax, ckt3Meta.thresholds.normalMax)}
+                                fill="#3b82f6"
+                                fillOpacity={0.16}
+                                ifOverflow="hidden"
+                              />
+                            )}
+                            {verticalScale.pure.purePowerMin < ckt3Meta.thresholds.emergencyMax && (
+                              <ReferenceArea
+                                y1={Math.max(verticalScale.pure.purePowerMin, ckt3Meta.thresholds.normalMax)}
+                                y2={Math.min(verticalScale.pure.purePowerMax, ckt3Meta.thresholds.emergencyMax)}
+                                fill="#eab308"
+                                fillOpacity={0.22}
+                                ifOverflow="hidden"
+                              />
+                            )}
+                            {verticalScale.pure.purePowerMin < ckt3Meta.thresholds.criticalMax && (
+                              <ReferenceArea
+                                y1={Math.max(verticalScale.pure.purePowerMin, ckt3Meta.thresholds.emergencyMax)}
+                                y2={Math.min(verticalScale.pure.purePowerMax, ckt3Meta.thresholds.criticalMax)}
+                                fill="#ef4444"
+                                fillOpacity={0.24}
+                                ifOverflow="hidden"
+                              />
+                            )}
+                            {verticalScale.pure.purePowerMax > ckt3Meta.thresholds.criticalMax && (
+                              <ReferenceArea
+                                y1={Math.max(verticalScale.pure.purePowerMin, ckt3Meta.thresholds.criticalMax)}
+                                y2={verticalScale.pure.purePowerMax}
+                                fill="#991b1b"
+                                fillOpacity={0.32}
+                                ifOverflow="hidden"
+                              />
+                            )}
+
+                            {/* Horizontal Operation Condition Boundary Lines */}
+                            <ReferenceLine
+                              y={ckt3Meta.thresholds.normalMax}
+                              stroke="#eab308"
+                              strokeWidth={1.75}
+                              strokeDasharray="6 4"
+                              label={{
+                                value: `Emergency Boundary (${ckt3Meta.thresholds.normalMax} MW)`,
+                                position: 'insideBottomRight',
+                                fill: '#fde047',
+                                fontSize: 10,
+                                fontFamily: 'monospace',
+                              }}
+                            />
+                            <ReferenceLine
+                              y={ckt3Meta.thresholds.emergencyMax}
+                              stroke="#ef4444"
+                              strokeWidth={1.75}
+                              strokeDasharray="6 4"
+                              label={{
+                                value: `Critical Boundary (${ckt3Meta.thresholds.emergencyMax} MW)`,
+                                position: 'insideBottomRight',
+                                fill: '#fca5a5',
+                                fontSize: 10,
+                                fontFamily: 'monospace',
+                              }}
+                            />
+                            <ReferenceLine
+                              y={ckt3Meta.thresholds.criticalMax}
+                              stroke="#dc2626"
+                              strokeWidth={2}
+                              label={{
+                                value: `Overload Boundary (${ckt3Meta.thresholds.criticalMax} MW)`,
+                                position: 'insideTopRight',
+                                fill: '#fecaca',
+                                fontSize: 10,
+                                fontFamily: 'monospace',
+                              }}
+                            />
                             <XAxis
                               dataKey="time"
                               stroke="#64748b"
